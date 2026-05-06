@@ -1,0 +1,1148 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Andrea Cappelletti — Consulente Finanziario FinecoBank</title>
+  <meta name="description" content="Andrea Cappelletti, Consulente Finanziario Monomandatario FinecoBank. Analisi di portafoglio, gestione patrimoniale e strumenti quantitativi per investitori privati." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --blue:    #1a3a6b;
+      --blue2:   #2554a0;
+      --blue3:   #3a70cc;
+      --blue-lt: #e8f0fb;
+      --blue-md: #d0e0f5;
+      --fineco:  #f37021;
+      --white:   #ffffff;
+      --bg:      #ffffff;
+      --bg2:     #ffffff;
+      --text:    #1a2a4a;
+      --muted:   #5a7099;
+      --border:  #ccd9ee;
+      --radius:  12px;
+      --shadow:  0 4px 24px rgba(26,58,107,0.10);
+    }
+    html { scroll-behavior: smooth; font-size: 16px; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      overflow-x: hidden;
+    }
+    h1, h2, h3 { font-family: 'Playfair Display', serif; line-height: 1.2; }
+    a { color: inherit; text-decoration: none; }
+    img { max-width: 100%; display: block; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg2); }
+    ::-webkit-scrollbar-thumb { background: var(--blue-md); border-radius: 3px; }
+
+    /* ─── Navbar ────────────────────────────────────────────────── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 5%;
+      height: 64px;
+      background: rgba(255,255,255,0.96);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+      transition: box-shadow 0.3s;
+    }
+    .nav-brand {
+      display: flex; align-items: center; gap: 10px;
+      font-family: 'Playfair Display', serif;
+      font-size: 1.1rem;
+      color: var(--blue);
+    }
+    .fineco-badge {
+      font-family: 'Inter', sans-serif;
+      font-size: 0.62rem; font-weight: 700;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      color: var(--fineco);
+      background: rgba(243,112,33,0.1);
+      border: 1px solid rgba(243,112,33,0.3);
+      padding: 3px 8px; border-radius: 4px;
+    }
+    .nav-links { display: flex; gap: 2rem; list-style: none; }
+    .nav-links a {
+      font-size: 0.82rem; font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.04em; text-transform: uppercase;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--blue); }
+    .nav-cta {
+      padding: 9px 20px;
+      background: var(--blue);
+      color: var(--white);
+      border-radius: 7px;
+      font-size: 0.8rem; font-weight: 700;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      transition: background 0.2s, transform 0.15s;
+      display: inline-flex; align-items: center; gap: 7px;
+    }
+    .nav-cta:hover { background: var(--blue2); transform: translateY(-1px); }
+    .hamburger { display: none; cursor: pointer; color: var(--blue); font-size: 1.4rem; }
+
+    /* ─── Hero ──────────────────────────────────────────────────── */
+    #home {
+      min-height: 100vh;
+      display: flex; align-items: center;
+      padding: 64px 4% 0;
+      background: #ffffff;
+      position: relative; overflow: hidden;
+    }
+    #home::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none'%3E%3Cg fill='%231a3a6b' fill-opacity='0.04'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+    }
+    .hero-inner {
+      display: grid; grid-template-columns: 1fr auto;
+      gap: 2.5rem; align-items: center;
+      max-width: 1280px; margin: 0 auto; width: 100%;
+      position: relative;
+    }
+    /* ─── Qualifiche striscia orizzontale ───────────────────────── */
+    .hero-qualifiche {
+      display: flex; flex-direction: row;
+      gap: 0;
+      padding: 1.2rem 0 1.4rem;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .qual-item {
+      flex: 1;
+      display: flex; flex-direction: column; gap: 3px;
+      padding: 0 0.8rem;
+      background: transparent;
+      border: none;
+      border-left: 2px solid var(--blue2);
+      transition: border-left-color 0.2s;
+    }
+    .qual-item:hover { border-left-color: var(--blue3); }
+    .qual-header {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 0.67rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.07em;
+      color: var(--blue);
+    }
+    .qual-header i { font-size: 0.75rem; color: var(--blue2); flex-shrink: 0; }
+    .qual-text {
+      font-size: 0.74rem; color: #3a5070;
+      line-height: 1.38;
+    }
+    .qual-yt { border-left-color: #e00000 !important; }
+    .qual-yt .qual-header { color: #c00000; }
+    .qual-yt .qual-header i { color: #e00000; }
+    .hero-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 4px 12px;
+      border: 1.5px solid rgba(243,112,33,0.4);
+      border-radius: 20px;
+      font-size: 0.7rem; font-weight: 700;
+      letter-spacing: 0.07em; text-transform: uppercase;
+      color: var(--fineco);
+      background: rgba(243,112,33,0.07);
+      margin-bottom: 0.7rem;
+    }
+    .hero-title {
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      font-weight: 700; color: var(--blue);
+      margin-bottom: 0.2rem;
+    }
+    .hero-title span { color: var(--blue2); }
+    .hero-subtitle {
+      font-size: 0.88rem; color: var(--muted);
+      font-weight: 400; margin-bottom: 0.9rem;
+    }
+    .hero-desc {
+      font-size: 0.88rem; color: #3a5070;
+      max-width: 520px; margin-bottom: 1.1rem;
+      line-height: 1.55;
+    }
+    .hero-btns { display: flex; gap: 0.8rem; flex-wrap: wrap; }
+    .btn-primary {
+      padding: 10px 22px;
+      background: var(--blue); color: var(--white);
+      border-radius: 8px; font-weight: 700;
+      font-size: 0.85rem; letter-spacing: 0.02em;
+      border: none; cursor: pointer;
+      transition: background 0.2s, transform 0.15s;
+      display: inline-flex; align-items: center; gap: 7px;
+    }
+    .btn-primary:hover { background: var(--blue2); transform: translateY(-2px); }
+    .btn-outline {
+      padding: 9px 22px;
+      border: 1.5px solid var(--blue3);
+      color: var(--blue2); border-radius: 8px;
+      font-weight: 600; font-size: 0.85rem;
+      background: transparent;
+      transition: background 0.2s, transform 0.15s;
+      cursor: pointer; display: inline-flex; align-items: center; gap: 7px;
+    }
+    .btn-outline:hover { background: var(--blue-lt); transform: translateY(-2px); }
+    .hero-stats {
+      display: flex; gap: 2rem;
+      margin-top: 1.2rem; padding-top: 1.2rem;
+      border-top: 1px solid var(--border);
+    }
+    .stat-value {
+      font-family: 'Playfair Display', serif;
+      font-size: 1.7rem; font-weight: 700;
+      color: var(--blue); display: block;
+    }
+    .stat-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .hero-photo-frame {
+      width: 220px; height: 280px;
+      border-radius: 14px;
+      border: 2px solid var(--border);
+      overflow: hidden;
+      background: #ffffff;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: var(--shadow);
+    }
+    .hero-photo-frame img { width: 100%; height: 100%; object-fit: cover; }
+    .hero-photo-placeholder {
+      display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--muted);
+    }
+    .hero-photo-placeholder i { font-size: 3rem; color: var(--blue-md); }
+    .hero-photo-placeholder span { font-size: 0.7rem; text-align: center; padding: 0 16px; line-height: 1.5; }
+
+    /* ─── Sections ──────────────────────────────────────────────── */
+    section { padding: 90px 5%; border-top: 1px solid var(--border); }
+    .section-inner { max-width: 1200px; margin: 0 auto; }
+    .section-tag {
+      display: inline-block;
+      font-size: 0.72rem; font-weight: 700;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--blue2); margin-bottom: 0.8rem;
+    }
+    .section-title { font-size: clamp(1.8rem, 3.5vw, 2.6rem); color: var(--blue); margin-bottom: 1rem; }
+    .section-title span { color: var(--blue2); }
+    .section-lead { font-size: 1rem; color: var(--muted); max-width: 640px; margin-bottom: 3rem; }
+    .divider { width: 48px; height: 3px; background: var(--blue2); border-radius: 2px; margin: 1rem 0 2rem; }
+
+    /* ─── Chi Sono ──────────────────────────────────────────────── */
+    #chi-sono { background: var(--bg2); }
+    .about-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4rem; align-items: start; }
+    .about-text p { color: #3a5070; margin-bottom: 1.2rem; font-size: 0.97rem; }
+    .about-text p strong { color: var(--blue); font-weight: 600; }
+    .fineco-card {
+      display: flex; align-items: flex-start; gap: 1rem;
+      padding: 1.2rem 1.4rem;
+      background: rgba(243,112,33,0.06);
+      border: 1px solid rgba(243,112,33,0.22);
+      border-radius: var(--radius);
+      margin-bottom: 1.5rem;
+    }
+    .fineco-card i { font-size: 1.2rem; color: var(--fineco); margin-top: 2px; flex-shrink: 0; }
+    .fineco-card p { color: #4a6080; font-size: 0.88rem; margin: 0; }
+    .about-values { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+    .value-card {
+      padding: 1.4rem;
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 2px 10px rgba(26,58,107,0.06);
+      transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+    }
+    .value-card:hover { border-color: var(--blue3); transform: translateY(-3px); box-shadow: var(--shadow); }
+    .value-card i { font-size: 1.4rem; color: var(--blue2); margin-bottom: 0.8rem; display: block; }
+    .value-card h4 { font-size: 0.92rem; font-weight: 600; margin-bottom: 0.4rem; color: var(--blue); }
+    .value-card p { font-size: 0.82rem; color: var(--muted); margin: 0; }
+
+    /* ─── Esperienza ────────────────────────────────────────────── */
+    #esperienza { background: var(--bg); }
+    .timeline { position: relative; padding-left: 2rem; }
+    .timeline::before {
+      content: ''; position: absolute; left: 0; top: 8px; bottom: 8px;
+      width: 2px;
+      background: linear-gradient(to bottom, var(--blue2), rgba(26,58,107,0.1));
+    }
+    .timeline-item { position: relative; padding: 0 0 2.5rem 2rem; }
+    .timeline-item::before {
+      content: ''; position: absolute; left: -2rem; top: 8px;
+      transform: translateX(calc(-50% + 1px));
+      width: 12px; height: 12px;
+      background: var(--blue2); border-radius: 50%;
+      border: 3px solid var(--white);
+    }
+    .timeline-date { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--blue2); margin-bottom: 0.4rem; }
+    .timeline-role { font-size: 1.05rem; font-weight: 600; color: var(--blue); margin-bottom: 0.2rem; }
+    .timeline-company { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.7rem; }
+    .timeline-desc { font-size: 0.88rem; color: #4a6080; line-height: 1.6; }
+    .skills-grid { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 3rem; }
+    .skill-tag {
+      padding: 6px 14px;
+      background: var(--blue-lt);
+      border: 1px solid var(--blue-md);
+      border-radius: 20px;
+      font-size: 0.8rem; color: var(--blue2); font-weight: 500;
+    }
+
+    /* ─── Dashboard ─────────────────────────────────────────────── */
+    #dashboard { background: var(--bg2); }
+    .dash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; }
+    .dash-card {
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2rem;
+      display: flex; flex-direction: column; gap: 1rem;
+      box-shadow: 0 2px 10px rgba(26,58,107,0.06);
+      transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
+      position: relative; overflow: hidden;
+    }
+    .dash-card::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg, var(--blue), var(--blue3));
+      opacity: 0; transition: opacity 0.25s;
+    }
+    .dash-card:hover { border-color: var(--blue3); transform: translateY(-4px); box-shadow: var(--shadow); }
+    .dash-card:hover::before { opacity: 1; }
+    .dash-card-icon {
+      width: 48px; height: 48px;
+      background: var(--blue-lt);
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.3rem; color: var(--blue2);
+    }
+    .dash-card h3 { font-size: 1.05rem; font-weight: 600; color: var(--blue); }
+    .dash-card p { font-size: 0.85rem; color: var(--muted); flex: 1; }
+    .dash-card-footer { display: flex; align-items: center; justify-content: space-between; }
+    .dash-tag {
+      font-size: 0.7rem; padding: 4px 10px;
+      background: var(--blue-lt); border-radius: 10px;
+      color: var(--blue2); font-weight: 600;
+      letter-spacing: 0.05em; text-transform: uppercase;
+    }
+    .dash-link { display: flex; align-items: center; gap: 6px; font-size: 0.82rem; font-weight: 600; color: var(--blue2); transition: gap 0.2s; }
+    .dash-card:hover .dash-link { gap: 10px; }
+    .dash-link-disabled { font-size: 0.78rem; color: var(--muted); font-style: italic; }
+
+    /* ─── Prenota Call ───────────────────────────────────────────── */
+    #prenota { background: var(--bg); }
+    .booking-wrapper { display: grid; grid-template-columns: 1fr 1.4fr; gap: 3.5rem; align-items: start; }
+    .booking-info p { font-size: 0.95rem; color: #3a5070; margin-bottom: 1.2rem; }
+    .booking-bullets { list-style: none; display: flex; flex-direction: column; gap: 1rem; margin-bottom: 2rem; }
+    .booking-bullets li { display: flex; align-items: flex-start; gap: 12px; font-size: 0.88rem; color: #3a5070; }
+    .booking-bullets li i { color: var(--blue2); margin-top: 2px; font-size: 0.9rem; flex-shrink: 0; }
+    .booking-types { display: flex; flex-direction: column; gap: 0.8rem; margin-bottom: 2rem; }
+    .booking-type {
+      display: flex; align-items: center; gap: 12px;
+      padding: 1rem 1.2rem;
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 2px 8px rgba(26,58,107,0.05);
+      transition: border-color 0.2s;
+    }
+    .booking-type:hover { border-color: var(--blue3); }
+    .booking-type-icon {
+      width: 38px; height: 38px;
+      background: var(--blue-lt); border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1rem; color: var(--blue2); flex-shrink: 0;
+    }
+    .booking-type-label { font-size: 0.85rem; font-weight: 600; color: var(--blue); }
+    .booking-type-sub { font-size: 0.75rem; color: var(--muted); }
+    .calendly-container {
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden; min-height: 680px;
+      display: flex; align-items: stretch;
+      box-shadow: var(--shadow);
+    }
+    .calendly-placeholder {
+      width: 100%; min-height: 680px;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 1.2rem; padding: 3rem; text-align: center;
+    }
+    .calendly-placeholder i { font-size: 3rem; color: var(--blue-md); }
+    .calendly-placeholder h3 { font-size: 1.2rem; color: var(--blue); }
+    .calendly-placeholder p { font-size: 0.88rem; color: var(--muted); max-width: 340px; }
+    .calendly-setup-steps {
+      text-align: left; width: 100%; max-width: 400px;
+      background: var(--bg2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.2rem 1.4rem;
+    }
+    .calendly-setup-steps h4 { font-size: 0.82rem; font-weight: 700; color: var(--blue2); margin-bottom: 0.8rem; letter-spacing: 0.05em; text-transform: uppercase; }
+    .calendly-setup-steps ol { padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.5rem; }
+    .calendly-setup-steps li { font-size: 0.82rem; color: #4a6080; }
+    .calendly-setup-steps code { background: var(--blue-lt); color: var(--blue2); padding: 1px 5px; border-radius: 4px; font-size: 0.78rem; }
+
+    /* ─── Contatti ──────────────────────────────────────────────── */
+    #contatti { background: var(--bg2); }
+    .contact-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4rem; align-items: start; }
+    .contact-info { display: flex; flex-direction: column; gap: 1.2rem; }
+    .contact-item {
+      display: flex; align-items: flex-start; gap: 1.2rem;
+      padding: 1.2rem 1.4rem;
+      background: var(--white); border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 2px 8px rgba(26,58,107,0.05);
+      transition: border-color 0.2s;
+    }
+    .contact-item:hover { border-color: var(--blue3); }
+    .contact-icon {
+      width: 44px; height: 44px; background: var(--blue-lt);
+      border-radius: 10px; display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem; color: var(--blue2); flex-shrink: 0;
+    }
+    .contact-label { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.2rem; }
+    .contact-value { font-size: 0.95rem; color: var(--blue); font-weight: 500; }
+    .contact-value a { color: var(--blue2); }
+    .contact-value a:hover { text-decoration: underline; }
+    .contact-form { display: flex; flex-direction: column; gap: 1rem; }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .form-group label { font-size: 0.8rem; font-weight: 600; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
+    .form-group input, .form-group textarea, .form-group select {
+      padding: 12px 16px;
+      background: var(--white); border: 1.5px solid var(--border);
+      border-radius: 8px; color: var(--text);
+      font-size: 0.9rem; font-family: 'Inter', sans-serif;
+      transition: border-color 0.2s; outline: none;
+    }
+    .form-group input:focus, .form-group textarea:focus, .form-group select:focus { border-color: var(--blue2); }
+    .form-group textarea { min-height: 120px; resize: vertical; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .form-submit {
+      padding: 14px 32px; background: var(--blue); color: var(--white);
+      border: none; border-radius: 8px; font-weight: 700; font-size: 0.9rem;
+      cursor: pointer; transition: background 0.2s, transform 0.15s;
+      display: flex; align-items: center; gap: 8px; justify-content: center;
+    }
+    .form-submit:hover { background: var(--blue2); transform: translateY(-2px); }
+
+    /* ─── Footer ────────────────────────────────────────────────── */
+    footer {
+      background: var(--blue);
+      padding: 2.5rem 5%;
+    }
+    .footer-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 1rem;
+    }
+    .footer-brand { font-family: 'Playfair Display', serif; font-size: 1rem; color: #e8f0fb; }
+    .footer-copy { font-size: 0.78rem; color: rgba(232,240,251,0.6); }
+    .footer-social { display: flex; gap: 1rem; }
+    .footer-social a {
+      width: 36px; height: 36px;
+      border: 1px solid rgba(255,255,255,0.2); border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      color: rgba(255,255,255,0.6); font-size: 0.9rem;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .footer-social a:hover { color: var(--white); border-color: var(--white); }
+    .footer-disclaimer { max-width: 1200px; margin: 1rem auto 0; font-size: 0.72rem; color: rgba(232,240,251,0.45); line-height: 1.5; }
+
+    /* ─── Mobile menu ───────────────────────────────────────────── */
+    .mobile-menu {
+      display: none; position: fixed;
+      top: 64px; left: 0; right: 0;
+      background: rgba(255,255,255,0.98);
+      backdrop-filter: blur(14px);
+      padding: 1.5rem 5%; flex-direction: column; gap: 1.2rem;
+      z-index: 99; border-bottom: 1px solid var(--border);
+    }
+    .mobile-menu.open { display: flex; }
+    .mobile-menu a {
+      font-size: 1rem; font-weight: 600; color: var(--muted);
+      padding: 0.5rem 0; border-bottom: 1px solid var(--border); transition: color 0.2s;
+    }
+    .mobile-menu a:hover { color: var(--blue); }
+
+    /* ─── Responsive ────────────────────────────────────────────── */
+    @media (max-width: 1000px) { .booking-wrapper { grid-template-columns: 1fr; } }
+    @media (max-width: 900px) {
+      .hero-top { grid-template-columns: 1fr; }
+      .hero-photo-frame { display: none; }
+      .hero-qualifiche { display: none; }
+      .about-grid, .contact-grid { grid-template-columns: 1fr; gap: 2.5rem; }
+      .about-values { grid-template-columns: 1fr; }
+      .nav-links { display: none; }
+      .nav-cta { display: none; }
+      .hamburger { display: block; }
+    }
+    @media (max-width: 600px) {
+      section { padding: 60px 4%; }
+      .hero-stats { flex-direction: column; gap: 1.2rem; }
+      .form-row { grid-template-columns: 1fr; }
+      .footer-inner { flex-direction: column; text-align: center; }
+    }
+
+    /* ─── Hero info boxes ───────────────────────────────────────── */
+    .hero-boxes {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 0.6rem; margin: 0.9rem 0;
+    }
+    .hero-box {
+      padding: 0.75rem 0.9rem;
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--blue2);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.65);
+      backdrop-filter: blur(4px);
+      transition: border-left-color 0.2s, transform 0.15s;
+    }
+    .hero-box:hover { border-left-color: var(--blue3); transform: translateX(2px); }
+    .hero-box-title {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 0.67rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.07em;
+      color: var(--blue); margin-bottom: 0.35rem;
+    }
+    .hero-box-title i { color: var(--blue2); font-size: 0.75rem; }
+    .hero-box-text { font-size: 0.75rem; color: #3a5070; line-height: 1.45; }
+
+    /* ─── Fade-in ────────────────────────────────────────────────── */
+    .fade-in { opacity: 0; transform: translateY(20px); transition: opacity 0.6s ease, transform 0.6s ease; }
+    .fade-in.visible { opacity: 1; transform: translateY(0); }
+  </style>
+</head>
+<body>
+
+  <!-- Navbar -->
+  <nav id="navbar">
+    <div class="nav-brand">
+      A·C <span class="fineco-badge">FinecoBank</span>
+    </div>
+    <ul class="nav-links">
+      <li><a href="#home">Home</a></li>
+      <li><a href="#chi-sono">Chi Sono</a></li>
+      <li><a href="#esperienza">Esperienza</a></li>
+      <li><a href="#dashboard">Strumenti</a></li>
+      <li><a href="#prenota">Prenota Call</a></li>
+      <li><a href="#contatti">Contatti</a></li>
+    </ul>
+    <a href="#prenota" class="nav-cta"><i class="fa-regular fa-calendar"></i> Prenota call</a>
+    <span class="hamburger" id="hamburger-btn"><i class="fa-solid fa-bars"></i></span>
+  </nav>
+  <div class="mobile-menu" id="mobile-menu">
+    <a href="#home"       onclick="closeMobileMenu()">Home</a>
+    <a href="#chi-sono"   onclick="closeMobileMenu()">Chi Sono</a>
+    <a href="#esperienza" onclick="closeMobileMenu()">Esperienza</a>
+    <a href="#dashboard"  onclick="closeMobileMenu()">Strumenti</a>
+    <a href="#prenota"    onclick="closeMobileMenu()">Prenota Call</a>
+    <a href="#contatti"   onclick="closeMobileMenu()">Contatti</a>
+  </div>
+
+  <!-- Hero -->
+  <section id="home">
+    <div class="hero-inner">
+      <div>
+        <p style="font-family:'Playfair Display',serif; font-size:clamp(2.2rem,4.5vw,3.8rem); font-weight:700; color:var(--blue); margin-bottom:0; line-height:1.1; letter-spacing:0.02em;">ANDREA CAPPELLETTI <span style="font-size:clamp(1rem,2vw,1.5rem); color:var(--blue2); font-weight:600;">— Private Banker</span></p>
+        <div class="hero-badge">
+          <i class="fa-solid fa-circle" style="font-size:0.5rem;"></i>
+          Consulente Finanziario Monomandatario · FinecoBank
+        </div>
+        <h1 class="hero-title" style="font-size:clamp(1.1rem,2vw,1.6rem);">
+          Questo è un portale di accesso al mondo della <span>CONSULENZA FINANZIARIA</span>
+        </h1>
+
+        <div class="hero-boxes">
+
+          <div class="hero-box">
+            <div class="hero-box-title"><i class="fa-solid fa-users"></i>Quale tipo di clienti seguo</div>
+            <div class="hero-box-text">Sono disponibile a seguire ogni tipologia di cliente: ordinari &lt;100.000€, affluent &lt;500.000€, private &lt;2.500.000€. Sono specializzato in High Net Worth Investors &gt;2.500.000€, Clienti Istituzionali e Fondazioni Bancarie. Per clienti oltre i 25.000.000€ sono possibili strutturazioni personalizzabili.</div>
+          </div>
+
+          <div class="hero-box">
+            <div class="hero-box-title"><i class="fa-solid fa-briefcase"></i>Quali strumenti uso per il servizio</div>
+            <div class="hero-box-text">Offro servizi ESCLUSIVAMENTE IN CONSULENZA EVOLUTA, di tipo FEE ONLY E FEE ON TOP utilizzando prevalentemente ETF ed AMMINISTRATO (azioni, obbligazioni) e strumenti senza costi di gestione o con restituzione delle commissioni. Per clienti meno sofisticati o per necessità uso FONDI DI ETF ribilanciati a profilo di rischio ed efficientati fiscalmente, prodotti assicurativi per passaggi generazionali importanti ed esigenze specifiche come clienti anziani e imprenditori.</div>
+          </div>
+
+          <div class="hero-box">
+            <div class="hero-box-title"><i class="fa-solid fa-chart-mixed"></i>Dashboard quantitative per i miei clienti</div>
+            <div class="hero-box-text">Gestisco il mio capitale proprio in maniera quantitativa ed ho sviluppato dashboard professionali che semplificate, metto a disposizione dei miei clienti per analisi di portafoglio avanzate autonome.</div>
+          </div>
+
+          <div class="hero-box">
+            <div class="hero-box-title"><i class="fa-solid fa-scale-balanced"></i>Commissioni eque per livelli alti di servizio</div>
+            <div class="hero-box-text">Trasparenza, correttezza, costi equi i miei valori. 1% di commissioni su servizi di Consulenza FEE ONLY e FEE ON TOP (rendicontazione dell'intermediario 0,55% e mio servizio 0,45%). Fondi di ETF e Polizze soggette a costi impliciti tra i più bassi del settore.</div>
+          </div>
+
+        </div>
+        <div class="hero-btns">
+          <a href="#prenota"   class="btn-primary"><i class="fa-regular fa-calendar-check"></i> Prenota una call gratuita</a>
+          <a href="#dashboard" class="btn-outline"><i class="fa-solid fa-chart-mixed"></i> Esplora gli strumenti</a>
+        </div>
+        <div class="hero-stats">
+          <div class="stat-item">
+            <span class="stat-value">30+</span>
+            <span class="stat-label">Anni di esperienza</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value">100%</span>
+            <span class="stat-label">Indipendente</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value">OCF</span>
+            <span class="stat-label">Iscritto all'albo</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="hero-photo-frame">
+          <img src="foto.png" alt="Andrea Cappelletti" />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Chi Sono -->
+  <section id="chi-sono">
+    <div class="section-inner">
+      <div class="about-grid">
+        <div class="fade-in">
+          <span class="section-tag">Chi Sono</span>
+          <h2 class="section-title">Una guida <span>concreta</span><br>per il tuo patrimonio</h2>
+          <div class="divider"></div>
+          <div class="about-text">
+            <!-- ✏️ Personalizza il testo -->
+            <p>Sono <strong>Andrea Cappelletti</strong>, Consulente Finanziario Monomandatario iscritto all'Albo OCF, operativo per <strong>FinecoBank</strong>. Lavoro con famiglie, professionisti e imprenditori per costruire soluzioni patrimoniali su misura, solide nel tempo e misurabili nei risultati.</p>
+            <p>La mia filosofia è semplice: <strong>ogni scelta di investimento deve essere comprensibile, misurabile e coerente</strong> con i tuoi obiettivi di vita. Niente prodotti opachi, niente commissioni nascoste — solo trasparenza e metodo.</p>
+            <p>Ho sviluppato strumenti di analisi quantitativa proprietari — Information Ratio, frontiera efficiente, analisi del rischio rolling — che utilizzo per monitorare e ottimizzare continuamente i portafogli dei miei clienti.</p>
+          </div>
+          <div class="fineco-card">
+            <i class="fa-solid fa-building-columns"></i>
+            <p>Come consulente <strong>FinecoBank</strong> ho accesso a una piattaforma all-in-one con oltre 20.000 strumenti finanziari, conto corrente integrato, trading e investimenti — tutto in un unico rapporto trasparente.</p>
+          </div>
+        </div>
+        <div class="about-values fade-in">
+          <div class="value-card">
+            <i class="fa-solid fa-chart-line"></i>
+            <h4>Analisi Quantitativa</h4>
+            <p>Modelli statistici avanzati per valutare performance, rischio e opportunità di mercato in modo oggettivo.</p>
+          </div>
+          <div class="value-card">
+            <i class="fa-solid fa-shield-halved"></i>
+            <h4>Gestione del Rischio</h4>
+            <p>Drawdown, VaR, volatilità rolling: ogni portafoglio è monitorato con metriche precise e aggiornate.</p>
+          </div>
+          <div class="value-card">
+            <i class="fa-solid fa-scale-balanced"></i>
+            <h4>Portafoglio Ottimale</h4>
+            <p>Frontiera efficiente e Sharpe Ratio per massimizzare il rendimento aggiustato per il rischio.</p>
+          </div>
+          <div class="value-card">
+            <i class="fa-solid fa-handshake"></i>
+            <h4>Consulenza Trasparente</h4>
+            <p>Monomandatario FinecoBank: struttura fee-only chiara, nessun conflitto di interesse nascosto.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Esperienza -->
+  <section id="esperienza">
+    <div class="section-inner">
+      <span class="section-tag">Esperienza</span>
+      <h2 class="section-title">Percorso <span>professionale</span></h2>
+      <div class="divider"></div>
+
+      <!-- Striscia qualifiche -->
+      <div class="hero-qualifiche fade-in" style="margin-bottom:2rem;">
+
+        <div class="qual-item">
+          <div class="qual-header"><i class="fa-solid fa-graduation-cap"></i>Formazione</div>
+          <div class="qual-text">Laurea in Economia · Spec. Economico-Quantitativa</div>
+        </div>
+
+        <div class="qual-item">
+          <div class="qual-header"><i class="fa-solid fa-briefcase"></i>Esperienza</div>
+          <div class="qual-text">30 anni nel Private Banking</div>
+        </div>
+
+        <div class="qual-item">
+          <div class="qual-header"><i class="fa-solid fa-building-columns"></i>Mandato</div>
+          <div class="qual-text">Monomandatario FinecoBank</div>
+        </div>
+
+        <div class="qual-item">
+          <div class="qual-header"><i class="fa-solid fa-star"></i>Valori</div>
+          <div class="qual-text">Trasparenza · Coerenza · Correttezza · Costi equi</div>
+        </div>
+
+        <div class="qual-item qual-yt">
+          <div class="qual-header"><i class="fa-brands fa-youtube"></i>YouTube</div>
+          <div class="qual-text">«IO FACCIO CONSULENZA FINANZIARIA»</div>
+        </div>
+
+        <div class="qual-item">
+          <div class="qual-header"><i class="fa-solid fa-chart-column"></i>Trading</div>
+          <div class="qual-text">Operatività diretta con capitale proprio</div>
+        </div>
+
+        <div class="qual-item">
+          <div class="qual-header"><i class="fa-solid fa-code"></i>Competenze</div>
+          <div class="qual-text">Econometria · Statistica · Python · JavaScript</div>
+        </div>
+
+      </div>
+
+      <div class="timeline fade-in">
+
+        <div class="timeline-item">
+          <div class="timeline-date">2008 — Presente</div>
+          <div class="timeline-role">Consulente Finanziario Monomandatario</div>
+          <div class="timeline-company">FinecoBank S.p.A. · Italia</div>
+          <div class="timeline-desc">Private Banker · Servizi di Consulenza di tipo FEE ONLY e FEE ON TOP. Pianificazione finanziaria e gestione patrimoniale per clienti privati, famiglie e imprenditori. Sviluppo di modelli quantitativi proprietari per l'analisi di portafoglio, ottimizzazione della frontiera efficiente e misurazione del rischio.</div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">1996 — 2008</div>
+          <div class="timeline-role">Consulente Finanziario · Borsino titoli · Desk Azionario ed Obbligazionario</div>
+          <div class="timeline-company">Unicredit SIM · Unicredit Xelion SIM · Xelion Banca · Unicredit</div>
+          <div class="timeline-desc"></div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">1996</div>
+          <div class="timeline-role">Consulente Finanziario · Borsino titoli · Desk Azionario ed Obbligazionario</div>
+          <div class="timeline-company">Credit Consult SIM</div>
+          <div class="timeline-desc"></div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">1994</div>
+          <div class="timeline-role">Consulente Finanziario · Borsino titoli · Desk Azionario ed Obbligazionario</div>
+          <div class="timeline-company">Banco di Napoli · Fumagalli e Soldan</div>
+          <div class="timeline-desc"></div>
+        </div>
+
+      </div>
+
+      <div class="skills-grid fade-in">
+        <span class="skill-tag">FinecoBank</span>
+        <span class="skill-tag">Information Ratio</span>
+        <span class="skill-tag">Sharpe Ratio</span>
+        <span class="skill-tag">Frontiera Efficiente</span>
+        <span class="skill-tag">Tracking Error Volatility</span>
+        <span class="skill-tag">Drawdown Analysis</span>
+        <span class="skill-tag">VaR / CVaR</span>
+        <span class="skill-tag">Portfolio Optimization</span>
+        <span class="skill-tag">Analisi Tecnica</span>
+        <span class="skill-tag">Analisi Fondamentale</span>
+        <span class="skill-tag">Asset Allocation</span>
+        <span class="skill-tag">Risk Management</span>
+        <span class="skill-tag">ETF · Fondi · Obbligazioni</span>
+        <span class="skill-tag">Pianificazione Previdenziale</span>
+        <span class="skill-tag">Python · Pandas</span>
+        <span class="skill-tag">Iscritto OCF</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Dashboard -->
+  <section id="dashboard">
+    <div class="section-inner">
+      <span class="section-tag">Strumenti Analitici</span>
+      <h2 class="section-title">Dashboard <span>quantitative</span></h2>
+      <div class="divider"></div>
+      <p class="section-lead">Strumenti proprietari sviluppati per l'analisi professionale di portafoglio. Accedi per costruire e valutare le tue strategie con metodologie da asset manager.</p>
+      <div class="dash-grid">
+        <div class="dash-card fade-in">
+          <div class="dash-card-icon"><i class="fa-solid fa-chart-mixed"></i></div>
+          <h3>Analisi di Portafoglio</h3>
+          <p>Costruisci fino a 3 portafogli personalizzati, confrontali con un benchmark e analizza Information Ratio, Sharpe, Drawdown e Volatilità rolling su oltre 58 ETF selezionati.</p>
+          <div class="dash-card-footer">
+            <span class="dash-tag">Portafoglio</span>
+            <a href="/portafoglio/" class="dash-link">Apri <i class="fa-solid fa-arrow-right"></i></a>
+          </div>
+        </div>
+        <!-- Frontiera Efficiente — temporaneamente nascosta (in sviluppo)
+        <div class="dash-card fade-in">
+          <div class="dash-card-icon"><i class="fa-solid fa-wave-square"></i></div>
+          <h3>Frontiera Efficiente</h3>
+          <p>Ottimizzazione alla Markowitz: frontiera efficiente, portafoglio a minima varianza, massimo Sharpe e mappa della correlazione tra asset.</p>
+          <div class="dash-card-footer">
+            <span class="dash-tag">Ottimizzazione</span>
+            <a href="https://analisi-portafoglio.onrender.com/frontiera-efficiente/" target="_blank" class="dash-link">Apri <i class="fa-solid fa-arrow-right"></i></a>
+          </div>
+        </div>
+        -->
+        <div class="dash-card fade-in">
+          <div class="dash-card-icon"><i class="fa-solid fa-shield-virus"></i></div>
+          <h3>Risk Dashboard — VaR &amp; CVaR</h3>
+          <p>Calcolo rolling di Value at Risk al 90% e 95% ed Expected Shortfall. Configurabile su qualsiasi finestra temporale e combinazione di asset.</p>
+          <div class="dash-card-footer">
+            <span class="dash-tag">Risk Management</span>
+            <span class="dash-link-disabled"><i class="fa-solid fa-clock"></i> Prossimamente</span>
+          </div>
+        </div>
+        <div class="dash-card fade-in">
+          <div class="dash-card-icon"><i class="fa-solid fa-landmark"></i></div>
+          <h3>Monitor Macro FED / BCE</h3>
+          <p>Indicatori macroeconomici USA in tempo reale: tassi FED, PIL, inflazione, mercato del lavoro. Dati aggiornati via FRED API.</p>
+          <div class="dash-card-footer">
+            <span class="dash-tag">Macro</span>
+            <span class="dash-link-disabled"><i class="fa-solid fa-clock"></i> Prossimamente</span>
+          </div>
+        </div>
+        <div class="dash-card fade-in">
+          <div class="dash-card-icon"><i class="fa-solid fa-money-bill-trend-up"></i></div>
+          <h3>Analisi Tassi &amp; Valute</h3>
+          <p>Analisi comparativa dei tassi di interesse globali e dei principali cross valutari. Medie mobili, momentum e segnali di trend.</p>
+          <div class="dash-card-footer">
+            <span class="dash-tag">Tassi · FX</span>
+            <span class="dash-link-disabled"><i class="fa-solid fa-clock"></i> Prossimamente</span>
+          </div>
+        </div>
+        <div class="dash-card fade-in">
+          <div class="dash-card-icon"><i class="fa-solid fa-magnifying-glass-chart"></i></div>
+          <h3>Style Analysis</h3>
+          <p>Analisi fattoriale dello stile di gestione di un fondo tramite regressione rolling sui principali fattori di rischio (value, growth, size, momentum).</p>
+          <div class="dash-card-footer">
+            <span class="dash-tag">Fattoriale</span>
+            <span class="dash-link-disabled"><i class="fa-solid fa-clock"></i> Prossimamente</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Prenota Call -->
+  <section id="prenota">
+    <div class="section-inner">
+      <span class="section-tag">Agenda Online</span>
+      <h2 class="section-title">Prenota una <span>call gratuita</span></h2>
+      <div class="divider"></div>
+      <div class="booking-wrapper">
+
+        <!-- SINISTRA: Info call -->
+        <div class="fade-in">
+          <p>Prenota direttamente una call conoscitiva o una sessione di analisi del portafoglio. Scegli il giorno e l'orario — senza impegno, senza costi.</p>
+          <ul class="booking-bullets">
+            <li><i class="fa-solid fa-check"></i> Prima consulenza sempre gratuita</li>
+            <li><i class="fa-solid fa-check"></i> Disponibile in videocall (Zoom, Teams, Meet)</li>
+            <li><i class="fa-solid fa-check"></i> Conferma immediata via email</li>
+            <li><i class="fa-solid fa-check"></i> Nessun obbligo dopo la call</li>
+          </ul>
+          <div class="booking-types">
+            <div class="booking-type">
+              <div class="booking-type-icon"><i class="fa-solid fa-comments"></i></div>
+              <div>
+                <div class="booking-type-label">Call Conoscitiva</div>
+                <div class="booking-type-sub">30 minuti · Gratuita · Capire i tuoi obiettivi</div>
+              </div>
+            </div>
+            <div class="booking-type">
+              <div class="booking-type-icon"><i class="fa-solid fa-chart-pie"></i></div>
+              <div>
+                <div class="booking-type-label">Analisi Portafoglio</div>
+                <div class="booking-type-sub">60 minuti · Gratuita · Revisione del tuo portafoglio</div>
+              </div>
+            </div>
+            <div class="booking-type">
+              <div class="booking-type-icon"><i class="fa-solid fa-map"></i></div>
+              <div>
+                <div class="booking-type-label">Pianificazione Finanziaria</div>
+                <div class="booking-type-sub">60 minuti · Obiettivi di lungo periodo</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DESTRA: Agenda Calendly (caricata solo con consenso cookie) -->
+        <div class="calendly-container fade-in">
+          <div class="calendly-placeholder" id="calendly-placeholder">
+            <i class="fa-regular fa-calendar-check"></i>
+            <h3>Prenota un appuntamento</h3>
+            <p>Per visualizzare il calendario accetta i cookie di terze parti.</p>
+            <button onclick="setCookieConsent('all')" style="
+              padding:10px 24px; background:var(--blue); color:#fff;
+              border:none; border-radius:8px; font-weight:700; font-size:0.88rem;
+              cursor:pointer; font-family:'Inter',sans-serif;">
+              <i class="fa-solid fa-check" style="margin-right:6px;"></i>Accetta e carica il calendario
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- Contatti -->
+  <section id="contatti">
+    <div class="section-inner">
+      <span class="section-tag">Contatti</span>
+      <h2 class="section-title">Scrivimi <span>direttamente</span></h2>
+      <div class="divider"></div>
+      <div class="contact-grid">
+        <div class="contact-info fade-in">
+          <div class="contact-item">
+            <div class="contact-icon"><i class="fa-solid fa-envelope"></i></div>
+            <div>
+              <div class="contact-label">Email</div>
+              <div class="contact-value"><a href="mailto:andcappe@gmail.com">andcappe@gmail.com</a></div>
+            </div>
+          </div>
+          <div class="contact-item">
+            <div class="contact-icon"><i class="fa-solid fa-phone"></i></div>
+            <div>
+              <div class="contact-label">Telefono / WhatsApp</div>
+              <!-- ✏️ Sostituisci con il tuo numero -->
+              <div class="contact-value">+39 393 22 89 872</div>
+            </div>
+          </div>
+          <div class="contact-item">
+            <div class="contact-icon"><i class="fa-solid fa-location-dot"></i></div>
+            <div>
+              <div class="contact-label">Area operativa</div>
+              <!-- ✏️ Sostituisci con la tua città -->
+              <div class="contact-value">Roma, Italia — consulenza anche da remoto</div>
+            </div>
+          </div>
+          <div class="contact-item">
+            <div class="contact-icon"><i class="fa-brands fa-linkedin"></i></div>
+            <div>
+              <div class="contact-label">LinkedIn</div>
+              <!-- ✏️ Sostituisci con il tuo profilo -->
+              <div class="contact-value"><a href="https://linkedin.com/in/andrea-cappelletti" target="_blank">linkedin.com/in/andrea-cappelletti</a></div>
+            </div>
+          </div>
+          <div class="contact-item">
+            <div class="contact-icon" style="background:rgba(243,112,33,0.1);"><i class="fa-solid fa-building-columns" style="color:var(--fineco);"></i></div>
+            <div>
+              <div class="contact-label">Rete</div>
+              <div class="contact-value">FinecoBank S.p.A. — Consulente Monomandatario</div>
+            </div>
+          </div>
+        </div>
+        <form class="contact-form fade-in" id="contact-form" onsubmit="handleFormSubmit(event)">
+          <input type="hidden" name="access_key" value="5b0e2c63-def0-49d2-b639-1e2bbdebf016" />
+          <input type="hidden" name="subject" value="Nuovo messaggio dal sito — Andrea Cappelletti" />
+          <input type="hidden" name="from_name" value="Sito Andrea Cappelletti" />
+          <input type="checkbox" name="botcheck" style="display:none;" tabindex="-1" autocomplete="off" />
+          <div class="form-row">
+            <div class="form-group">
+              <label>Nome</label>
+              <input type="text" name="nome" placeholder="Mario" required />
+            </div>
+            <div class="form-group">
+              <label>Cognome</label>
+              <input type="text" name="cognome" placeholder="Rossi" required />
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Email</label>
+            <input type="email" name="email" placeholder="mario.rossi@esempio.it" required />
+          </div>
+          <div class="form-group">
+            <label>Telefono (opzionale)</label>
+            <input type="tel" name="telefono" placeholder="+39 ..." />
+          </div>
+          <div class="form-group">
+            <label>Argomento</label>
+            <select name="argomento">
+              <option value="">Seleziona un argomento...</option>
+              <option>Prima consulenza gratuita</option>
+              <option>Analisi del mio portafoglio</option>
+              <option>Pianificazione finanziaria / previdenziale</option>
+              <option>Gestione patrimoniale FinecoBank</option>
+              <option>Accesso agli strumenti di analisi</option>
+              <option>Altro</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Messaggio</label>
+            <textarea name="messaggio" placeholder="Descrivimi brevemente la tua situazione o la tua richiesta..."></textarea>
+          </div>
+          <button type="submit" class="form-submit" id="form-btn">
+            <i class="fa-solid fa-paper-plane"></i> Invia messaggio
+          </button>
+          <div id="form-feedback" style="font-size:0.85rem;margin-top:0.5rem;display:none;"></div>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- Cookie Banner -->
+  <div id="cookie-banner" style="
+    display:none; position:fixed; bottom:0; left:0; right:0; z-index:9999;
+    background:#fff; border-top:2px solid var(--blue-md);
+    box-shadow:0 -4px 24px rgba(26,58,107,0.13);
+    padding:1.2rem 5%; font-family:'Inter',sans-serif;
+  ">
+    <div style="max-width:1200px; margin:0 auto; display:flex; align-items:flex-start;
+                gap:2rem; flex-wrap:wrap; justify-content:space-between;">
+      <div style="flex:1; min-width:260px;">
+        <p style="font-size:0.88rem; color:var(--text); margin-bottom:0.4rem; font-weight:600;">
+          <i class="fa-solid fa-cookie-bite" style="color:var(--blue2); margin-right:6px;"></i>
+          Questo sito utilizza i cookie
+        </p>
+        <p style="font-size:0.8rem; color:var(--muted); margin:0; line-height:1.55;">
+          Utilizziamo cookie tecnici necessari al funzionamento del sito e cookie di terze parti
+          (Calendly, Google Fonts) per migliorare l'esperienza. Puoi accettare tutti i cookie o
+          limitarti a quelli strettamente necessari. Puoi modificare la scelta in qualsiasi momento
+          cliccando su <strong>Gestisci preferenze</strong> nel footer.
+          <a href="#" id="cookie-more-link" style="color:var(--blue2); text-decoration:underline;
+             font-size:0.78rem; margin-left:4px;">Leggi di più</a>
+        </p>
+        <div id="cookie-detail" style="display:none; margin-top:0.7rem;
+             background:var(--bg2); border:1px solid var(--border); border-radius:8px;
+             padding:0.8rem 1rem; font-size:0.78rem; color:#4a6080; line-height:1.6;">
+          <strong style="color:var(--blue); display:block; margin-bottom:0.4rem;">Tipologie di cookie utilizzati:</strong>
+          <ul style="padding-left:1.2rem; margin:0; display:flex; flex-direction:column; gap:0.25rem;">
+            <li><strong>Tecnici / necessari</strong> — Indispensabili per la navigazione. Non richiedono consenso.</li>
+            <li><strong>Google Fonts</strong> — Font caricati da Google. Possono registrare l'IP del visitatore.</li>
+            <li><strong>Calendly</strong> — Widget per la prenotazione di appuntamenti. Imposta cookie propri per la gestione del calendario.</li>
+            <li><strong>Web3Forms</strong> — Servizio per l'invio del modulo di contatto. Non imposta cookie di tracciamento.</li>
+          </ul>
+          <p style="margin-top:0.5rem; margin-bottom:0;">
+            Base giuridica: consenso dell'utente (art. 6 §1 lit. a GDPR). Titolare del trattamento:
+            Andrea Cappelletti — <a href="mailto:andcappe@gmail.com" style="color:var(--blue2);">andcappe@gmail.com</a>.
+            Puoi revocare il consenso in qualsiasi momento.
+          </p>
+        </div>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:0.6rem; min-width:180px; align-items:stretch;">
+        <button onclick="setCookieConsent('all')" style="
+          padding:10px 20px; background:var(--blue); color:#fff;
+          border:none; border-radius:8px; font-weight:700; font-size:0.85rem;
+          cursor:pointer; font-family:'Inter',sans-serif; transition:background 0.2s;">
+          <i class="fa-solid fa-check" style="margin-right:6px;"></i>Accetta tutti
+        </button>
+        <button onclick="setCookieConsent('necessary')" style="
+          padding:10px 20px; background:#fff; color:var(--blue);
+          border:1.5px solid var(--blue3); border-radius:8px; font-weight:600;
+          font-size:0.85rem; cursor:pointer; font-family:'Inter',sans-serif; transition:background 0.2s;">
+          Solo necessari
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <div class="footer-inner">
+      <span class="footer-brand">Andrea Cappelletti — Consulente Finanziario FinecoBank</span>
+      <span class="footer-copy">&copy; <span id="year"></span> · Tutti i diritti riservati</span>
+      <div class="footer-social">
+        <a href="https://linkedin.com/in/andrea-cappelletti" target="_blank" title="LinkedIn"><i class="fa-brands fa-linkedin-in"></i></a>
+        <a href="mailto:andcappe@gmail.com" title="Email"><i class="fa-solid fa-envelope"></i></a>
+      </div>
+    </div>
+    <p class="footer-disclaimer">
+      Andrea Cappelletti è iscritto all'Albo unico dei Consulenti Finanziari (OCF) nella sezione Consulenti Finanziari abilitati all'offerta fuori sede. Monomandatario FinecoBank S.p.A. — Le informazioni presenti in questo sito hanno scopo esclusivamente informativo e non costituiscono offerta di servizi di investimento né sollecitazione al pubblico risparmio.
+    </p>
+    <p style="font-size:0.72rem; color:rgba(232,240,251,0.45); margin-top:0.5rem; max-width:1200px; margin-left:auto; margin-right:auto;">
+      <a href="#" onclick="resetCookieConsent(); return false;"
+         style="color:rgba(232,240,251,0.6); text-decoration:underline; cursor:pointer;">
+        Gestisci preferenze cookie
+      </a>
+      &nbsp;·&nbsp; Titolare del trattamento: Andrea Cappelletti &nbsp;·&nbsp;
+      <a href="mailto:andcappe@gmail.com" style="color:rgba(232,240,251,0.6);">andcappe@gmail.com</a>
+    </p>
+  </footer>
+
+  <script>
+    /* ── Cookie consent GDPR ─────────────────────────────────────────── */
+    function setCookieConsent(level) {
+      localStorage.setItem('cookie_consent', level);
+      localStorage.setItem('cookie_consent_date', new Date().toISOString());
+      document.getElementById('cookie-banner').style.display = 'none';
+      if (level === 'all') {
+        loadCalendly();
+      }
+    }
+
+    function resetCookieConsent() {
+      localStorage.removeItem('cookie_consent');
+      localStorage.removeItem('cookie_consent_date');
+      document.getElementById('cookie-banner').style.display = 'block';
+    }
+
+    function loadCalendly() {
+      const container = document.querySelector('.calendly-container');
+      if (!container) return;
+      if (container.querySelector('iframe')) return; // già caricato
+      const iframe = document.createElement('iframe');
+      iframe.src = 'https://calendly.com/andcappe?hide_gdpr_banner=1&background_color=ffffff&text_color=1a3a6b&primary_color=2554a0';
+      iframe.width  = '100%';
+      iframe.height = '680';
+      iframe.frameBorder = '0';
+      iframe.style.border = 'none';
+      container.innerHTML = '';
+      container.appendChild(iframe);
+    }
+
+    function initCookies() {
+      const consent = localStorage.getItem('cookie_consent');
+      if (!consent) {
+        document.getElementById('cookie-banner').style.display = 'block';
+      } else if (consent === 'all') {
+        loadCalendly();
+      }
+    }
+
+    document.getElementById('cookie-more-link').addEventListener('click', function(e) {
+      e.preventDefault();
+      const detail = document.getElementById('cookie-detail');
+      const isOpen = detail.style.display !== 'none';
+      detail.style.display = isOpen ? 'none' : 'block';
+      this.textContent = isOpen ? 'Leggi di più' : 'Chiudi';
+    });
+
+    document.getElementById('year').textContent = new Date().getFullYear();
+    document.getElementById('hamburger-btn').addEventListener('click', () => {
+      document.getElementById('mobile-menu').classList.toggle('open');
+    });
+    function closeMobileMenu() { document.getElementById('mobile-menu').classList.remove('open'); }
+    window.addEventListener('scroll', () => {
+      document.getElementById('navbar').style.boxShadow =
+        window.scrollY > 20 ? '0 2px 16px rgba(26,58,107,0.12)' : 'none';
+    });
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); observer.unobserve(e.target); } });
+    }, { threshold: 0.1 });
+    document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+    initCookies();
+    async function handleFormSubmit(e) {
+      e.preventDefault();
+      const form = e.target;
+      const btn  = document.getElementById('form-btn');
+      const fb   = document.getElementById('form-feedback');
+
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Invio in corso…';
+      fb.style.display = 'none';
+
+      const data = Object.fromEntries(new FormData(form));
+      try {
+        const res  = await fetch('https://api.web3forms.com/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        const json = await res.json();
+        if (json.success) {
+          fb.style.display = 'block';
+          fb.style.color   = 'var(--blue2)';
+          fb.textContent   = '✓ Messaggio inviato! Ti risponderò entro 24 ore.';
+          form.reset();
+        } else {
+          throw new Error(json.message || 'Errore invio');
+        }
+      } catch (err) {
+        fb.style.display = 'block';
+        fb.style.color   = '#c0392b';
+        fb.textContent   = '✗ Errore nell\'invio. Riprova o scrivimi direttamente a andcappe@gmail.com';
+      }
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Invia messaggio';
+    }
+  </script>
+</body>
+</html>

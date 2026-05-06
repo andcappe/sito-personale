@@ -1,0 +1,8 @@
+setuptools>=68.0
+wheel>=0.41.0
+numpy>=2.0.0
+pandas>=2.2.0
+dash==3.0.0
+plotly==6.1.2
+gunicorn==23.0.0
+openpyxl>=3.1.0
