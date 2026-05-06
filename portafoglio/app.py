@@ -957,7 +957,14 @@ app.layout = html.Div([
                          'align-self': 'center', 'white-space': 'nowrap'}),
         # 2. Sessioni
         get_session_panel_layout(),
-        # 3. Upload file custom
+        # 3. Scarica template ticker
+        html.Button('📋 Template', id='btn-download-template', n_clicks=0,
+                    title='Scarica il file Excel template da compilare con i tuoi titoli',
+                    style={'font-size': '11px', 'padding': '5px 12px',
+                           'border-radius': '4px', 'cursor': 'pointer',
+                           'background': '#e8f5e9', 'border': '1px solid #a5d6a7',
+                           'color': '#1b5e20', 'margin-right': '4px'}),
+        # 4. Upload file custom
         dcc.Upload(
             id='upload-data',
             children=html.Div(['Trascina il tuo file']),
@@ -995,6 +1002,7 @@ app.layout = html.Div([
     dcc.Store(id='tab1-slider-store',       data=None),
     dcc.Store(id='custom-tickers-store',    data=None),
     dcc.Download(id='download-data'),
+    dcc.Download(id='download-template'),
 
     # ── Modale progresso aggiornamento ───────────────────────────────────────
     html.Div([
@@ -1434,6 +1442,57 @@ def salva_dati(n_clicks, original_prices_data):
         )
     except Exception as e:
         return no_update, html.Div(f'Errore: {e}', style={'color': 'red'}), _MODAL_HIDDEN
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: scarica template ticker Excel
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('download-template', 'data'),
+    Input('btn-download-template', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def download_template(n_clicks):
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Template Ticker'
+
+    headers = ['TICKER', 'DESCRIZIONE', 'VALUTA', 'MERCATO']
+    examples = [
+        ['ISAC.L',   'Az. ACWI',   'USD', 'Azionario ACWI'],
+        ['SWDA.MI',  'Az. World',  'EUR', 'Azionario World'],
+    ]
+
+    header_fill = PatternFill('solid', fgColor='1A3A6B')
+    header_font = Font(bold=True, color='FFFFFF', size=11)
+    example_fill = PatternFill('solid', fgColor='EBF3FF')
+    thin = Side(style='thin', color='C0D0E8')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    col_widths = [14, 30, 10, 25]
+
+    for col_idx, (h, w) in enumerate(zip(headers, col_widths), start=1):
+        cell = ws.cell(row=1, column=col_idx, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = border
+        ws.column_dimensions[cell.column_letter].width = w
+
+    for row_idx, row_data in enumerate(examples, start=2):
+        for col_idx, val in enumerate(row_data, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.fill = example_fill
+            cell.alignment = Alignment(horizontal='left', vertical='center')
+            cell.border = border
+
+    ws.row_dimensions[1].height = 20
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return dcc.send_bytes(out.read(), 'template_ticker.xlsx')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
