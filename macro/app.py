@@ -750,13 +750,22 @@ def _sidebar():
                  style={"font-size": "10px", "color": "#aaa",
                         "font-style": "italic"}),
         html.Hr(style={"margin": "10px 0"}),
+        html.Div("Seleziona / Deseleziona", style={
+            "font-size": "9px", "font-weight": "600",
+            "color": "#6b7a99", "margin-bottom": "5px",
+            "text-transform": "uppercase", "letter-spacing": "0.05em",
+        }),
         html.Div([
-            html.Button("✔ Tutto", id="sel-all", n_clicks=0,
-                        style={"font-size": "9px", "padding": "2px 7px",
-                               "margin-right": "4px", "cursor": "pointer"}),
-            html.Button("✘ Niente", id="sel-none", n_clicks=0,
-                        style={"font-size": "9px", "padding": "2px 7px",
-                               "cursor": "pointer"}),
+            html.Button("✔ Seleziona", id="sel-all", n_clicks=0,
+                        style={"font-size": "9px", "padding": "3px 8px",
+                               "margin-right": "4px", "cursor": "pointer",
+                               "background": "#e8f5e9", "border": "1px solid #a5d6a7",
+                               "border-radius": "4px", "color": "#1b5e20"}),
+            html.Button("✘ Deseleziona", id="sel-none", n_clicks=0,
+                        style={"font-size": "9px", "padding": "3px 8px",
+                               "cursor": "pointer",
+                               "background": "#fce4ec", "border": "1px solid #f48fb1",
+                               "border-radius": "4px", "color": "#880e4f"}),
         ], style={"display": "flex"}),
     ], style={"padding": "12px", "overflow-y": "auto"})
 
@@ -901,7 +910,14 @@ def _slider_area():
 
 app.layout = html.Div([
     # ── Stores ───────────────────────────────────────────────────────────────
-    dcc.Store(id="store-data"),
+    dcc.Loading(
+        id="global-loading",
+        type="circle",
+        fullscreen=True,
+        color="#1a3a6b",
+        overlay_style={"background": "rgba(255,255,255,0.75)", "zIndex": 9999},
+        children=dcc.Store(id="store-data"),
+    ),
     dcc.Store(id="store-mon-source-type", data="usa"),
 
     # ── Navbar ───────────────────────────────────────────────────────────────
