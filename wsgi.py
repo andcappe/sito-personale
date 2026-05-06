@@ -28,12 +28,13 @@ _ROUTES = [
     ("/portafoglio", portafoglio_srv),
     ("/macro",       macro_srv),
     ("/frontiera",   frontiera_srv),
+    ("/",            portafoglio_srv),  # fallback: serve profilo + rotte Flask root
 ]
 
 
 def application(environ, start_response):
     path = environ.get("PATH_INFO", "/")
     for prefix, app in _ROUTES:
-        if path == prefix or path.startswith(prefix + "/"):
+        if prefix == "/" or path == prefix or path.startswith(prefix + "/"):
             return app(environ, start_response)
     return NotFound()(environ, start_response)
