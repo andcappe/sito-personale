@@ -981,27 +981,27 @@ app.layout = html.Div([
                     ),
                 ]),
 
-                # Banda MV=PQ
+                # Banda + Grafico MV=PQ (nascosti se nessun checkbox selezionato)
                 html.Div([
-                    html.B("MV = PQ — Teoria Quantitativa della Moneta",
-                           style={"font-size": "11px", "color": "#1a5276"}),
-                    html.Span("  M·V = Moneta × Velocità  |  P·Q = CPI × PIL Reale",
-                              style={"font-size": "10px", "color": "#666", "margin-left": "10px"}),
-                ], style={"padding": "5px 16px",
-                          "background": "#eaf4fb",
-                          "border-top": "1px solid #aed6f1",
-                          "border-bottom": "1px solid #aed6f1"}),
-
-                # Grafico MV=PQ
-                dcc.Loading(type="circle", color="#1a3a6b", children=[
-                    dcc.Graph(
-                        id="chart-mvpq",
-                        figure=empty_fig("Clicca  🔄 Carica dati  per scaricare le serie"),
-                        style={"height": "43vh", "width": "100%"},
-                        config={"responsive": True, "scrollZoom": True,
-                                "displayModeBar": True, "displaylogo": False},
-                    ),
-                ]),
+                    html.Div([
+                        html.B("MV = PQ — Teoria Quantitativa della Moneta",
+                               style={"font-size": "11px", "color": "#1a5276"}),
+                        html.Span("  M·V = Moneta × Velocità  |  P·Q = CPI × PIL Reale",
+                                  style={"font-size": "10px", "color": "#666", "margin-left": "10px"}),
+                    ], style={"padding": "5px 16px",
+                              "background": "#eaf4fb",
+                              "border-top": "1px solid #aed6f1",
+                              "border-bottom": "1px solid #aed6f1"}),
+                    dcc.Loading(type="circle", color="#1a3a6b", children=[
+                        dcc.Graph(
+                            id="chart-mvpq",
+                            figure=empty_fig("Clicca  🔄 Carica dati  per scaricare le serie"),
+                            style={"height": "43vh", "width": "100%"},
+                            config={"responsive": True, "scrollZoom": True,
+                                    "displayModeBar": True, "displaylogo": False},
+                        ),
+                    ]),
+                ], id="mvpq-wrapper"),
 
             ], style={"flex": "1", "min-width": "0",
                       "overflow-y": "auto",
@@ -1154,8 +1154,9 @@ def sel_desel(a, b, ids):
 
 
 @app.callback(
-    Output("chart-main", "figure"),
-    Output("chart-mvpq", "figure"),
+    Output("chart-main",    "figure"),
+    Output("chart-mvpq",    "figure"),
+    Output("mvpq-wrapper",  "style"),
     Input("store-data",       "data"),
     Input("date-slider",      "value"),
     Input({"type": "series-check", "index": ALL}, "value"),
@@ -1166,9 +1167,12 @@ def sel_desel(a, b, ids):
     prevent_initial_call=False,
 )
 def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_show, source_type):
+    show_mvpq = bool(mvpq_show)
+    wrapper_style = {} if show_mvpq else {"display": "none"}
+
     if not data:
         f = empty_fig("Clicca  🔄 Carica dati  per scaricare le serie")
-        return f, f
+        return f, f, wrapper_style
 
     df = pd.read_json(io.StringIO(data), orient="split")
     df.index = pd.to_datetime(df.index)
@@ -1218,7 +1222,7 @@ def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_sh
     else:
         fig2 = make_mvpq_chart(df, start, end, mvpq_show)
 
-    return fig1, fig2
+    return fig1, fig2, wrapper_style
 
 
 # ─────────────────────────────────────────────────────────────────────────────
