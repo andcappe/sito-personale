@@ -123,6 +123,7 @@ COLORS = [
 _CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "macro_cache.pkl")
 _cache_lock = threading.Lock()
 _cache: dict = {"usa": None, "eur": None, "ts": None}
+_cache_disk_mtime: float = 0.0   # mtime del file al momento del caricamento
 
 
 def _download_and_cache() -> None:
@@ -142,6 +143,8 @@ def _download_and_cache() -> None:
     try:
         with open(_CACHE_FILE, "wb") as f:
             pickle.dump(payload, f)
+        global _cache_disk_mtime
+        _cache_disk_mtime = os.path.getmtime(_CACHE_FILE)
         print(f"  ✓ Cache salvata [{ts}] — USA:{bool(payload['usa'])} EUR:{bool(payload['eur'])}")
     except Exception as e:
         print(f"  ✗ Scrittura cache: {e}")
@@ -149,18 +152,34 @@ def _download_and_cache() -> None:
 
 def _load_cache_from_disk() -> bool:
     """Carica cache da disco se disponibile. Ritorna True se riuscito."""
-    global _cache
+    global _cache, _cache_disk_mtime
     if not os.path.exists(_CACHE_FILE):
         return False
     try:
+        mtime = os.path.getmtime(_CACHE_FILE)
         with open(_CACHE_FILE, "rb") as f:
             data = pickle.load(f)
         with _cache_lock:
             _cache.update(data)
+            _cache_disk_mtime = mtime
         print(f"  ✓ Cache caricata da disco [{_cache.get('ts', '?')}]")
         return True
     except Exception as e:
         print(f"  ✗ Lettura cache: {e}")
+        return False
+
+
+def _refresh_cache_if_updated() -> bool:
+    """Ricarica la cache se il file su disco è più recente di quella in memoria."""
+    if not os.path.exists(_CACHE_FILE):
+        return False
+    try:
+        mtime = os.path.getmtime(_CACHE_FILE)
+        if mtime <= _cache_disk_mtime:
+            return False
+        print("  ↻ Cache su disco aggiornata — ricarico in memoria...")
+        return _load_cache_from_disk()
+    except Exception:
         return False
 
 
@@ -253,6 +272,51 @@ def bce_get_m2() -> pd.Series | None:
         return None
 
 
+def ecb_hicp_get(icp_item: str = "000000", suffix: str = "INX") -> pd.Series | None:
+    """Scarica HICP dall'ECB (nuovo dataset post-febbraio 2026, base 2025=100).
+
+    icp_item: '000000'=totale, 'XEF000'=core (escl. energia, cibo, alc., tabacco)
+    suffix:   'INX'=indice, 'ANR'=variazione annua
+    """
+    key = f"M.U2.N.{icp_item}.4D0.{suffix}"
+    url = (
+        f"https://data-api.ecb.europa.eu/service/data/HICP/{key}"
+        "?format=csvdata"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "text/csv"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read().decode("utf-8")
+        lines = [ln for ln in raw.strip().split("\n") if ln.strip()]
+        if len(lines) < 2:
+            return None
+        hdrs = [h.strip().strip('"') for h in lines[0].split(",")]
+        ti = next((i for i, h in enumerate(hdrs) if h == "TIME_PERIOD"), -1)
+        vi = next((i for i, h in enumerate(hdrs) if h == "OBS_VALUE"), -1)
+        if ti < 0 or vi < 0:
+            return None
+        obs = {}
+        for line in lines[1:]:
+            cols = line.split(",")
+            try:
+                period = cols[ti].strip().strip('"')
+                val    = float(cols[vi].strip().strip('"'))
+                obs[period] = val
+            except (ValueError, IndexError):
+                continue
+        if not obs:
+            return None
+        s = pd.Series(obs)
+        s.index = pd.to_datetime(s.index)
+        s = s.dropna().sort_index()
+        label = f"HICP {icp_item}/{suffix}"
+        print(f"  ✓ ECB {label}: {len(s)} obs, ultimo={s.index[-1].strftime('%Y-%m')}")
+        return s
+    except Exception as e:
+        print(f"  ✗ ECB HICP {icp_item}/{suffix}: {e}")
+        return None
+
+
 def eurostat_get(dataset: str, params: dict, geo: str) -> pd.Series | None:
     """Scarica una serie temporale dall'API JSON di Eurostat."""
     base = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data"
@@ -339,8 +403,8 @@ def build_monetary_eur_df(geo: str, api_key: str) -> pd.DataFrame:
         s = fred_get(sid, api_key)
         return label, to_monthly(s, freq) if s is not None else None
 
-    def _run_eurostat(dataset, params, label):
-        raw = eurostat_get(dataset, params, geo)
+    def _run_ecb_hicp(icp_item, label):
+        raw = ecb_hicp_get(icp_item, "INX")
         return label, to_monthly(raw, "M") if raw is not None else None
 
     def _run_eurostat_q(dataset, params, label):
@@ -350,8 +414,8 @@ def build_monetary_eur_df(geo: str, api_key: str) -> pd.DataFrame:
     with ThreadPoolExecutor(max_workers=10) as ex:
         futs = [
             ex.submit(_run_bce),
-            ex.submit(_run_eurostat, "prc_hicp_midx", {"coicop": "CP00",            "unit": "I15"}, "CPI All Items"),
-            ex.submit(_run_eurostat, "prc_hicp_midx", {"coicop": "TOT_X_NRG_FOOD", "unit": "I15"}, "CPI Core"),
+            ex.submit(_run_ecb_hicp, "000000", "CPI All Items"),
+            ex.submit(_run_ecb_hicp, "XEF000", "CPI Core"),
             ex.submit(_run_eurostat_q, "namq_10_gdp", {"na_item": "B1GQ", "unit": "CLV15_MEUR", "s_adj": "SCA"}, "Real GDP"),
             ex.submit(_run_eurostat_q, "namq_10_gdp", {"na_item": "B1GQ", "unit": "CP_MEUR",    "s_adj": "SCA"}, "__GDP_NOM__"),
         ]
@@ -460,7 +524,7 @@ def make_line_chart(df: pd.DataFrame, title: str,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="left", x=0, font=dict(size=9),
                     bgcolor="rgba(255,255,255,0.8)"),
-        margin=dict(t=50, b=35, l=60, r=20),
+        margin=dict(t=50, b=35, l=65, r=25),
         paper_bgcolor="white", plot_bgcolor="#f8f8f8",
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8", zeroline=False)
@@ -470,9 +534,16 @@ def make_line_chart(df: pd.DataFrame, title: str,
 
 def _hline_annot(fig, y, color, text, row=None):
     kw = dict(row=row, col=1) if row else {}
-    fig.add_hline(y=y, line_color=color, line_dash="dashdot", line_width=1.2,
-                  annotation_text=text, annotation_position="right",
-                  annotation_font=dict(size=9, color=color), **kw)
+    fig.add_hline(y=y, line_color=color, line_dash="dashdot", line_width=1.2, **kw)
+    ann_kw = {"row": row, "col": 1} if row else {}
+    fig.add_annotation(
+        text=text, xref="paper", x=0.99, xanchor="right",
+        y=y, yref=f"y{row if row and row > 1 else ''}",
+        yanchor="bottom", showarrow=False,
+        font=dict(size=9, color=color),
+        bgcolor="rgba(255,255,255,0.75)",
+        **ann_kw,
+    )
 
 
 def make_mvpq_chart(df: pd.DataFrame,
@@ -565,7 +636,7 @@ def make_mvpq_chart(df: pd.DataFrame,
         legend=dict(orientation="h", yanchor="bottom", y=1.01,
                     xanchor="left", x=0, font=dict(size=9),
                     bgcolor="rgba(255,255,255,0.8)"),
-        margin=dict(t=50, b=35, l=60, r=110),
+        margin=dict(t=50, b=35, l=65, r=25),
         paper_bgcolor="white", plot_bgcolor="#f8f8f8",
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
@@ -679,7 +750,7 @@ def make_mvpq_both_chart(df: pd.DataFrame, start, end, mvpq_mode: str, series_sh
         title=dict(text=title, font=dict(size=11), x=0.01),
         hovermode="x unified", autosize=True,
         legend=dict(orientation="h", y=-0.28, font=dict(size=9)),
-        margin=dict(l=50, r=110, t=40, b=70),
+        margin=dict(l=65, r=25, t=50, b=70),
         paper_bgcolor="#fff", plot_bgcolor="#f8f8f8",
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
@@ -787,7 +858,13 @@ def _sidebar():
                                "cursor": "pointer",
                                "background": "#fce4ec", "border": "1px solid #f48fb1",
                                "border-radius": "4px", "color": "#880e4f"}),
-        ], style={"display": "flex", "margin-bottom": "8px"}),
+        ], style={"display": "flex", "margin-bottom": "6px"}),
+        html.Button("⟳ Aggiorna dati", id="btn-refresh-data", n_clicks=0,
+                    style={"font-size": "9px", "padding": "3px 8px",
+                           "cursor": "pointer", "width": "100%",
+                           "background": "#e3f2fd", "border": "1px solid #90caf9",
+                           "border-radius": "4px", "color": "#0d47a1",
+                           "margin-bottom": "8px"}),
         html.Hr(style={"margin": "6px 0"}),
         dcc.Checklist(
             id="series-checklist",
@@ -831,14 +908,14 @@ def _controls_bar():
         html.Div([
             html.Label("Vista:", style={"font-size": "11px", "font-weight": "bold",
                                         "margin-right": "8px", "white-space": "nowrap"}),
-            dcc.Checklist(
+            dcc.RadioItems(
                 id="view-mode",
                 options=[
                     {"label": " Assoluta",   "value": "abs"},
                     {"label": " Δ% YoY",     "value": "yoy"},
                     {"label": " Cumulativa", "value": "cum"},
                 ],
-                value=["abs", "yoy"], inline=True,
+                value="yoy", inline=True,
                 style={"font-size": "11px"},
                 inputStyle={"margin-right": "3px"},
                 labelStyle={"margin-right": "14px"},
@@ -1102,10 +1179,17 @@ def toggle_series_check(source_type):
     Output("date-slider",           "marks"),
     Output("store-mon-source-type", "data"),
     Input("mon-source-type",        "value"),
+    Input("btn-refresh-data",       "n_clicks"),
     prevent_initial_call=False,
 )
-def auto_load(source_type):
+def auto_load(source_type, _refresh_clicks):
+    from dash import callback_context as ctx
+    # Se il click arriva dal pulsante refresh, ri-scarica subito i dati
+    if ctx.triggered_id == "btn-refresh-data":
+        _download_and_cache()
+
     source_type = source_type or "usa"
+    _refresh_cache_if_updated()
 
     with _cache_lock:
         usa_json = _cache.get("usa")
@@ -1207,10 +1291,10 @@ def manage_series_checklist(data, _all, _none, current_opts):
     prevent_initial_call=False,
 )
 def update_charts(slider_val, selected_series, view_mode, mvpq_show, mvpq_series_show, data, source_type):
-    view_mode  = view_mode or []
-    show_abs   = "abs" in view_mode
-    show_yoy   = "yoy" in view_mode
-    show_cum   = "cum" in view_mode
+    view_mode  = view_mode or "yoy"
+    show_abs   = view_mode == "abs"
+    show_yoy   = view_mode == "yoy"
+    show_cum   = view_mode == "cum"
     show_mvpq  = bool(mvpq_show)
 
     abs_style  = {} if show_abs  else {"display": "none"}
