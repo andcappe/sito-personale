@@ -468,6 +468,13 @@ def make_line_chart(df: pd.DataFrame, title: str,
     return fig
 
 
+def _hline_annot(fig, y, color, text, row=None):
+    kw = dict(row=row, col=1) if row else {}
+    fig.add_hline(y=y, line_color=color, line_dash="dashdot", line_width=1.2,
+                  annotation_text=text, annotation_position="right",
+                  annotation_font=dict(size=9, color=color), **kw)
+
+
 def make_mvpq_chart(df: pd.DataFrame,
                     start: pd.Timestamp, end: pd.Timestamp,
                     mvpq_show: list = None,
@@ -537,12 +544,6 @@ def make_mvpq_chart(df: pd.DataFrame,
         margin=dict(t=50, b=35, l=60, r=110),
         paper_bgcolor="white", plot_bgcolor="#f8f8f8",
     )
-
-    def _hline_annot(fig, y, color, text, row=None):
-        kw = dict(row=row, col=1) if row else {}
-        fig.add_hline(y=y, line_color=color, line_dash="dashdot", line_width=1.2,
-                      annotation_text=text, annotation_position="right",
-                      annotation_font=dict(size=9, color=color), **kw)
 
     fig = go.Figure()
 
@@ -896,14 +897,8 @@ def _controls_bar():
                   "border-radius": "4px", "padding": "5px 12px",
                   "margin-right": "14px"}),
 
-        # Stato aggiornamento (sostituisce il pulsante)
-        html.Div(id="status-msg",
-                 style={"font-size": "11px", "color": "#444",
-                        "font-style": "italic", "flex": "1",
-                        "min-width": "0"}),
     ], style={"display": "flex", "align-items": "center",
               "padding": "8px 16px", "background": "#f0f4fa",
-              "border-bottom": "1px solid #dee2e6",
               "flex-wrap": "wrap", "gap": "8px"})
 
 
@@ -967,6 +962,18 @@ app.layout = html.Div([
 
         # ── Barra controlli ───────────────────────────────────────────────────
         _controls_bar(),
+
+        # ── Riga stato dati ───────────────────────────────────────────────────
+        html.Div(
+            id="status-msg",
+            style={
+                "font-size": "11px", "color": "#444", "font-style": "italic",
+                "padding": "4px 16px", "background": "#e8edf5",
+                "border-bottom": "1px solid #dee2e6",
+                "white-space": "nowrap", "overflow": "hidden",
+                "text-overflow": "ellipsis",
+            }
+        ),
 
         # ── Corpo: sidebar + grafici ──────────────────────────────────────────
         html.Div([
