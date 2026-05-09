@@ -1172,16 +1172,16 @@ def manage_series_checklist(data, _all, _none, current_opts):
     Output("main-yoy-wrapper",  "style"),
     Output("main-cum-wrapper",  "style"),
     Output("mvpq-wrapper",      "style"),
-    Input("store-data",         "data"),
     Input("date-slider",        "value"),
     Input("series-checklist",   "value"),
     Input("view-mode",          "value"),
     Input("mvpq-show",          "value"),
     Input("mvpq-series-show",   "value"),
+    State("store-data",         "data"),
     State("store-mon-source-type", "data"),
     prevent_initial_call=False,
 )
-def update_charts(data, slider_val, selected_series, view_mode, mvpq_show, mvpq_series_show, source_type):
+def update_charts(slider_val, selected_series, view_mode, mvpq_show, mvpq_series_show, data, source_type):
     view_mode  = view_mode or []
     show_abs   = "abs" in view_mode
     show_yoy   = "yoy" in view_mode
