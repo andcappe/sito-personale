@@ -23,27 +23,33 @@ def make_navbar() -> html.Nav:
     return html.Nav([
         # ── Brand ────────────────────────────────────────────────────────────
         html.A([
-            html.Span("A·C", style={
-                "fontFamily": "'Playfair Display', serif",
-                "fontSize": "1.15rem", "color": "#1a3a6b",
-                "fontWeight": "700", "marginRight": "10px",
-            }),
             html.Div([
                 html.Span("Andrea Cappelletti", style={
                     "display": "block",
-                    "fontFamily": "Inter, sans-serif",
-                    "fontSize": "0.78rem", "fontWeight": "700",
+                    "fontFamily": "'Playfair Display', serif",
+                    "fontSize": "0.88rem", "fontWeight": "700",
                     "color": "#1a3a6b", "lineHeight": "1.2",
                     "letterSpacing": "0.01em",
                 }),
-                html.Span("Consulente Monomandatario · Fineco Bank", style={
+                html.Span("Consulente Monomandatario", style={
                     "display": "block",
                     "fontFamily": "Inter, sans-serif",
-                    "fontSize": "0.56rem", "fontWeight": "600",
-                    "color": "#f37021", "letterSpacing": "0.05em",
-                    "textTransform": "uppercase", "lineHeight": "1.3",
+                    "fontSize": "0.58rem", "fontWeight": "500",
+                    "color": "#6b7a99", "lineHeight": "1.3",
+                    "letterSpacing": "0.02em",
                 }),
-            ]),
+                html.Span("Fineco Bank", style={
+                    "display": "inline-block",
+                    "fontFamily": "Inter, sans-serif",
+                    "fontSize": "0.55rem", "fontWeight": "700",
+                    "letterSpacing": "0.08em", "textTransform": "uppercase",
+                    "color": "#f37021",
+                    "background": "rgba(243,112,33,0.1)",
+                    "border": "1px solid rgba(243,112,33,0.35)",
+                    "padding": "1px 6px", "borderRadius": "4px",
+                    "marginTop": "2px",
+                }),
+            ], style={"display": "flex", "flexDirection": "column"}),
         ], href=_BASE, target="_blank",
            style={"textDecoration": "none", "display": "flex", "alignItems": "center"}),
 
