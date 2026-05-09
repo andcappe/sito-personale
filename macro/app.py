@@ -3,9 +3,13 @@ Macro FED · BCE — Dashboard Analisi Monetaria
 Navbar identica al sito portafoglio + Analisi Monetaria completa da FRED/BCE/Eurostat.
 """
 
+import atexit
 import io
 import json
 import math
+import os
+import pickle
+import threading
 import urllib.request
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +19,7 @@ import pandas as pd
 import pandas.tseries.offsets as offsets
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from dash import Dash, html, dcc, Input, Output, State, ALL, callback_context, no_update
 from dash.exceptions import PreventUpdate
@@ -110,6 +115,54 @@ COLORS = [
     "#1f77b4","#d62728","#2ca02c","#ff7f0e","#9467bd",
     "#8c564b","#e377c2","#17becf","#bcbd22","#7f7f7f",
 ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cache su disco — dati aggiornati dal scheduler notturno
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "macro_cache.pkl")
+_cache_lock = threading.Lock()
+_cache: dict = {"usa": None, "eur": None, "ts": None}
+
+
+def _download_and_cache() -> None:
+    """Scarica USA (FRED) + EUR EA20 (Eurostat/BCE) e persiste su disco."""
+    global _cache
+    print("\n▶ [Scheduler] Download dati macro USA + EUR(EA20)...")
+    df_usa = build_dataframe(DEFAULT_SERIES, FRED_API_KEY)
+    df_eur = build_monetary_eur_df("EA20", FRED_API_KEY)
+    ts = pd.Timestamp.now().strftime("%d/%m/%Y %H:%M")
+    payload = {
+        "usa": df_usa.to_json(date_format="iso", orient="split") if not df_usa.empty else None,
+        "eur": df_eur.to_json(date_format="iso", orient="split") if not df_eur.empty else None,
+        "ts":  ts,
+    }
+    with _cache_lock:
+        _cache.update(payload)
+    try:
+        with open(_CACHE_FILE, "wb") as f:
+            pickle.dump(payload, f)
+        print(f"  ✓ Cache salvata [{ts}] — USA:{bool(payload['usa'])} EUR:{bool(payload['eur'])}")
+    except Exception as e:
+        print(f"  ✗ Scrittura cache: {e}")
+
+
+def _load_cache_from_disk() -> bool:
+    """Carica cache da disco se disponibile. Ritorna True se riuscito."""
+    global _cache
+    if not os.path.exists(_CACHE_FILE):
+        return False
+    try:
+        with open(_CACHE_FILE, "rb") as f:
+            data = pickle.load(f)
+        with _cache_lock:
+            _cache.update(data)
+        print(f"  ✓ Cache caricata da disco [{_cache.get('ts', '?')}]")
+        return True
+    except Exception as e:
+        print(f"  ✗ Lettura cache: {e}")
+        return False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Funzioni dati
@@ -768,23 +821,13 @@ def _controls_bar():
                 id="mon-source-type",
                 options=[
                     {"label": " 🇺🇸 USA (FRED)", "value": "usa"},
-                    {"label": " 🇪🇺 Eurostat",   "value": "eur"},
+                    {"label": " 🇪🇺 Area Euro",   "value": "eur"},
                     {"label": " 🆚 Confronto",    "value": "both"},
                 ],
                 value="usa", inline=True,
                 style={"font-size": "11px"},
                 inputStyle={"margin-right": "3px"},
                 labelStyle={"margin-right": "12px"},
-            ),
-            html.Div(
-                dcc.Dropdown(
-                    id="mon-eur-geo",
-                    options=[{"label": v, "value": k} for k, v in EUROSTAT_GEO.items()],
-                    value="EA20", clearable=False,
-                    style={"font-size": "10px", "min-width": "160px"},
-                ),
-                id="mon-geo-wrapper",
-                style={"display": "none", "margin-left": "6px"},
             ),
         ], style={"display": "flex", "align-items": "center",
                   "background": "#f3e5f5", "border": "1px solid #ce93d8",
@@ -854,23 +897,11 @@ def _controls_bar():
                   "border-radius": "4px", "padding": "5px 12px",
                   "margin-right": "14px"}),
 
-        # Bottone
-        html.Button(
-            "🔄  Carica dati",
-            id="btn-aggiorna", n_clicks=0,
-            style={
-                "background": "#1a3a6b", "color": "white",
-                "border": "none", "padding": "8px 22px",
-                "border-radius": "5px", "cursor": "pointer",
-                "font-size": "13px", "font-weight": "bold",
-                "letter-spacing": "0.5px",
-                "box-shadow": "0 2px 4px rgba(0,0,0,0.2)",
-            }
-        ),
-
+        # Stato aggiornamento (sostituisce il pulsante)
         html.Div(id="status-msg",
                  style={"font-size": "11px", "color": "#444",
-                        "margin-left": "14px", "font-style": "italic"}),
+                        "font-style": "italic", "flex": "1",
+                        "min-width": "0"}),
     ], style={"display": "flex", "align-items": "center",
               "padding": "8px 16px", "background": "#f0f4fa",
               "border-bottom": "1px solid #dee2e6",
@@ -1033,15 +1064,6 @@ app.layout = html.Div([
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.callback(
-    Output("mon-geo-wrapper", "style"),
-    Input("mon-source-type", "value"),
-)
-def toggle_geo(source_type):
-    base = {"margin-left": "6px"}
-    return base if source_type in ("eur", "both") else {**base, "display": "none"}
-
-
-@app.callback(
     Output("mvpq-series-wrapper",  "style"),
     Output("mvpq-series-show",     "options"),
     Output("mvpq-series-show",     "value"),
@@ -1079,45 +1101,46 @@ def toggle_series_check(source_type):
     Output("date-slider",           "value"),
     Output("date-slider",           "marks"),
     Output("store-mon-source-type", "data"),
-    Input("btn-aggiorna",           "n_clicks"),
-    State("mon-source-type",        "value"),
-    State("mon-eur-geo",            "value"),
-    prevent_initial_call=True,
+    Input("mon-source-type",        "value"),
+    prevent_initial_call=False,
 )
-def aggiorna(n_clicks, source_type, eur_geo):
-    if not n_clicks:
-        raise PreventUpdate
+def auto_load(source_type):
+    source_type = source_type or "usa"
 
-    api_key = FRED_API_KEY
+    with _cache_lock:
+        usa_json = _cache.get("usa")
+        eur_json = _cache.get("eur")
+        ts       = _cache.get("ts") or "—"
+
+    loading_msg = "⏳ Dati in aggiornamento — riprovare tra qualche secondo..."
 
     if source_type == "both":
-        geo = eur_geo or "EA20"
-        print(f"\n▶ Download confronto USA + EUR [{geo}]...")
-        df_usa = build_dataframe(DEFAULT_SERIES, api_key)
-        df_eur = build_monetary_eur_df(geo, api_key)
-        if df_usa.empty and df_eur.empty:
-            return None, "❌ Nessun dato — controlla la connessione", 0, 1, [0, 1], {}, source_type
+        if not usa_json and not eur_json:
+            return None, loading_msg, 0, 1, [0, 1], {}, source_type
+        df_usa = pd.read_json(io.StringIO(usa_json), orient="split") if usa_json else pd.DataFrame()
+        df_eur = pd.read_json(io.StringIO(eur_json), orient="split") if eur_json else pd.DataFrame()
         df_usa = df_usa.rename(columns={c: f"{c} 🇺🇸" for c in df_usa.columns})
         df_eur = df_eur.rename(columns={c: f"{c} 🇪🇺" for c in df_eur.columns})
         df = pd.concat([df_usa, df_eur], axis=1).sort_index()
-        geo_lbl = EUROSTAT_GEO.get(geo, geo)
-        source_lbl = f"Confronto USA vs {geo_lbl}"
+        source_lbl = "USA 🇺🇸 vs Europa 🇪🇺"
     elif source_type == "eur":
-        geo = eur_geo or "EA20"
-        print(f"\n▶ Download monetario EUR [{geo}]...")
-        df = build_monetary_eur_df(geo, api_key)
-        source_lbl = f"Area Euro / {EUROSTAT_GEO.get(geo, geo)}"
+        if not eur_json:
+            return None, loading_msg, 0, 1, [0, 1], {}, source_type
+        df = pd.read_json(io.StringIO(eur_json), orient="split")
+        source_lbl = "Area Euro (Eurostat / BCE)"
     else:
-        print("\n▶ Download monetario USA (FRED)...")
-        df = build_dataframe(DEFAULT_SERIES, api_key)
+        if not usa_json:
+            return None, loading_msg, 0, 1, [0, 1], {}, source_type
+        df = pd.read_json(io.StringIO(usa_json), orient="split")
         source_lbl = "USA (FRED)"
 
     if df.empty:
-        return None, "❌ Nessun dato — controlla la connessione", 0, 1, [0, 1], {}, source_type
+        return None, "❌ Nessun dato", 0, 1, [0, 1], {}, source_type
 
+    df.index = pd.to_datetime(df.index)
     d1  = df.index.min().strftime("%m/%Y")
     d2  = df.index.max().strftime("%m/%Y")
-    msg = f"✅  {source_lbl}  |  {len(df.columns)} serie  |  {len(df)} obs  ({d1} → {d2})"
+    msg = f"✅ {source_lbl} — {len(df.columns)} serie  ({d1} → {d2})  · Agg. {ts}"
     return df.to_json(date_format="iso", orient="split"), msg, *_slider_params(df), source_type
 
 
@@ -1274,6 +1297,19 @@ def _root_redirect():
 @app.server.route('/health')
 def _health():
     return 'OK', 200
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Startup: carica cache da disco o scarica i dati; avvia scheduler notturno
+# ─────────────────────────────────────────────────────────────────────────────
+if not _load_cache_from_disk():
+    print("\n▶ Nessuna cache su disco — download iniziale (15-30 s)...")
+    _download_and_cache()
+
+_sched = BackgroundScheduler(timezone="UTC", daemon=True)
+_sched.add_job(_download_and_cache, "cron", hour=0, minute=0)
+_sched.start()
+atexit.register(lambda: _sched.shutdown(wait=False))
+print("  ✓ Scheduler avviato: download automatico ogni notte alle 00:00 UTC")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Esposizione server
