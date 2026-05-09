@@ -477,10 +477,9 @@ def _hline_annot(fig, y, color, text, row=None):
 
 def make_mvpq_chart(df: pd.DataFrame,
                     start: pd.Timestamp, end: pd.Timestamp,
-                    mvpq_show: list = None,
+                    mvpq_mode: str = "yoy",
                     show_mv: bool = True,
                     show_pq: bool = True) -> go.Figure:
-    col_m2 = next((c for c in df.columns if "M2 Money" in c or c == "M2 Velocity"[:0] or "M2 " in c), None)
     col_m2 = next((c for c in df.columns if "M2 Money" in c), None)
     col_v  = next((c for c in df.columns if "Velocity" in c), None)
     col_p  = next((c for c in df.columns if "CPI All" in c), None)
@@ -490,6 +489,8 @@ def make_mvpq_chart(df: pd.DataFrame,
                                ("CPI", col_p), ("GDP", col_q)] if c is None]
     if missing:
         return empty_fig(f"Mancano serie per MV=PQ: {', '.join(missing)}")
+    if not show_mv and not show_pq:
+        return empty_fig("Seleziona almeno una serie (M·V o P·Q)")
 
     common = (df[col_m2].dropna().index
               .intersection(df[col_v].dropna().index)
@@ -499,44 +500,67 @@ def make_mvpq_chart(df: pd.DataFrame,
         return empty_fig("Dati insufficienti per MV=PQ (< 24 mesi comuni)")
 
     m2, v, p, q = (df[c].reindex(common) for c in [col_m2, col_v, col_p, col_q])
-    mv_raw = m2 * v
-    pq_raw = p  * q / 100
+    mv_raw = m2 * v          # M2 × Velocità
+    pq_raw = p  * q / 100    # CPI × PIL Reale (/ 100 per scala CPI)
 
-    mv_full    = mv_raw / mv_raw.iloc[0] * 100
-    pq_full    = pq_raw / pq_raw.iloc[0] * 100
-    mv_yoy_full = yoy(mv_full)
-    pq_yoy_full = yoy(pq_full)
-
-    mv_yoy = mv_yoy_full.loc[start:end].copy()
-    pq_yoy = pq_yoy_full.loc[start:end].copy()
-    if mv_yoy.empty or pq_yoy.empty:
+    mv_sl = mv_raw.loc[start:end].dropna()
+    pq_sl = pq_raw.loc[start:end].dropna()
+    if mv_sl.empty or pq_sl.empty:
         return empty_fig("Nessun dato nel range selezionato")
 
-    gap = mv_yoy - pq_yoy
-    mv_raw_sl  = mv_raw.loc[start:end].dropna()
-    pq_raw_sl  = pq_raw.loc[start:end].dropna()
+    if mvpq_mode == "abs":
+        mv_plot = mv_sl / mv_sl.iloc[0] * 100
+        pq_plot = pq_sl / pq_sl.iloc[0] * 100
+        y_label = "Indice (base 100)"
+        title   = "MV = PQ — Valori Indicizzati (base 100)"
+        pct_sfx = ""
+    elif mvpq_mode == "cum":
+        def _cum(s):
+            r = s.pct_change().fillna(0)
+            return ((1 + r).cumprod() - 1) * 100
+        mv_plot = _cum(mv_sl)
+        pq_plot = _cum(pq_sl)
+        y_label = "Crescita % cumulata"
+        title   = "MV = PQ — Crescita Cumulativa %"
+        pct_sfx = "%"
+    else:  # "yoy"
+        mv_full = mv_raw / mv_raw.iloc[0] * 100
+        pq_full = pq_raw / pq_raw.iloc[0] * 100
+        mv_plot = yoy(mv_full).loc[start:end].dropna()
+        pq_plot = yoy(pq_full).loc[start:end].dropna()
+        y_label = "Δ% YoY"
+        title   = "MV = PQ — Variazione Anno su Anno"
+        pct_sfx = "%"
 
-    def _cumprod_from_zero(s):
-        r = s.pct_change().fillna(0)
-        return ((1 + r).cumprod() - 1) * 100
+    fig = go.Figure()
+    if show_mv:
+        fig.add_trace(go.Scatter(x=mv_plot.index, y=mv_plot.values, name="M·V",
+            line=dict(color="#1f77b4", width=2.5),
+            hovertemplate=f"M·V: %{{y:.2f}}{pct_sfx}<extra></extra>"))
+    if show_pq:
+        fig.add_trace(go.Scatter(x=pq_plot.index, y=pq_plot.values, name="P·Q",
+            line=dict(color="#d62728", width=2.5),
+            hovertemplate=f"P·Q: %{{y:.2f}}{pct_sfx}<extra></extra>"))
 
-    mv = _cumprod_from_zero(mv_raw_sl)
-    pq = _cumprod_from_zero(pq_raw_sl)
+    # Barre gap solo in modalità YoY con entrambe le serie
+    if mvpq_mode == "yoy" and show_mv and show_pq and not mv_plot.empty and not pq_plot.empty:
+        gap = (mv_plot - pq_plot).dropna()
+        fig.add_trace(go.Bar(x=gap.clip(lower=0).index, y=gap.clip(lower=0).values,
+            name="Gap+ (MV>PQ)", marker_color="rgba(44,160,44,0.45)"))
+        fig.add_trace(go.Bar(x=gap.clip(upper=0).index, y=gap.clip(upper=0).values,
+            name="Gap− (PQ>MV)", marker_color="rgba(214,39,40,0.35)"))
 
-    show_yoy = "yoy" in (mvpq_show or ["yoy", "cum"])
-    show_cum = "cum" in (mvpq_show or ["yoy", "cum"])
+    if mvpq_mode != "abs":
+        _hline_annot(fig, 0, "#555", "")
+    if show_mv and not mv_plot.empty:
+        mu = float(mv_plot.dropna().mean())
+        _hline_annot(fig, mu, "#1f77b4", f"μ M·V={mu:.2f}{pct_sfx}")
+    if show_pq and not pq_plot.empty:
+        mu = float(pq_plot.dropna().mean())
+        _hline_annot(fig, mu, "#d62728", f"μ P·Q={mu:.2f}{pct_sfx}")
 
-    if not show_mv and not show_pq:
-        return empty_fig("Seleziona almeno una serie MV=PQ (M·V o P·Q)")
-    if not show_yoy and not show_cum:
-        return empty_fig("Seleziona almeno YoY o CumProd per il grafico MV=PQ")
-
-    mv_yoy_mean = float(mv_yoy.dropna().mean())
-    pq_yoy_mean = float(pq_yoy.dropna().mean())
-    mv_cum_mean = float(mv.dropna().mean())
-    pq_cum_mean = float(pq.dropna().mean())
-
-    layout_base = dict(
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=11), x=0.01),
         hovermode="closest", autosize=True, barmode="overlay",
         legend=dict(orientation="h", yanchor="bottom", y=1.01,
                     xanchor="left", x=0, font=dict(size=9),
@@ -544,52 +568,8 @@ def make_mvpq_chart(df: pd.DataFrame,
         margin=dict(t=50, b=35, l=60, r=110),
         paper_bgcolor="white", plot_bgcolor="#f8f8f8",
     )
-
-    fig = go.Figure()
-
-    if show_yoy:
-        if show_mv:
-            fig.add_trace(go.Scatter(x=mv_yoy.index, y=mv_yoy.values, name="M·V YoY",
-                line=dict(color="#1f77b4", width=2.5),
-                hovertemplate="M·V YoY: %{y:.2f}%<extra></extra>"))
-        if show_pq:
-            fig.add_trace(go.Scatter(x=pq_yoy.index, y=pq_yoy.values, name="P·Q YoY",
-                line=dict(color="#d62728", width=2.5),
-                hovertemplate="P·Q YoY: %{y:.2f}%<extra></extra>"))
-        if show_mv and show_pq:
-            fig.add_trace(go.Bar(x=gap.clip(lower=0).index, y=gap.clip(lower=0).values,
-                name="Gap+ (MV>PQ)", marker_color="rgba(44,160,44,0.45)"))
-            fig.add_trace(go.Bar(x=gap.clip(upper=0).index, y=gap.clip(upper=0).values,
-                name="Gap− (PQ>MV)", marker_color="rgba(214,39,40,0.35)"))
-        _hline_annot(fig, 0, "#555", "")
-        if show_mv:
-            _hline_annot(fig, mv_yoy_mean, "#1f77b4", f"μ M·V={mv_yoy_mean:.2f}%")
-        if show_pq:
-            _hline_annot(fig, pq_yoy_mean, "#d62728", f"μ P·Q={pq_yoy_mean:.2f}%")
-
-    if show_cum:
-        if show_mv:
-            fig.add_trace(go.Scatter(x=mv.index, y=mv.values, name="M·V Cum%",
-                line=dict(color="#1f77b4", width=2, dash="dash"),
-                hovertemplate="M·V cum: %{y:.2f}%<extra></extra>"))
-        if show_pq:
-            fig.add_trace(go.Scatter(x=pq.index, y=pq.values, name="P·Q Cum%",
-                line=dict(color="#d62728", width=2, dash="dash"),
-                hovertemplate="P·Q cum: %{y:.2f}%<extra></extra>"))
-        if show_mv:
-            _hline_annot(fig, mv_cum_mean, "#1f77b4", f"μ M·V={mv_cum_mean:.2f}%")
-        if show_pq:
-            _hline_annot(fig, pq_cum_mean, "#d62728", f"μ P·Q={pq_cum_mean:.2f}%")
-
-    y_label = "Δ% YoY" if show_yoy and not show_cum else "Crescita % cum." if show_cum and not show_yoy else "Δ% YoY / Cum%"
-    title   = "MV = PQ — Δ% YoY" if show_yoy and not show_cum else "MV = PQ — Cumulata %" if show_cum and not show_yoy else "MV = PQ — YoY + Cumulata %"
-    fig.update_yaxes(title_text=y_label, showgrid=True, gridcolor="#e8e8e8")
-    fig.update_layout(
-        title=dict(text=title, font=dict(size=11), x=0.01),
-        **layout_base)
-
     fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
-    fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8")
+    fig.update_yaxes(title_text=y_label, showgrid=True, gridcolor="#e8e8e8")
     return fig
 
 
@@ -612,7 +592,7 @@ def _extract_mvpq_components(df: pd.DataFrame, suffix: str):
     return {"mv_raw": m2 * v, "pq_raw": p * q / 100, "common": common}, []
 
 
-def make_mvpq_both_chart(df: pd.DataFrame, start, end, mvpq_show: list, series_show: list):
+def make_mvpq_both_chart(df: pd.DataFrame, start, end, mvpq_mode: str, series_show: list):
     mv_usa_c, pq_usa_c = "#1f77b4", "#d62728"
     mv_eur_c, pq_eur_c = "#2ca02c", "#ff7f0e"
 
@@ -622,16 +602,33 @@ def make_mvpq_both_chart(df: pd.DataFrame, start, end, mvpq_show: list, series_s
     if comps_usa is None and comps_eur is None:
         return empty_fig(f"Dati MV=PQ non disponibili — USA: {miss_usa} | EUR: {miss_eur}")
 
-    show_yoy = "yoy" in (mvpq_show or [])
-    show_cum = "cum" in (mvpq_show or [])
     series_show = series_show or ["mv_usa", "pq_usa", "mv_eur", "pq_eur"]
 
-    def _yoy(s):
-        return ((s - s.shift(12)) / s.shift(12).abs()) * 100
+    def _yoy_s(s):
+        full = s / s.iloc[0] * 100
+        return ((full - full.shift(12)) / full.shift(12).abs()) * 100
 
-    def _cum(s):
-        r = _yoy(s.loc[start:end]) / 100
+    def _cum_s(s):
+        sl = s.loc[start:end].dropna()
+        r  = sl.pct_change().fillna(0)
         return ((1 + r).cumprod() - 1) * 100
+
+    def _abs_s(s):
+        sl = s.loc[start:end].dropna()
+        return sl / sl.iloc[0] * 100 if not sl.empty else sl
+
+    if mvpq_mode == "abs":
+        y_label = "Indice (base 100)"
+        title   = "MV = PQ — Confronto USA 🇺🇸 vs Europa 🇪🇺 — Valori Indicizzati"
+        pct_sfx = ""
+    elif mvpq_mode == "cum":
+        y_label = "Crescita % cumulata"
+        title   = "MV = PQ — Confronto USA 🇺🇸 vs Europa 🇪🇺 — Cumulata %"
+        pct_sfx = "%"
+    else:
+        y_label = "Δ% YoY"
+        title   = "MV = PQ — Confronto USA 🇺🇸 vs Europa 🇪🇺 — YoY"
+        pct_sfx = "%"
 
     fig = go.Figure()
     added = 0
@@ -645,52 +642,48 @@ def make_mvpq_both_chart(df: pd.DataFrame, start, end, mvpq_show: list, series_s
         mv_raw = comps["mv_raw"]
         pq_raw = comps["pq_raw"]
 
-        if show_yoy:
-            mv_yoy = _yoy(mv_raw).loc[start:end].dropna()
-            pq_yoy = _yoy(pq_raw).loc[start:end].dropna()
-            if mv_key in series_show and not mv_yoy.empty:
-                fig.add_trace(go.Scatter(x=mv_yoy.index, y=mv_yoy.values,
-                    name=f"M·V YoY {flag}", line=dict(color=mv_c, width=2.5),
-                    hovertemplate=f"M·V YoY {flag}: %{{y:.2f}}%<extra></extra>"))
-                added += 1
-            if pq_key in series_show and not pq_yoy.empty:
-                fig.add_trace(go.Scatter(x=pq_yoy.index, y=pq_yoy.values,
-                    name=f"P·Q YoY {flag}", line=dict(color=pq_c, width=2.5, dash="dot"),
-                    hovertemplate=f"P·Q YoY {flag}: %{{y:.2f}}%<extra></extra>"))
-                added += 1
+        if mvpq_mode == "abs":
+            mv_plot = _abs_s(mv_raw)
+            pq_plot = _abs_s(pq_raw)
+            mv_style = dict(color=mv_c, width=2.5)
+            pq_style = dict(color=pq_c, width=2.5, dash="dot")
+        elif mvpq_mode == "cum":
+            mv_plot = _cum_s(mv_raw)
+            pq_plot = _cum_s(pq_raw)
+            mv_style = dict(color=mv_c, width=2, dash="dash")
+            pq_style = dict(color=pq_c, width=2, dash="dashdot")
+        else:
+            mv_plot = _yoy_s(mv_raw).loc[start:end].dropna()
+            pq_plot = _yoy_s(pq_raw).loc[start:end].dropna()
+            mv_style = dict(color=mv_c, width=2.5)
+            pq_style = dict(color=pq_c, width=2.5, dash="dot")
 
-        if show_cum:
-            mv_cum = _cum(mv_raw).dropna()
-            pq_cum = _cum(pq_raw).dropna()
-            if mv_key in series_show and not mv_cum.empty:
-                fig.add_trace(go.Scatter(x=mv_cum.index, y=mv_cum.values,
-                    name=f"M·V Cum {flag}", line=dict(color=mv_c, width=2, dash="dash"),
-                    hovertemplate=f"M·V Cum {flag}: %{{y:.2f}}%<extra></extra>"))
-                added += 1
-            if pq_key in series_show and not pq_cum.empty:
-                fig.add_trace(go.Scatter(x=pq_cum.index, y=pq_cum.values,
-                    name=f"P·Q Cum {flag}", line=dict(color=pq_c, width=2, dash="dashdot"),
-                    hovertemplate=f"P·Q Cum {flag}: %{{y:.2f}}%<extra></extra>"))
-                added += 1
+        if mv_key in series_show and not mv_plot.empty:
+            fig.add_trace(go.Scatter(x=mv_plot.index, y=mv_plot.values,
+                name=f"M·V {flag}", line=mv_style,
+                hovertemplate=f"M·V {flag}: %{{y:.2f}}{pct_sfx}<extra></extra>"))
+            added += 1
+        if pq_key in series_show and not pq_plot.empty:
+            fig.add_trace(go.Scatter(x=pq_plot.index, y=pq_plot.values,
+                name=f"P·Q {flag}", line=pq_style,
+                hovertemplate=f"P·Q {flag}: %{{y:.2f}}{pct_sfx}<extra></extra>"))
+            added += 1
 
     if added == 0:
         return empty_fig("Seleziona almeno una serie MV=PQ nel pannello controlli")
 
-    _hline_annot(fig, 0, "#555", "")
-    layout_base = dict(
-        paper_bgcolor="#fff", plot_bgcolor="#fff",
+    if mvpq_mode != "abs":
+        _hline_annot(fig, 0, "#555", "")
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=11), x=0.01),
+        hovermode="x unified", autosize=True,
         legend=dict(orientation="h", y=-0.28, font=dict(size=9)),
-        margin=dict(l=50, r=20, t=40, b=70),
-        hovermode="x unified",
+        margin=dict(l=50, r=110, t=40, b=70),
+        paper_bgcolor="#fff", plot_bgcolor="#f8f8f8",
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
-    fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8",
-                     title_text="Δ% YoY / Crescita % cumulata")
-    fig.update_layout(
-        title=dict(text="MV = PQ — Confronto USA 🇺🇸 vs Europa 🇪🇺",
-                   font=dict(size=11), x=0.01),
-        **layout_base,
-    )
+    fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8", title_text=y_label)
     return fig
 
 
@@ -855,17 +848,18 @@ def _controls_bar():
                   "border-radius": "4px", "padding": "5px 12px",
                   "margin-right": "14px"}),
 
-        # MV=PQ
+        # MV=PQ vista (esclusivo)
         html.Div([
             html.Label("MV=PQ:", style={"font-size": "11px", "font-weight": "bold",
                                          "margin-right": "8px", "white-space": "nowrap"}),
-            dcc.Checklist(
+            dcc.RadioItems(
                 id="mvpq-show",
                 options=[
-                    {"label": " YoY",     "value": "yoy"},
-                    {"label": " CumProd", "value": "cum"},
+                    {"label": " Assoluta", "value": "abs"},
+                    {"label": " Δ% YoY",  "value": "yoy"},
+                    {"label": " Cumulata","value": "cum"},
                 ],
-                value=["yoy", "cum"], inline=True,
+                value="yoy", inline=True,
                 style={"font-size": "11px"},
                 inputStyle={"margin-right": "3px"},
                 labelStyle={"margin-right": "10px"},
@@ -1279,16 +1273,17 @@ def update_charts(slider_val, selected_series, view_mode, mvpq_show, mvpq_series
             "Crescita % cumulata", zero_line=True,
         )
 
-    # Grafico MV=PQ
+    # Grafico MV=PQ  (mvpq_show è ora una stringa: "abs" | "yoy" | "cum")
+    mvpq_mode = mvpq_show or "yoy"
     if source_type == "both":
-        fig_mvpq = make_mvpq_both_chart(df, start, end, mvpq_show, mvpq_series_show)
+        fig_mvpq = make_mvpq_both_chart(df, start, end, mvpq_mode, mvpq_series_show)
     else:
         suffix   = "eur" if source_type == "eur" else "usa"
         defaults = [f"mv_{suffix}", f"pq_{suffix}"]
         checked  = mvpq_series_show or defaults
         show_mv  = f"mv_{suffix}" in checked
         show_pq  = f"pq_{suffix}" in checked
-        fig_mvpq = make_mvpq_chart(df, start, end, mvpq_show, show_mv=show_mv, show_pq=show_pq)
+        fig_mvpq = make_mvpq_chart(df, start, end, mvpq_mode, show_mv=show_mv, show_pq=show_pq)
 
     return fig_abs, fig_yoy, fig_cum, fig_mvpq, abs_style, yoy_style, cum_style, mvpq_style
 
