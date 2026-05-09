@@ -1164,14 +1164,16 @@ def slider_label(val):
     Input("sel-all",     "n_clicks"),
     Input("sel-none",    "n_clicks"),
     State("series-checklist", "options"),
-    prevent_initial_call=True,
+    prevent_initial_call=False,
 )
 def manage_series_checklist(data, _all, _none, current_opts):
     triggered = callback_context.triggered_id
     hint_visible = {"font-size": "10px", "color": "#aaa", "font-style": "italic"}
     hint_hidden  = {"display": "none"}
 
-    if triggered == "store-data":
+    # triggered=None → render iniziale (prima che auto_load abbia dati)
+    # triggered="store-data" → auto_load ha aggiornato i dati
+    if triggered is None or triggered == "store-data":
         if not data:
             return [], [], hint_visible
         df   = pd.read_json(io.StringIO(data), orient="split")
