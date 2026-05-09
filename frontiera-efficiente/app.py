@@ -5,6 +5,7 @@ Ottimizzazione di portafoglio alla Markowitz con visualizzazione interattiva.
 
 import io
 import json
+import pickle
 import threading
 import concurrent.futures
 import os
@@ -62,6 +63,12 @@ DOWNLOAD_TIMEOUT= 40
 _DL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
 _DL_BUFFER = {}
 _DL_LOCK   = threading.Lock()
+
+# pkl salvato da portafoglio/app.py dopo ogni download
+_PORT_PKL  = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', 'portafoglio', 'sessions', 'market_data.pkl',
+))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Funzioni matematiche
@@ -276,6 +283,30 @@ def _load_asset_list():
 
 _TICKERS, _DESCRIZIONI, _VALUTA = _load_asset_list()
 
+
+def _preload_portafoglio_data():
+    """Legge market_data.pkl di portafoglio e pre-popola _DL_BUFFER."""
+    try:
+        if not os.path.exists(_PORT_PKL):
+            return
+        with open(_PORT_PKL, 'rb') as f:
+            data = pickle.load(f)
+        prices_df  = data.get('original_prices')
+        returns_df = data.get('close_returns')
+        if prices_df is None or returns_df is None:
+            return
+        with _DL_LOCK:
+            _DL_BUFFER['prices']  = prices_df
+            _DL_BUFFER['returns'] = returns_df
+            _DL_STATE['status']   = 'done'
+            _DL_STATE['total']    = len(prices_df.columns)
+            _DL_STATE['current']  = len(prices_df.columns)
+        print(f"✓ Frontiera: dati caricati da portafoglio — {len(prices_df.columns)} asset")
+    except Exception as e:
+        print(f"⚠ Frontiera: impossibile caricare market_data.pkl: {e}")
+
+_preload_portafoglio_data()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers dati
 # ─────────────────────────────────────────────────────────────────────────────
@@ -474,6 +505,7 @@ app.layout = html.Div([
     ], style={'marginTop':'64px'}),
 
     # ── Stores ───────────────────────────────────────────────────────────────
+    dcc.Store(id='_fe-page-load',    data=1),
     dcc.Store(id='fe-stock-data',    data=None),
     dcc.Store(id='fe-prices-data',   data=None),
     dcc.Store(id='fe-loaded-flag',   data=False),
@@ -513,6 +545,27 @@ app.layout = html.Div([
 # ─────────────────────────────────────────────────────────────────────────────
 # Callbacks
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.callback(
+    Output('fe-stock-data',   'data',     allow_duplicate=True),
+    Output('fe-prices-data',  'data',     allow_duplicate=True),
+    Output('fe-loaded-flag',  'data',     allow_duplicate=True),
+    Output('fe-last-updated', 'children', allow_duplicate=True),
+    Input('_fe-page-load',    'data'),
+    prevent_initial_call='initial_duplicate',
+)
+def on_page_load(_):
+    with _DL_LOCK:
+        buf     = dict(_DL_BUFFER)
+        saved_at = buf.get('saved_at', '')
+    if 'returns' in buf and 'prices' in buf:
+        ret_json    = buf['returns'].to_json(orient='split', date_format='iso')
+        prices_json = buf['prices'].to_json(orient='split', date_format='iso')
+        n_asset     = len(buf['prices'].columns)
+        label       = f'Da portafoglio ({n_asset} asset)' + (f' — {saved_at}' if saved_at else '')
+        return ret_json, prices_json, True, label
+    raise PreventUpdate
+
 
 @app.callback(
     Output('fe-arima-horizon-div', 'style'),
