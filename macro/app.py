@@ -807,14 +807,13 @@ def _controls_bar():
         html.Div([
             html.Label("Vista:", style={"font-size": "11px", "font-weight": "bold",
                                         "margin-right": "8px", "white-space": "nowrap"}),
-            dcc.RadioItems(
+            dcc.Checklist(
                 id="view-mode",
                 options=[
-                    {"label": " Assoluta",              "value": "abs"},
-                    {"label": " Δ% YoY",                "value": "yoy"},
-                    {"label": " Cumulata % (da slider)", "value": "cumsum"},
+                    {"label": " Assoluta", "value": "abs"},
+                    {"label": " Δ% YoY",  "value": "yoy"},
                 ],
-                value="yoy", inline=True,
+                value=["yoy"], inline=True,
                 style={"font-size": "11px"},
                 inputStyle={"margin-right": "3px"},
                 labelStyle={"margin-right": "14px"},
@@ -970,16 +969,31 @@ app.layout = html.Div([
             html.Div([
                 _slider_area(),
 
-                # Grafico principale
-                dcc.Loading(type="circle", color="#1a3a6b", children=[
-                    dcc.Graph(
-                        id="chart-main",
-                        figure=empty_fig("Clicca  🔄 Carica dati  per scaricare le serie"),
-                        style={"height": "42vh", "width": "100%"},
-                        config={"responsive": True, "scrollZoom": True,
-                                "displayModeBar": True, "displaylogo": False},
-                    ),
-                ]),
+                # Grafico Assoluto
+                html.Div([
+                    dcc.Loading(type="circle", color="#1a3a6b", children=[
+                        dcc.Graph(
+                            id="chart-main",
+                            figure=empty_fig("Clicca  🔄 Carica dati  per scaricare le serie"),
+                            style={"height": "42vh", "width": "100%"},
+                            config={"responsive": True, "scrollZoom": True,
+                                    "displayModeBar": True, "displaylogo": False},
+                        ),
+                    ]),
+                ], id="main-abs-wrapper"),
+
+                # Grafico YoY
+                html.Div([
+                    dcc.Loading(type="circle", color="#1a3a6b", children=[
+                        dcc.Graph(
+                            id="chart-main-yoy",
+                            figure=empty_fig("Clicca  🔄 Carica dati  per scaricare le serie"),
+                            style={"height": "42vh", "width": "100%"},
+                            config={"responsive": True, "scrollZoom": True,
+                                    "displayModeBar": True, "displaylogo": False},
+                        ),
+                    ]),
+                ], id="main-yoy-wrapper", style={"display": "none"}),
 
                 # Banda + Grafico MV=PQ (nascosti se nessun checkbox selezionato)
                 html.Div([
@@ -1154,25 +1168,34 @@ def sel_desel(a, b, ids):
 
 
 @app.callback(
-    Output("chart-main",    "figure"),
-    Output("chart-mvpq",    "figure"),
-    Output("mvpq-wrapper",  "style"),
-    Input("store-data",       "data"),
-    Input("date-slider",      "value"),
+    Output("chart-main",        "figure"),
+    Output("chart-main-yoy",    "figure"),
+    Output("chart-mvpq",        "figure"),
+    Output("main-abs-wrapper",  "style"),
+    Output("main-yoy-wrapper",  "style"),
+    Output("mvpq-wrapper",      "style"),
+    Input("store-data",         "data"),
+    Input("date-slider",        "value"),
     Input({"type": "series-check", "index": ALL}, "value"),
-    Input("view-mode",        "value"),
-    Input("mvpq-show",        "value"),
-    Input("mvpq-series-show", "value"),
+    Input("view-mode",          "value"),
+    Input("mvpq-show",          "value"),
+    Input("mvpq-series-show",   "value"),
     State("store-mon-source-type", "data"),
     prevent_initial_call=False,
 )
 def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_show, source_type):
-    show_mvpq = bool(mvpq_show)
-    wrapper_style = {} if show_mvpq else {"display": "none"}
+    view_mode   = view_mode or []
+    show_abs    = "abs" in view_mode
+    show_yoy    = "yoy" in view_mode
+    show_mvpq   = bool(mvpq_show)
+
+    abs_style   = {} if show_abs  else {"display": "none"}
+    yoy_style   = {} if show_yoy  else {"display": "none"}
+    mvpq_style  = {} if show_mvpq else {"display": "none"}
 
     if not data:
         f = empty_fig("Clicca  🔄 Carica dati  per scaricare le serie")
-        return f, f, wrapper_style
+        return f, f, f, abs_style, yoy_style, mvpq_style
 
     df = pd.read_json(io.StringIO(data), orient="split")
     df.index = pd.to_datetime(df.index)
@@ -1191,38 +1214,38 @@ def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_sh
     suffix_map = {"eur": " — Area Euro (Eurostat)", "both": " — USA 🇺🇸 vs Europa 🇪🇺", "usa": " — USA (FRED)"}
     title_suffix = suffix_map.get(source_type or "usa", " — USA (FRED)")
 
-    # Grafico principale
+    empty_sel = empty_fig("Seleziona almeno una serie nel pannello di sinistra")
+    empty_rng = empty_fig("Nessun dato nel range selezionato")
+
+    # Grafico Assoluto
     if not avail:
-        fig1 = empty_fig("Seleziona almeno una serie nel pannello di sinistra")
+        fig_abs = empty_sel
     else:
-        df_plot = transform_df(df[avail], view_mode, start, end)
-        if df_plot.empty:
-            fig1 = empty_fig("Nessun dato nel range selezionato")
-        else:
-            title_map = {
-                "abs":    "Serie Monetarie — Valori Assoluti",
-                "yoy":    "Serie Monetarie — Δ% Anno su Anno",
-                "cumsum": "Serie Monetarie — Crescita % Cumulata",
-            }
-            ylabel_map = {
-                "abs":    "Valore",
-                "yoy":    "Δ% YoY",
-                "cumsum": "Crescita % cumulata",
-            }
-            fig1 = make_line_chart(
-                df_plot,
-                title_map.get(view_mode, "Serie Monetarie") + title_suffix,
-                ylabel_map.get(view_mode, ""),
-                zero_line=(view_mode != "abs"),
-            )
+        df_abs = transform_df(df[avail], "abs", start, end)
+        fig_abs = empty_rng if df_abs.empty else make_line_chart(
+            df_abs,
+            "Serie Monetarie — Valori Assoluti" + title_suffix,
+            "Valore", zero_line=False,
+        )
+
+    # Grafico YoY
+    if not avail:
+        fig_yoy = empty_sel
+    else:
+        df_yoy = transform_df(df[avail], "yoy", start, end)
+        fig_yoy = empty_rng if df_yoy.empty else make_line_chart(
+            df_yoy,
+            "Serie Monetarie — Δ% Anno su Anno" + title_suffix,
+            "Δ% YoY", zero_line=True,
+        )
 
     # Grafico MV=PQ
     if source_type == "both":
-        fig2 = make_mvpq_both_chart(df, start, end, mvpq_show, mvpq_series_show)
+        fig_mvpq = make_mvpq_both_chart(df, start, end, mvpq_show, mvpq_series_show)
     else:
-        fig2 = make_mvpq_chart(df, start, end, mvpq_show)
+        fig_mvpq = make_mvpq_chart(df, start, end, mvpq_show)
 
-    return fig1, fig2, wrapper_style
+    return fig_abs, fig_yoy, fig_mvpq, abs_style, yoy_style, mvpq_style
 
 
 # ─────────────────────────────────────────────────────────────────────────────
