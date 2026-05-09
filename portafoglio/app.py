@@ -845,70 +845,8 @@ _STATUS_RED   = {**_STATUS_GREY, 'color': '#c0392b', 'fontWeight': '600'}
 # Layout principale
 # ─────────────────────────────────────────────────────────────────────────────
 def _navbar():
-    """Navbar identica al sito profilo, sticky in cima alla dashboard."""
-    link_style = {
-        'fontSize': '0.82rem', 'fontWeight': '600',
-        'color': '#6b7a99', 'letterSpacing': '0.04em',
-        'textTransform': 'uppercase', 'textDecoration': 'none',
-        'transition': 'color 0.2s', 'fontFamily': 'Inter, sans-serif',
-    }
-    return html.Nav([
-        # Brand
-        html.A([
-            html.Span('A·C', style={
-                'fontFamily': "'Playfair Display', serif",
-                'fontSize': '1.1rem', 'color': '#1a3a6b',
-                'fontWeight': '700', 'marginRight': '10px',
-            }),
-            html.Span('FinecoBank', style={
-                'fontFamily': 'Inter, sans-serif',
-                'fontSize': '0.62rem', 'fontWeight': '700',
-                'letterSpacing': '0.1em', 'textTransform': 'uppercase',
-                'color': '#f37021',
-                'background': 'rgba(243,112,33,0.1)',
-                'border': '1px solid rgba(243,112,33,0.3)',
-                'padding': '3px 8px', 'borderRadius': '4px',
-            }),
-        ], href='https://andreacappelletti.app', target='_blank',
-           style={'textDecoration': 'none', 'display': 'flex', 'alignItems': 'center'}),
-
-        # Link di navigazione
-        html.Ul([
-            html.Li(html.A('Home',         href='https://andreacappelletti.app',            target='_blank', style=link_style)),
-            html.Li(html.A('Chi Sono',     href='https://andreacappelletti.app#chi-sono',   target='_blank', style=link_style)),
-            html.Li(html.A('Esperienza',   href='https://andreacappelletti.app#esperienza', target='_blank', style=link_style)),
-            html.Li(html.A('Strumenti',    href='https://andreacappelletti.app#dashboard',  target='_blank', style=link_style)),
-            html.Li(html.A('Prenota Call', href='https://andreacappelletti.app#prenota',    target='_blank', style=link_style)),
-            html.Li(html.A('Contatti',     href='https://andreacappelletti.app#contatti',   target='_blank', style=link_style)),
-        ], style={'display': 'flex', 'gap': '2rem', 'listStyle': 'none',
-                  'margin': '0', 'padding': '0', 'alignItems': 'center'}),
-
-        # CTA
-        html.A([
-            html.I(className='fa-regular fa-calendar', style={'marginRight': '7px'}),
-            'Prenota call',
-        ], href='https://andreacappelletti.app#prenota', target='_blank', style={
-            'padding': '9px 20px',
-            'background': '#1a3a6b', 'color': 'white',
-            'borderRadius': '7px', 'fontSize': '0.8rem', 'fontWeight': '700',
-            'letterSpacing': '0.04em', 'textTransform': 'uppercase',
-            'textDecoration': 'none', 'display': 'inline-flex',
-            'alignItems': 'center', 'fontFamily': 'Inter, sans-serif',
-        }),
-    ], style={
-        'position': 'fixed', 'top': '0', 'left': '0', 'right': '0',
-        'zIndex': '1000',
-        'display': 'flex', 'alignItems': 'center',
-        'justifyContent': 'space-between',
-        'padding': '0 5%', 'height': '64px',
-        'background': 'rgba(255,255,255,0.96)',
-        'backdropFilter': 'blur(14px)',
-        'borderBottom': '1px solid #e2e8f0',
-        'boxShadow': '0 1px 8px rgba(26,58,107,0.07)',
-        'fontFamily': 'Inter, sans-serif',
-    })
-
-
+    from navbar import make_navbar
+    return make_navbar()
 app.layout = html.Div([
     # ── Navbar ───────────────────────────────────────────────────────────────
     _navbar(),
