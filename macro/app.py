@@ -645,7 +645,7 @@ def make_mvpq_chart(df: pd.DataFrame,
 
 
 def _extract_mvpq_components(df: pd.DataFrame, suffix: str):
-    col_m2 = next((c for c in df.columns if ("M2 Money" in c or "M2 " in c) and c.endswith(suffix)), None)
+    col_m2 = next((c for c in df.columns if "M2 Money" in c and c.endswith(suffix)), None)
     col_v  = next((c for c in df.columns if ("Velocity" in c or "Velocit" in c) and c.endswith(suffix)), None)
     col_p  = next((c for c in df.columns if "CPI All" in c and c.endswith(suffix)), None)
     col_q  = next((c for c in df.columns if ("GDP" in c or "PIL" in c) and c.endswith(suffix)), None)
