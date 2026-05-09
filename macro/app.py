@@ -723,13 +723,8 @@ def _navbar():
 def _sidebar():
     return html.Div([
         html.Div(html.B("Serie attive", style={"font-size": "11px"}),
-                 style={"padding-bottom": "6px", "margin-bottom": "8px",
+                 style={"padding-bottom": "6px", "margin-bottom": "6px",
                         "border-bottom": "2px solid #ccc"}),
-        html.Div(id="mon-series-checklist",
-                 children="— carica i dati per vedere le serie —",
-                 style={"font-size": "10px", "color": "#aaa",
-                        "font-style": "italic"}),
-        html.Hr(style={"margin": "10px 0"}),
         html.Div("Seleziona / Deseleziona", style={
             "font-size": "9px", "font-weight": "600",
             "color": "#6b7a99", "margin-bottom": "5px",
@@ -746,7 +741,20 @@ def _sidebar():
                                "cursor": "pointer",
                                "background": "#fce4ec", "border": "1px solid #f48fb1",
                                "border-radius": "4px", "color": "#880e4f"}),
-        ], style={"display": "flex"}),
+        ], style={"display": "flex", "margin-bottom": "8px"}),
+        html.Hr(style={"margin": "6px 0"}),
+        dcc.Checklist(
+            id="series-checklist",
+            options=[],
+            value=[],
+            style={"font-size": "10px"},
+            inputStyle={"margin-right": "4px"},
+            labelStyle={"display": "block", "margin-bottom": "5px",
+                        "line-height": "1.4", "cursor": "pointer"},
+        ),
+        html.Div("— carica i dati per vedere le serie —",
+                 id="series-empty-hint",
+                 style={"font-size": "10px", "color": "#aaa", "font-style": "italic"}),
     ], style={"padding": "12px", "overflow-y": "auto"})
 
 
@@ -790,10 +798,11 @@ def _controls_bar():
             dcc.Checklist(
                 id="view-mode",
                 options=[
-                    {"label": " Assoluta", "value": "abs"},
-                    {"label": " Δ% YoY",  "value": "yoy"},
+                    {"label": " Assoluta",   "value": "abs"},
+                    {"label": " Δ% YoY",     "value": "yoy"},
+                    {"label": " Cumulativa", "value": "cum"},
                 ],
-                value=["yoy"], inline=True,
+                value=["abs", "yoy"], inline=True,
                 style={"font-size": "11px"},
                 inputStyle={"margin-right": "3px"},
                 labelStyle={"margin-right": "14px"},
@@ -973,6 +982,19 @@ app.layout = html.Div([
                     ]),
                 ], id="main-yoy-wrapper", style={"display": "none"}),
 
+                # Grafico Cumulativo
+                html.Div([
+                    dcc.Loading(type="circle", color="#1a3a6b", children=[
+                        dcc.Graph(
+                            id="chart-main-cum",
+                            figure=empty_fig("Clicca  🔄 Carica dati  per scaricare le serie"),
+                            style={"height": "42vh", "width": "100%"},
+                            config={"responsive": True, "scrollZoom": True,
+                                    "displayModeBar": True, "displaylogo": False},
+                        ),
+                    ]),
+                ], id="main-cum-wrapper", style={"display": "none"}),
+
                 # Banda + Grafico MV=PQ (nascosti se nessun checkbox selezionato)
                 html.Div([
                     html.Div([
@@ -1112,84 +1134,68 @@ def slider_label(val):
 
 
 @app.callback(
-    Output("mon-series-checklist", "children"),
-    Input("store-data",            "data"),
-    State("store-mon-source-type", "data"),
-    prevent_initial_call=False,
-)
-def populate_checklist(data, source_type):
-    if not data:
-        return "— carica i dati per vedere le serie —"
-    df = pd.read_json(io.StringIO(data), orient="split")
-    cols = sorted(df.columns.tolist())
-    rows = []
-    for col in cols:
-        if source_type == "both":
-            dot_color = "#1565c0" if col.endswith("🇪🇺") else "#b71c1c"
-        elif source_type == "eur":
-            dot_color = "#1565c0"
-        else:
-            dot_color = "#b71c1c"
-        short = col[:32] + "…" if len(col) > 32 else col
-        rows.append(html.Div([
-            html.Span("●", style={"color": dot_color, "font-size": "9px",
-                                   "margin-right": "4px", "vertical-align": "middle"}),
-            dcc.Checklist(
-                id={"type": "series-check", "index": col},
-                options=[{"label": f" {short}", "value": col}],
-                value=[col],
-                style={"font-size": "10px", "display": "inline"},
-                inputStyle={"margin-right": "3px"},
-            ),
-        ], style={"margin-bottom": "4px", "display": "flex", "align-items": "center"}))
-    return rows
-
-
-@app.callback(
-    Output({"type": "series-check", "index": ALL}, "value"),
-    Input("sel-all",  "n_clicks"),
-    Input("sel-none", "n_clicks"),
-    State({"type": "series-check", "index": ALL}, "id"),
+    Output("series-checklist",  "options"),
+    Output("series-checklist",  "value"),
+    Output("series-empty-hint", "style"),
+    Input("store-data",  "data"),
+    Input("sel-all",     "n_clicks"),
+    Input("sel-none",    "n_clicks"),
+    State("series-checklist", "options"),
     prevent_initial_call=True,
 )
-def sel_desel(a, b, ids):
-    ctx = callback_context
-    if not ctx.triggered:
-        raise PreventUpdate
-    if ctx.triggered_id == "sel-none":
-        return [[] for _ in ids]
-    return [[i["index"]] for i in ids]
+def manage_series_checklist(data, _all, _none, current_opts):
+    triggered = callback_context.triggered_id
+    hint_visible = {"font-size": "10px", "color": "#aaa", "font-style": "italic"}
+    hint_hidden  = {"display": "none"}
+
+    if triggered == "store-data":
+        if not data:
+            return [], [], hint_visible
+        df   = pd.read_json(io.StringIO(data), orient="split")
+        cols = sorted(df.columns.tolist())
+        opts = [{"label": f" {c}", "value": c} for c in cols]
+        return opts, cols, hint_hidden
+
+    # sel-all / sel-none
+    opts = current_opts or []
+    if triggered == "sel-none":
+        return no_update, [], no_update
+    return no_update, [o["value"] for o in opts], no_update
 
 
 @app.callback(
     Output("chart-main",        "figure"),
     Output("chart-main-yoy",    "figure"),
+    Output("chart-main-cum",    "figure"),
     Output("chart-mvpq",        "figure"),
     Output("main-abs-wrapper",  "style"),
     Output("main-yoy-wrapper",  "style"),
+    Output("main-cum-wrapper",  "style"),
     Output("mvpq-wrapper",      "style"),
     Input("store-data",         "data"),
     Input("date-slider",        "value"),
-    Input({"type": "series-check", "index": ALL}, "value"),
+    Input("series-checklist",   "value"),
     Input("view-mode",          "value"),
     Input("mvpq-show",          "value"),
     Input("mvpq-series-show",   "value"),
     State("store-mon-source-type", "data"),
     prevent_initial_call=False,
 )
-def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_show, source_type):
-    view_mode   = view_mode or []
-    show_abs    = "abs" in view_mode
-    show_yoy    = "yoy" in view_mode
-    show_mvpq   = bool(mvpq_show)
+def update_charts(data, slider_val, selected_series, view_mode, mvpq_show, mvpq_series_show, source_type):
+    view_mode  = view_mode or []
+    show_abs   = "abs" in view_mode
+    show_yoy   = "yoy" in view_mode
+    show_cum   = "cum" in view_mode
+    show_mvpq  = bool(mvpq_show)
 
-    abs_style   = {} if show_abs  else {"display": "none"}
-    yoy_style   = {} if show_yoy  else {"display": "none"}
-    mvpq_style  = {} if show_mvpq else {"display": "none"}
+    abs_style  = {} if show_abs  else {"display": "none"}
+    yoy_style  = {} if show_yoy  else {"display": "none"}
+    cum_style  = {} if show_cum  else {"display": "none"}
+    mvpq_style = {} if show_mvpq else {"display": "none"}
 
     if not data:
         f = empty_fig("Clicca  🔄 Carica dati  per scaricare le serie")
-        return f, f, f, abs_style, yoy_style, mvpq_style
+        return f, f, f, f, abs_style, yoy_style, cum_style, mvpq_style
 
     df = pd.read_json(io.StringIO(data), orient="split")
     df.index = pd.to_datetime(df.index)
@@ -1201,11 +1207,9 @@ def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_sh
         start = df.index.min()
         end   = df.index.max()
 
-    selected = [v[0] for v in (checks or []) if v]
-    avail    = [c for c in selected if c in df.columns]
+    avail = [c for c in (selected_series or []) if c in df.columns]
 
-    # Suffisso titolo
-    suffix_map = {"eur": " — Area Euro (Eurostat)", "both": " — USA 🇺🇸 vs Europa 🇪🇺", "usa": " — USA (FRED)"}
+    suffix_map   = {"eur": " — Area Euro (Eurostat)", "both": " — USA 🇺🇸 vs Europa 🇪🇺", "usa": " — USA (FRED)"}
     title_suffix = suffix_map.get(source_type or "usa", " — USA (FRED)")
 
     empty_sel = empty_fig("Seleziona almeno una serie nel pannello di sinistra")
@@ -1233,6 +1237,17 @@ def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_sh
             "Δ% YoY", zero_line=True,
         )
 
+    # Grafico Cumulativo
+    if not avail:
+        fig_cum = empty_sel
+    else:
+        df_cum = transform_df(df[avail], "cumsum", start, end)
+        fig_cum = empty_rng if df_cum.empty else make_line_chart(
+            df_cum,
+            "Serie Monetarie — Crescita Cumulativa %" + title_suffix,
+            "Crescita % cumulata", zero_line=True,
+        )
+
     # Grafico MV=PQ
     if source_type == "both":
         fig_mvpq = make_mvpq_both_chart(df, start, end, mvpq_show, mvpq_series_show)
@@ -1244,7 +1259,7 @@ def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_sh
         show_pq  = f"pq_{suffix}" in checked
         fig_mvpq = make_mvpq_chart(df, start, end, mvpq_show, show_mv=show_mv, show_pq=show_pq)
 
-    return fig_abs, fig_yoy, fig_mvpq, abs_style, yoy_style, mvpq_style
+    return fig_abs, fig_yoy, fig_cum, fig_mvpq, abs_style, yoy_style, cum_style, mvpq_style
 
 
 # ─────────────────────────────────────────────────────────────────────────────
