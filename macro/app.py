@@ -585,7 +585,6 @@ def make_mvpq_chart(df: pd.DataFrame,
     fig.update_yaxes(title_text=y_label, showgrid=True, gridcolor="#e8e8e8")
     fig.update_layout(
         title=dict(text=title, font=dict(size=11), x=0.01),
-        barmode="overlay",
         **layout_base)
 
     fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
