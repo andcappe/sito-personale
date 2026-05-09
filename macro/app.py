@@ -417,7 +417,9 @@ def make_line_chart(df: pd.DataFrame, title: str,
 
 def make_mvpq_chart(df: pd.DataFrame,
                     start: pd.Timestamp, end: pd.Timestamp,
-                    mvpq_show: list = None) -> go.Figure:
+                    mvpq_show: list = None,
+                    show_mv: bool = True,
+                    show_pq: bool = True) -> go.Figure:
     col_m2 = next((c for c in df.columns if "M2 Money" in c or c == "M2 Velocity"[:0] or "M2 " in c), None)
     col_m2 = next((c for c in df.columns if "M2 Money" in c), None)
     col_v  = next((c for c in df.columns if "Velocity" in c), None)
@@ -464,6 +466,8 @@ def make_mvpq_chart(df: pd.DataFrame,
     show_yoy = "yoy" in (mvpq_show or ["yoy", "cum"])
     show_cum = "cum" in (mvpq_show or ["yoy", "cum"])
 
+    if not show_mv and not show_pq:
+        return empty_fig("Seleziona almeno una serie MV=PQ (M·V o P·Q)")
     if not show_yoy and not show_cum:
         return empty_fig("Seleziona almeno YoY o CumProd per il grafico MV=PQ")
 
@@ -487,73 +491,49 @@ def make_mvpq_chart(df: pd.DataFrame,
                       annotation_text=text, annotation_position="right",
                       annotation_font=dict(size=9, color=color), **kw)
 
-    if show_yoy and show_cum:
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            vertical_spacing=0.10, row_heights=[0.48, 0.52],
-                            subplot_titles=["Δ% YoY — M·V vs P·Q | Gap = eccesso monetario",
-                                            "Crescita % cumulata (base 0 = inizio slider)"])
-        fig.add_trace(go.Scatter(x=mv_yoy.index, y=mv_yoy.values, name="M·V YoY",
-            line=dict(color="#1f77b4", width=2),
-            hovertemplate="M·V YoY: %{y:.2f}%<extra></extra>"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=pq_yoy.index, y=pq_yoy.values, name="P·Q YoY",
-            line=dict(color="#d62728", width=2),
-            hovertemplate="P·Q YoY: %{y:.2f}%<extra></extra>"), row=1, col=1)
-        fig.add_trace(go.Bar(x=gap.clip(lower=0).index, y=gap.clip(lower=0).values,
-            name="Gap+ (MV>PQ)", marker_color="rgba(44,160,44,0.45)"), row=1, col=1)
-        fig.add_trace(go.Bar(x=gap.clip(upper=0).index, y=gap.clip(upper=0).values,
-            name="Gap− (PQ>MV)", marker_color="rgba(214,39,40,0.35)"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=mv.index, y=mv.values, name="M·V CumProd",
-            line=dict(color="#1f77b4", width=2.5),
-            hovertemplate="M·V cum: %{y:.2f}%<extra></extra>"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=pq.index, y=pq.values, name="P·Q CumProd",
-            line=dict(color="#d62728", width=2.5),
-            hovertemplate="P·Q cum: %{y:.2f}%<extra></extra>"), row=2, col=1)
-        _hline_annot(fig, 0,           "#555",    "",                             row=1)
-        _hline_annot(fig, mv_yoy_mean, "#1f77b4", f"μ M·V={mv_yoy_mean:.2f}%",   row=1)
-        _hline_annot(fig, pq_yoy_mean, "#d62728", f"μ P·Q={pq_yoy_mean:.2f}%",   row=1)
-        _hline_annot(fig, 0,           "#999",    "",                             row=2)
-        _hline_annot(fig, mv_cum_mean, "#1f77b4", f"μ M·V={mv_cum_mean:.2f}%",   row=2)
-        _hline_annot(fig, pq_cum_mean, "#d62728", f"μ P·Q={pq_cum_mean:.2f}%",   row=2)
-        fig.update_yaxes(title_text="Δ% YoY",         title_font=dict(size=9), row=1, col=1)
-        fig.update_yaxes(title_text="Crescita % cum.", title_font=dict(size=9), row=2, col=1)
-        fig.update_layout(
-            title=dict(text="MV = PQ — YoY | Cumulata % (base slider)",
-                       font=dict(size=11), x=0.01), **layout_base)
+    fig = go.Figure()
 
-    elif show_yoy:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=mv_yoy.index, y=mv_yoy.values, name="M·V YoY",
-            line=dict(color="#1f77b4", width=2.5),
-            hovertemplate="M·V YoY: %{y:.2f}%<extra></extra>"))
-        fig.add_trace(go.Scatter(x=pq_yoy.index, y=pq_yoy.values, name="P·Q YoY",
-            line=dict(color="#d62728", width=2.5),
-            hovertemplate="P·Q YoY: %{y:.2f}%<extra></extra>"))
-        fig.add_trace(go.Bar(x=gap.clip(lower=0).index, y=gap.clip(lower=0).values,
-            name="Gap+ (MV>PQ)", marker_color="rgba(44,160,44,0.45)"))
-        fig.add_trace(go.Bar(x=gap.clip(upper=0).index, y=gap.clip(upper=0).values,
-            name="Gap− (PQ>MV)", marker_color="rgba(214,39,40,0.35)"))
-        _hline_annot(fig, 0,           "#555",    "")
-        _hline_annot(fig, mv_yoy_mean, "#1f77b4", f"μ M·V={mv_yoy_mean:.2f}%")
-        _hline_annot(fig, pq_yoy_mean, "#d62728", f"μ P·Q={pq_yoy_mean:.2f}%")
-        fig.update_yaxes(title_text="Δ% YoY")
-        fig.update_layout(
-            title=dict(text="MV = PQ — Δ% YoY | Gap = eccesso monetario",
-                       font=dict(size=11), x=0.01), **layout_base)
-    else:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=mv.index, y=mv.values, name="M·V CumProd",
-            line=dict(color="#1f77b4", width=2.5),
-            hovertemplate="M·V cum: %{y:.2f}%<extra></extra>"))
-        fig.add_trace(go.Scatter(x=pq.index, y=pq.values, name="P·Q CumProd",
-            line=dict(color="#d62728", width=2.5),
-            hovertemplate="P·Q cum: %{y:.2f}%<extra></extra>"))
-        _hline_annot(fig, 0,           "#999",    "")
-        _hline_annot(fig, mv_cum_mean, "#1f77b4", f"μ M·V={mv_cum_mean:.2f}%")
-        _hline_annot(fig, pq_cum_mean, "#d62728", f"μ P·Q={pq_cum_mean:.2f}%")
-        fig.update_yaxes(title_text="Crescita % cumulata")
-        fig.update_layout(
-            title=dict(text="MV = PQ — Crescita % cumulata",
-                       font=dict(size=11), x=0.01), **layout_base)
+    if show_yoy:
+        if show_mv:
+            fig.add_trace(go.Scatter(x=mv_yoy.index, y=mv_yoy.values, name="M·V YoY",
+                line=dict(color="#1f77b4", width=2.5),
+                hovertemplate="M·V YoY: %{y:.2f}%<extra></extra>"))
+        if show_pq:
+            fig.add_trace(go.Scatter(x=pq_yoy.index, y=pq_yoy.values, name="P·Q YoY",
+                line=dict(color="#d62728", width=2.5),
+                hovertemplate="P·Q YoY: %{y:.2f}%<extra></extra>"))
+        if show_mv and show_pq:
+            fig.add_trace(go.Bar(x=gap.clip(lower=0).index, y=gap.clip(lower=0).values,
+                name="Gap+ (MV>PQ)", marker_color="rgba(44,160,44,0.45)"))
+            fig.add_trace(go.Bar(x=gap.clip(upper=0).index, y=gap.clip(upper=0).values,
+                name="Gap− (PQ>MV)", marker_color="rgba(214,39,40,0.35)"))
+        _hline_annot(fig, 0, "#555", "")
+        if show_mv:
+            _hline_annot(fig, mv_yoy_mean, "#1f77b4", f"μ M·V={mv_yoy_mean:.2f}%")
+        if show_pq:
+            _hline_annot(fig, pq_yoy_mean, "#d62728", f"μ P·Q={pq_yoy_mean:.2f}%")
+
+    if show_cum:
+        if show_mv:
+            fig.add_trace(go.Scatter(x=mv.index, y=mv.values, name="M·V Cum%",
+                line=dict(color="#1f77b4", width=2, dash="dash"),
+                hovertemplate="M·V cum: %{y:.2f}%<extra></extra>"))
+        if show_pq:
+            fig.add_trace(go.Scatter(x=pq.index, y=pq.values, name="P·Q Cum%",
+                line=dict(color="#d62728", width=2, dash="dash"),
+                hovertemplate="P·Q cum: %{y:.2f}%<extra></extra>"))
+        if show_mv:
+            _hline_annot(fig, mv_cum_mean, "#1f77b4", f"μ M·V={mv_cum_mean:.2f}%")
+        if show_pq:
+            _hline_annot(fig, pq_cum_mean, "#d62728", f"μ P·Q={pq_cum_mean:.2f}%")
+
+    y_label = "Δ% YoY" if show_yoy and not show_cum else "Crescita % cum." if show_cum and not show_yoy else "Δ% YoY / Cum%"
+    title   = "MV = PQ — Δ% YoY" if show_yoy and not show_cum else "MV = PQ — Cumulata %" if show_cum and not show_yoy else "MV = PQ — YoY + Cumulata %"
+    fig.update_yaxes(title_text=y_label, showgrid=True, gridcolor="#e8e8e8")
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=11), x=0.01),
+        barmode="overlay",
+        **layout_base)
 
     fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
     fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8")
@@ -843,26 +823,24 @@ def _controls_bar():
                   "border-radius": "4px", "padding": "5px 12px",
                   "margin-right": "14px"}),
 
-        # Serie MV=PQ (visibile solo in modalità "both")
+        # Serie MV=PQ
         html.Div([
-            html.Label("Serie:", style={"font-size": "11px", "font-weight": "bold",
-                                        "margin-right": "8px", "white-space": "nowrap"}),
+            html.Label("MV=PQ serie:", style={"font-size": "11px", "font-weight": "bold",
+                                              "margin-right": "8px", "white-space": "nowrap"}),
             dcc.Checklist(
                 id="mvpq-series-show",
                 options=[
                     {"label": " M·V 🇺🇸", "value": "mv_usa"},
                     {"label": " P·Q 🇺🇸", "value": "pq_usa"},
-                    {"label": " M·V 🇪🇺", "value": "mv_eur"},
-                    {"label": " P·Q 🇪🇺", "value": "pq_eur"},
                 ],
-                value=["mv_usa", "pq_usa", "mv_eur", "pq_eur"],
+                value=["mv_usa", "pq_usa"],
                 inline=True,
                 style={"font-size": "11px"},
                 inputStyle={"margin-right": "3px"},
                 labelStyle={"margin-right": "10px"},
             ),
         ], id="mvpq-series-wrapper",
-           style={"display": "none", "align-items": "center",
+           style={"display": "flex", "align-items": "center",
                   "background": "#fce4ec", "border": "1px solid #f48fb1",
                   "border-radius": "4px", "padding": "5px 12px",
                   "margin-right": "14px"}),
@@ -1042,7 +1020,9 @@ def toggle_geo(source_type):
 
 
 @app.callback(
-    Output("mvpq-series-wrapper", "style"),
+    Output("mvpq-series-wrapper",  "style"),
+    Output("mvpq-series-show",     "options"),
+    Output("mvpq-series-show",     "value"),
     Input("mon-source-type", "value"),
 )
 def toggle_series_check(source_type):
@@ -1052,7 +1032,21 @@ def toggle_series_check(source_type):
         "border-radius": "4px", "padding": "5px 12px",
         "margin-right": "14px",
     }
-    return base if source_type == "both" else {**base, "display": "none"}
+    if source_type == "eur":
+        opts  = [{"label": " M·V 🇪🇺", "value": "mv_eur"},
+                 {"label": " P·Q 🇪🇺", "value": "pq_eur"}]
+        vals  = ["mv_eur", "pq_eur"]
+    elif source_type == "both":
+        opts  = [{"label": " M·V 🇺🇸", "value": "mv_usa"},
+                 {"label": " P·Q 🇺🇸", "value": "pq_usa"},
+                 {"label": " M·V 🇪🇺", "value": "mv_eur"},
+                 {"label": " P·Q 🇪🇺", "value": "pq_eur"}]
+        vals  = ["mv_usa", "pq_usa", "mv_eur", "pq_eur"]
+    else:  # usa
+        opts  = [{"label": " M·V 🇺🇸", "value": "mv_usa"},
+                 {"label": " P·Q 🇺🇸", "value": "pq_usa"}]
+        vals  = ["mv_usa", "pq_usa"]
+    return base, opts, vals
 
 
 @app.callback(
@@ -1243,7 +1237,12 @@ def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_sh
     if source_type == "both":
         fig_mvpq = make_mvpq_both_chart(df, start, end, mvpq_show, mvpq_series_show)
     else:
-        fig_mvpq = make_mvpq_chart(df, start, end, mvpq_show)
+        suffix   = "eur" if source_type == "eur" else "usa"
+        defaults = [f"mv_{suffix}", f"pq_{suffix}"]
+        checked  = mvpq_series_show or defaults
+        show_mv  = f"mv_{suffix}" in checked
+        show_pq  = f"pq_{suffix}" in checked
+        fig_mvpq = make_mvpq_chart(df, start, end, mvpq_show, show_mv=show_mv, show_pq=show_pq)
 
     return fig_abs, fig_yoy, fig_mvpq, abs_style, yoy_style, mvpq_style
 
