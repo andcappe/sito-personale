@@ -23,7 +23,7 @@ def make_navbar() -> html.Nav:
     return html.Nav([
         # ── Brand ────────────────────────────────────────────────────────────
         html.A([
-            html.Span("AC", style={
+            html.Span("A·C", style={
                 "fontFamily": "'Playfair Display', serif",
                 "fontSize": "1.1rem", "fontWeight": "700",
                 "color": "#1a3a6b", "marginRight": "10px",
