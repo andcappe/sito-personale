@@ -2044,6 +2044,8 @@ def sync_date_range(stock_data, start_date, end_date):
     Input('delete-column-button',    'n_clicks'),
     Input('controls-and-graph',      'clickData'),
 
+    State('dr-start-tab1',           'date'),
+    State('dr-end-tab1',             'date'),
     State('tab1-slider-store',       'data'),
     State('global-assets-selected',  'data'),
     State('benchmark-selector',      'value'),
@@ -2065,7 +2067,7 @@ def sync_date_range(stock_data, start_date, end_date):
     State('stock-data',              'data'),
     prevent_initial_call=True,
 )
-def update_graph(update_clicks, delete_clicks, clickData, date_range, selected_assets,
+def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_end, date_range, selected_assets,
                  benchmark_value, ir_window, ak_ma_window,
                  weights_p1_data, weights_p2_data, weights_p3_data,
                  all_ir_checkbox_values, all_sharpe_checkbox_values, all_tev_checkbox_values,
@@ -2111,7 +2113,12 @@ def update_graph(update_clicks, delete_clicks, clickData, date_range, selected_a
 
     close_returns = _get_df(stock_data)
 
-    if date_range and len(date_range) == 2:
+    # Priorità ai valori diretti dei DatePicker (evita race condition con tab1-slider-store)
+    if picker_start and picker_end:
+        start_date  = pd.to_datetime(picker_start)
+        end_date    = pd.to_datetime(picker_end)
+        filtered_df = close_returns.loc[start_date:end_date]
+    elif date_range and len(date_range) == 2:
         start_date  = pd.to_datetime(date_range[0], unit='s')
         end_date    = pd.to_datetime(date_range[1], unit='s')
         filtered_df = close_returns.loc[start_date:end_date]
