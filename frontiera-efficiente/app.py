@@ -85,28 +85,41 @@ def _port_cvar(w, returns_df, pct):
 _ARIMA_LOCK  = threading.Lock()
 _ARIMA_STATE = {
     'req_id': None, 'running': False, 'done': False,
-    'pct': 0, 'total': 0, 'error': None, 'mu': None,
+    'pct': 0, 'total': 0, 'error': None, 'mu': None, 'cov': None,
 }
 
-def _auto_arima_mu(returns_df, window=250, horizon=20, req_id=None):
-    """Auto-select best ARIMA(p,d,q) by AIC on last `window` days."""
+def _arima_garch_mu_vol(returns_df, window=250, req_id=None):
+    """ARIMA(p,d,q) best-AIC per μ condizionale + GARCH(1,1) sui residui per σ.
+    Restituisce (mu_series_daily, cov_df_daily)."""
     import warnings
     try:
         from statsmodels.tsa.arima.model import ARIMA as _ARIMA_CLS
     except ImportError:
-        return returns_df.mean() * 252
-    mu   = {}
+        return returns_df.mean(), returns_df.cov()
+    try:
+        from arch import arch_model as _arch_model
+        _has_arch = True
+    except ImportError:
+        _has_arch = False
+
+    mu_dict       = {}
+    vol_daily_dict = {}
     cols = returns_df.columns.tolist()
+
     with _ARIMA_LOCK:
         if req_id and _ARIMA_STATE.get('req_id') == req_id:
             _ARIMA_STATE['total'] = len(cols)
             _ARIMA_STATE['pct']   = 0
+
     for i, col in enumerate(cols):
         s = returns_df[col].dropna().tail(window)
-        if len(s) < 20:
-            mu[col] = float(s.mean()) * 252
+        if len(s) < 30:
+            mu_dict[col]        = float(s.mean())
+            vol_daily_dict[col] = float(s.std())
         else:
-            best_aic, best_fc = np.inf, float(s.mean()) * 252
+            best_aic   = np.inf
+            best_resid = s - s.mean()
+            best_mu    = float(s.mean())
             for p in range(3):
                 for d in [0, 1]:
                     for q in range(3):
@@ -117,23 +130,50 @@ def _auto_arima_mu(returns_df, window=250, horizon=20, req_id=None):
                                 warnings.simplefilter('ignore')
                                 m = _ARIMA_CLS(s, order=(p, d, q)).fit()
                             if m.aic < best_aic:
-                                best_aic = m.aic
-                                best_fc  = float(m.forecast(steps=horizon).mean()) * 252
+                                best_aic   = m.aic
+                                best_resid = m.resid
+                                best_mu    = float(m.fittedvalues.mean())
                         except Exception:
                             pass
-            mu[col] = best_fc
+            mu_dict[col] = best_mu
+
+            # GARCH(1,1) sui residui
+            if _has_arch and len(best_resid) > 20:
+                try:
+                    scaled = best_resid * 100
+                    gm = _arch_model(scaled, vol='Garch', p=1, q=1, rescale=False)
+                    gf = gm.fit(disp='off')
+                    fc = gf.forecast(horizon=1)
+                    vol_daily_dict[col] = float(np.sqrt(fc.variance.values[-1, 0])) / 100
+                except Exception:
+                    vol_daily_dict[col] = float(best_resid.std())
+            else:
+                vol_daily_dict[col] = float(best_resid.std())
+
         with _ARIMA_LOCK:
             if req_id and _ARIMA_STATE.get('req_id') == req_id:
                 _ARIMA_STATE['pct'] = i + 1
-    return pd.Series(mu)
+
+    mu_series = pd.Series(mu_dict)
+
+    # Ricostruisci covarianza: D @ R @ D (giornaliera)
+    r_df = returns_df[cols].tail(window)
+    corr  = r_df.corr().values
+    vols  = np.array([vol_daily_dict[c] for c in cols])
+    D     = np.diag(vols)
+    cov_matrix = D @ corr @ D
+    cov_df = pd.DataFrame(cov_matrix, index=cols, columns=cols)
+
+    return mu_series, cov_df
 
 
-def _run_arima_thread(req_id, returns_df, window, horizon):
+def _run_arima_thread(req_id, returns_df, window):
     try:
-        mu_series = _auto_arima_mu(returns_df, window, horizon, req_id)
+        mu_series, cov_df = _arima_garch_mu_vol(returns_df, window, req_id)
         with _ARIMA_LOCK:
             if _ARIMA_STATE['req_id'] == req_id:
                 _ARIMA_STATE['mu']      = mu_series
+                _ARIMA_STATE['cov']     = cov_df
                 _ARIMA_STATE['done']    = True
                 _ARIMA_STATE['running'] = False
     except Exception as e:
@@ -143,15 +183,15 @@ def _run_arima_thread(req_id, returns_df, window, horizon):
                 _ARIMA_STATE['done']    = True
                 _ARIMA_STATE['running'] = False
 
-def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_override=None):
+def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_override=None, cov_override=None):
     mu  = mu_override if mu_override is not None else returns_df.mean()
-    cov = returns_df.cov()
+    cov = cov_override if cov_override is not None else returns_df.cov()
     na  = len(returns_df.columns)
     bounds = tuple((wmin, wmax) for _ in range(na))
     eq     = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
     w0     = [1/na] * na
 
-    if risk == 'vol':
+    if risk in ('standard', 'vol', 'arima_garch'):
         def obj_vol(w): return _port_perf(w, mu, cov)[1]
         min_res = minimize(obj_vol, w0, method='SLSQP', bounds=bounds, constraints=eq)
         min_ret, _ = _port_perf(min_res.x, mu, cov)
@@ -161,11 +201,11 @@ def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_
             cs = (eq, {'type':'eq','fun': lambda x,t=t: _port_perf(x,mu,cov)[0]-t})
             r  = minimize(obj_vol, w0, method='SLSQP', bounds=bounds, constraints=cs)
             if r.success:
-                ret, vol = _port_perf(r.x, mu, cov)
-                rows.append({'Return':ret,'Volatility':vol,
-                             'Sharpe':(ret-rf)/vol if vol>0 else 0,'Weights':r.x})
+                ret, vol_p = _port_perf(r.x, mu, cov)
+                rows.append({'Return':ret,'Volatility':vol_p,
+                             'Sharpe':(ret-rf)/vol_p if vol_p>0 else 0,'Weights':r.x})
     else:
-        pct = 10 if risk == 'cvar10' else 5
+        pct = 10 if risk == 'cvar90' else 5
         def obj_var(w): return _port_cvar(w, returns_df, pct)
         min_res = minimize(obj_var, w0, method='SLSQP', bounds=bounds, constraints=eq)
         min_ret, _ = _port_perf(min_res.x, mu, cov)
@@ -606,30 +646,22 @@ app.layout = html.Div([
                               style={'width':'50px','fontSize':'10px'}),
                 ], style={'display':'flex','alignItems':'center','marginRight':'8px'}),
                 dcc.RadioItems(id='fe-risk-measure',
-                    options=[{'label':' Volatilità','value':'vol'},
-                             {'label':' CVaR 10%','value':'cvar10'},
-                             {'label':' CVaR 5%','value':'cvar5'}],
-                    value='vol', inline=True,
-                    inputStyle={'marginRight':'3px','cursor':'pointer'},
-                    labelStyle={'marginRight':'8px','fontSize':'10px','cursor':'pointer'}),
-                dcc.RadioItems(id='fe-return-method',
-                    options=[{'label':' Standard','value':'standard'},
-                             {'label':' ARIMA','value':'arima'}],
+                    options=[
+                        {'label': ' Standard',    'value': 'standard'},
+                        {'label': ' Vol (fin.)',   'value': 'vol'},
+                        {'label': ' CVaR 90%',    'value': 'cvar90'},
+                        {'label': ' CVaR 95%',    'value': 'cvar95'},
+                        {'label': ' ARIMA+GARCH', 'value': 'arima_garch'},
+                    ],
                     value='standard', inline=True,
                     inputStyle={'marginRight':'3px','cursor':'pointer'},
                     labelStyle={'marginRight':'8px','fontSize':'10px','cursor':'pointer'}),
-                html.Div([
-                    html.Label('Orizz.:', style={'fontSize':'10px','marginRight':'4px'}),
-                    dcc.Input(id='fe-arima-horizon', type='number', value=252, min=5, max=504,
-                              style={'width':'50px','fontSize':'10px'}),
-                ], id='fe-arima-horizon-div',
-                   style={'display':'none','alignItems':'center','marginRight':'8px'}),
                 html.Div([
                     html.Label('Finestra gg:', style={'fontSize':'10px','marginRight':'4px'}),
                     dcc.Input(id='fe-arima-window', type='number', value=250, min=20, max=1260,
                               style={'width':'55px','fontSize':'10px'}),
                 ], id='fe-arima-window-div',
-                   style={'display':'flex','alignItems':'center','marginRight':'8px'}),
+                   style={'display':'none','alignItems':'center','marginRight':'8px'}),
                 html.Button('Calcola Frontiera', id='fe-calc-btn', n_clicks=0,
                             style={'background':'#0066cc','color':'white','border':'none',
                                    'padding':'6px 14px','borderRadius':'4px','cursor':'pointer',
@@ -793,16 +825,14 @@ def on_page_load(_):
 
 
 @app.callback(
-    Output('fe-arima-horizon-div', 'style'),
-    Output('fe-arima-window-div',  'style'),
-    Input('fe-return-method', 'value'),
+    Output('fe-arima-window-div', 'style'),
+    Input('fe-risk-measure', 'value'),
 )
-def toggle_arima_horizon(method):
-    base = {'display':'flex','alignItems':'center','marginRight':'8px'}
-    base_none = {'display':'none','alignItems':'center','marginRight':'8px'}
-    if method == 'arima':
-        return base, base
-    return base_none, base
+def toggle_window_div(risk):
+    base = {'alignItems':'center','marginRight':'8px'}
+    if risk == 'standard':
+        return {'display':'none', **base}
+    return {'display':'flex', **base}
 
 
 @app.callback(
@@ -1071,8 +1101,6 @@ def update_perf_chart(chart_vals, port_chart_vals, prices_data, f1j, f2j, f3j, d
     State('fe-max-weight',       'value'),
     State('fe-rf',               'value'),
     State('fe-risk-measure',     'value'),
-    State('fe-return-method',    'value'),
-    State('fe-arima-horizon',    'value'),
     State('fe-date-start',       'date'),
     State('fe-date-end',         'date'),
     State({'type':'fe-chart-port','index':ALL}, 'value'),
@@ -1083,7 +1111,7 @@ def update_perf_chart(chart_vals, port_chart_vals, prices_data, f1j, f2j, f3j, d
 )
 def calc_and_render(n, stock_data, prices_data,
                     p1_vals, p2_vals, p3_vals, p_ids, chart_vals,
-                    n_port, wmin, wmax, rf, risk, return_method, arima_horizon,
+                    n_port, wmin, wmax, rf, risk,
                     date_start, date_end, port_chart_vals, port_chart_ids, sel_pt_cur,
                     arima_window):
     _EMPTY_FIG = go.Figure().update_layout(
@@ -1104,9 +1132,10 @@ def calc_and_render(n, stock_data, prices_data,
     if date_start: returns_df = returns_df.loc[date_start:]
     if date_end:   returns_df = returns_df.loc[:date_end]
     returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0).dropna()
-    win = int(arima_window or 250)
-    if win < len(returns_df):
-        returns_df = returns_df.tail(win)
+    if risk != 'standard':
+        win = int(arima_window or 250)
+        if win < len(returns_df):
+            returns_df = returns_df.tail(win)
     all_assets = returns_df.columns.tolist()
 
     # P1: default tutti gli asset; P2/P3: solo se l'utente ha spuntato almeno 2 asset
@@ -1142,20 +1171,19 @@ def calc_and_render(n, stock_data, prices_data,
 
     _existing_sel = json.loads(sel_pt_cur) if sel_pt_cur else {}
 
-    # ── ARIMA: avvia thread in background e ritorna subito ────────────────────
-    if return_method == 'arima':
+    # ── ARIMA+GARCH: avvia thread in background e ritorna subito ──────────────
+    if risk == 'arima_garch':
         import uuid as _uuid
         req_id = str(_uuid.uuid4())[:8]
         arima_win = int(arima_window or 250)
-        arima_hor = int(arima_horizon or 20)
         with _ARIMA_LOCK:
             _ARIMA_STATE.update({
                 'req_id': req_id, 'running': True, 'done': False,
-                'pct': 0, 'total': len(all_assets), 'error': None, 'mu': None,
+                'pct': 0, 'total': len(all_assets), 'error': None, 'mu': None, 'cov': None,
             })
         t = threading.Thread(
             target=_run_arima_thread,
-            args=(req_id, returns_df, arima_win, arima_hor),
+            args=(req_id, returns_df, arima_win),
             daemon=True,
         )
         t.start()
@@ -1243,9 +1271,13 @@ def calc_and_render(n, stock_data, prices_data,
                                f'<br>Rendimento: {ms["Return"]*100:.2f}%<extra></extra>'),
             ))
 
-    risk_label = {'vol':   'Volatilità Ann. (%)',
-                  'cvar10':'CVaR 10% Ann. (%)',
-                  'cvar5': 'CVaR 5% Ann. (%)'}[risk]
+    risk_label = {
+        'standard':    'Volatilità Ann. (%)',
+        'vol':         'Volatilità Ann. (%) [fin.]',
+        'cvar90':      'CVaR 90% Ann. (%)',
+        'cvar95':      'CVaR 95% Ann. (%)',
+        'arima_garch': 'Vol GARCH Ann. (%)',
+    }[risk]
     fig.update_layout(
         title=dict(text=f'Frontiera Efficiente{arima_label}',
                    font=dict(size=14, color='#1a3a6b'), x=0.02),
@@ -1409,7 +1441,7 @@ def calc_and_render(n, stock_data, prices_data,
             ], style={'marginRight':'8px', 'fontSize':'11px'}))
     if arima_label:
         stats.append(html.Span(
-            f'Metodo: Auto-ARIMA finestra {arima_window or 250}gg · orizz. {arima_horizon or 20}gg',
+            f'Metodo: ARIMA+GARCH finestra {arima_window or 250}gg',
             style={'fontSize':'10px','color':'#6b7a99','fontStyle':'italic'}))
 
     f1j = json.dumps(frontier_wgts.get('F1', {}))
@@ -1548,7 +1580,6 @@ def arima_poll(n_int, cur_req_id):
     State('fe-max-weight',          'value'),
     State('fe-rf',                  'value'),
     State('fe-risk-measure',        'value'),
-    State('fe-arima-horizon',       'value'),
     State('fe-arima-window',        'value'),
     State('fe-date-start',          'date'),
     State('fe-date-end',            'date'),
@@ -1559,7 +1590,7 @@ def arima_poll(n_int, cur_req_id):
 )
 def on_arima_done(req_id, stock_data, prices_data,
                   p1_vals, p2_vals, p3_vals, p_ids, chart_vals,
-                  n_port, wmin, wmax, rf, risk, arima_horizon, arima_window,
+                  n_port, wmin, wmax, rf, risk, arima_window,
                   date_start, date_end, port_chart_vals, port_chart_ids, sel_pt_cur):
     if not req_id:
         raise PreventUpdate
@@ -1568,6 +1599,7 @@ def on_arima_done(req_id, stock_data, prices_data,
     if s.get('req_id') != req_id or not s.get('done') or s.get('error'):
         raise PreventUpdate
     mu_series = s.get('mu')
+    cov_df = s.get('cov')
     if mu_series is None:
         raise PreventUpdate
     if not stock_data:
@@ -1580,9 +1612,8 @@ def on_arima_done(req_id, stock_data, prices_data,
     if date_start: returns_df = returns_df.loc[date_start:]
     if date_end:   returns_df = returns_df.loc[:date_end]
     returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0).dropna()
-    win = int(arima_window or 250)
-    if win < len(returns_df):
-        returns_df = returns_df.tail(win)
+    if int(arima_window or 250) < len(returns_df):
+        returns_df = returns_df.tail(int(arima_window or 250))
     all_assets = returns_df.columns.tolist()
 
     def _p_assets(vals, ids, default_all=False):
@@ -1606,7 +1637,7 @@ def on_arima_done(req_id, stock_data, prices_data,
     wmax_f = (wmax or 100) / 100
     rf_f   = (rf or 2.0) / 100
     n_f    = int(n_port or 15)
-    arima_label = f' [Auto-ARIMA finestra {arima_window or 250}gg]'
+    arima_label = f' [ARIMA+GARCH finestra {arima_window or 250}gg]'
     _existing_sel = json.loads(sel_pt_cur) if sel_pt_cur else {}
 
     frontier_res  = {}
@@ -1617,10 +1648,11 @@ def on_arima_done(req_id, stock_data, prices_data,
             continue
         df_sub = returns_df[valid].copy()
         mu_sub = mu_series.reindex(valid).fillna(mu_series.mean()) if mu_series is not None else None
+        cov_sub = cov_df.reindex(index=valid, columns=valid) if cov_df is not None else None
         try:
             df_f, ms, mv, names = calc_frontier(
                 df_sub, n=n_f, wmin=wmin_f, wmax=wmax_f,
-                rf=rf_f, risk=risk, mu_override=mu_sub)
+                rf=rf_f, risk=risk, mu_override=mu_sub, cov_override=cov_sub)
             frontier_res[fname] = (df_f, ms, mv, names)
             ex = _existing_sel.get(fname, {})
             pt_idx = ex.get('pt_idx', -1)
@@ -1641,8 +1673,8 @@ def on_arima_done(req_id, stock_data, prices_data,
     # Build frontier chart
     _EMPTY_FIG = go.Figure().update_layout(paper_bgcolor='white', plot_bgcolor='#f8faff')
     fig = go.Figure()
-    mu_all  = returns_df.mean()
-    cov_all = returns_df.cov()
+    mu_all  = mu_series.reindex(all_assets).fillna(returns_df.mean()) if mu_series is not None else returns_df.mean()
+    cov_all = cov_df.reindex(index=all_assets, columns=all_assets).fillna(0) if cov_df is not None else returns_df.cov()
     for asset in all_assets:
         w = np.zeros(len(all_assets))
         w[all_assets.index(asset)] = 1.0
@@ -1683,7 +1715,13 @@ def on_arima_done(req_id, stock_data, prices_data,
                                f'<br>Rischio:{ms["Volatility"]*100:.2f}%'
                                f'<br>Ren:{ms["Return"]*100:.2f}%<extra></extra>'),
             ))
-    risk_label = {'vol':'Volatilità Ann. (%)','cvar10':'CVaR 10% Ann. (%)','cvar5':'CVaR 5% Ann. (%)'}[risk]
+    risk_label = {
+        'standard':    'Volatilità Ann. (%)',
+        'vol':         'Volatilità Ann. (%) [fin.]',
+        'cvar90':      'CVaR 90% Ann. (%)',
+        'cvar95':      'CVaR 95% Ann. (%)',
+        'arima_garch': 'Vol GARCH Ann. (%)',
+    }[risk]
     fig.update_layout(
         title=dict(text=f'Frontiera Efficiente{arima_label}', font=dict(size=14,color='#1a3a6b'), x=0.02),
         xaxis=dict(title=risk_label, gridcolor='#e8eef8', zeroline=False),
