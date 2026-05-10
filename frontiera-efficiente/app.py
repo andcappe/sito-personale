@@ -1180,11 +1180,10 @@ def calc_and_render(n, stock_data, prices_data,
 
     if date_start: returns_df = returns_df.loc[date_start:]
     if date_end:   returns_df = returns_df.loc[:date_end]
-    returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0).dropna()
-    if risk != 'standard':
-        win = int(arima_window or 250)
-        if win < len(returns_df):
-            returns_df = returns_df.tail(win)
+    # Rimuove solo colonne/righe interamente NaN — NON il dropna globale che
+    # taglierebbe il dataset al periodo del titolo più recente (es. crypto/futures).
+    returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+    win = int(arima_window or 250) if risk != 'standard' else None
     all_assets = returns_df.columns.tolist()
 
     # P1: default tutti gli asset; P2/P3: solo se l'utente ha spuntato almeno 2 asset
@@ -1248,13 +1247,18 @@ def calc_and_render(n, stock_data, prices_data,
         valid = [a for a in assets_sel if a in returns_df.columns]
         if len(valid) < 2:
             continue
-        df_sub = returns_df[valid].copy()
+        # dropna solo sugli asset selezionati per questa frontiera,
+        # poi applica la finestra temporale
+        df_sub = returns_df[valid].dropna()
+        if win and win < len(df_sub):
+            df_sub = df_sub.tail(win)
+        if len(df_sub) < 10:
+            continue
         try:
             df_f, ms, mv, names = calc_frontier(
                 df_sub, n=n_f, wmin=wmin_f, wmax=wmax_f,
                 rf=rf_f, risk=risk, mu_override=_mu(df_sub))
             frontier_res[fname] = (df_f, ms, mv, names)
-            # Use selected point if any, else Max-Sharpe
             ex = _existing_sel.get(fname, {})
             pt_idx = ex.get('pt_idx', -1)
             if pt_idx >= 0 and pt_idx < len(df_f):
@@ -1271,17 +1275,20 @@ def calc_and_render(n, stock_data, prices_data,
 
     # ── Grafico frontiera ────────────────────────────────────────────────────
     fig = go.Figure()
-    mu_all  = returns_df.mean()
-    cov_all = returns_df.cov()
     _cvar_pct = 10 if risk == 'cvar90' else (5 if risk == 'cvar95' else None)
 
-    # Singoli asset — posizione X usa la stessa misura di rischio della frontiera
+    # Singoli asset: media e rischio calcolati sulla serie propria di ogni asset
+    # (finestra applicata individualmente, no dropna globale su tutti gli asset)
     for asset in all_assets:
-        w = np.zeros(len(all_assets))
-        w[all_assets.index(asset)] = 1.0
-        ret_a, vol_a = _port_perf(w, mu_all, cov_all)
+        s = returns_df[asset].dropna()
+        if win and win < len(s):
+            s = s.tail(win)
+        if len(s) < 10:
+            continue
+        ret_a = float(s.mean() * 252)
+        vol_a = float(s.std() * np.sqrt(252))
         if _cvar_pct is not None:
-            risk_a = _port_cvar(w, returns_df, _cvar_pct)
+            risk_a = _port_cvar(np.array([1.0]), s.to_frame(), _cvar_pct)
             risk_lbl = f'CVaR {100-_cvar_pct}%: {risk_a*100:.2f}%'
         else:
             risk_a = vol_a
@@ -1667,9 +1674,8 @@ def on_arima_done(req_id, stock_data, prices_data,
 
     if date_start: returns_df = returns_df.loc[date_start:]
     if date_end:   returns_df = returns_df.loc[:date_end]
-    returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0).dropna()
-    if int(arima_window or 250) < len(returns_df):
-        returns_df = returns_df.tail(int(arima_window or 250))
+    returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+    win_ag = int(arima_window or 250)
     all_assets = returns_df.columns.tolist()
 
     def _p_assets(vals, ids, default_all=False):
@@ -1702,8 +1708,12 @@ def on_arima_done(req_id, stock_data, prices_data,
         valid = [a for a in assets_sel if a in returns_df.columns]
         if len(valid) < 2:
             continue
-        df_sub = returns_df[valid].copy()
-        mu_sub = mu_series.reindex(valid).fillna(mu_series.mean()) if mu_series is not None else None
+        df_sub = returns_df[valid].dropna()
+        if win_ag < len(df_sub):
+            df_sub = df_sub.tail(win_ag)
+        if len(df_sub) < 10:
+            continue
+        mu_sub  = mu_series.reindex(valid).fillna(mu_series.mean()) if mu_series is not None else None
         cov_sub = cov_df.reindex(index=valid, columns=valid) if cov_df is not None else None
         try:
             df_f, ms, mv, names = calc_frontier(
@@ -1729,15 +1739,24 @@ def on_arima_done(req_id, stock_data, prices_data,
     # Build frontier chart
     _EMPTY_FIG = go.Figure().update_layout(paper_bgcolor='white', plot_bgcolor='#f8faff')
     fig = go.Figure()
-    mu_all  = mu_series.reindex(all_assets).fillna(returns_df.mean()) if mu_series is not None else returns_df.mean()
-    cov_all = cov_df.reindex(index=all_assets, columns=all_assets).fillna(0) if cov_df is not None else returns_df.cov()
     _cvar_pct_done = 10 if risk == 'cvar90' else (5 if risk == 'cvar95' else None)
     for asset in all_assets:
-        w = np.zeros(len(all_assets))
-        w[all_assets.index(asset)] = 1.0
-        ret_a, vol_a = _port_perf(w, mu_all, cov_all)
+        s = returns_df[asset].dropna()
+        if win_ag < len(s):
+            s = s.tail(win_ag)
+        if len(s) < 10:
+            continue
+        # Per ARIMA+GARCH usa mu/vol stimati, altrimenti usa media/std storici
+        if mu_series is not None and asset in mu_series.index:
+            ret_a = float(mu_series[asset] * 252)
+        else:
+            ret_a = float(s.mean() * 252)
+        if cov_df is not None and asset in cov_df.columns:
+            vol_a = float(np.sqrt(cov_df.loc[asset, asset] * 252))
+        else:
+            vol_a = float(s.std() * np.sqrt(252))
         if _cvar_pct_done is not None:
-            risk_a = _port_cvar(w, returns_df, _cvar_pct_done)
+            risk_a = _port_cvar(np.array([1.0]), s.to_frame(), _cvar_pct_done)
             risk_lbl = f'CVaR {100-_cvar_pct_done}%: {risk_a*100:.2f}%'
         else:
             risk_a = vol_a
