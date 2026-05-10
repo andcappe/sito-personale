@@ -190,51 +190,79 @@ def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_
     bounds = tuple((wmin, wmax) for _ in range(na))
     eq     = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
     w0     = np.array([1/na] * na)
+    opts   = {'ftol': 1e-10, 'maxiter': 2000}
 
     def _opt(obj, w_start, extra_cs=()):
         cs = (eq,) + tuple(extra_cs)
-        r = minimize(obj, w_start, method='SLSQP', bounds=bounds, constraints=cs,
-                     options={'ftol': 1e-9, 'maxiter': 1000})
+        r = minimize(obj, w_start, method='SLSQP', bounds=bounds, constraints=cs, options=opts)
         if not r.success:
-            # secondo tentativo da pesi uguali
-            r = minimize(obj, w0, method='SLSQP', bounds=bounds, constraints=cs,
-                         options={'ftol': 1e-9, 'maxiter': 1000})
+            r = minimize(obj, w0,      method='SLSQP', bounds=bounds, constraints=cs, options=opts)
         return r
 
+    # ── Portafoglio a massimo rendimento (estremo destro della frontiera) ──────
+    # Risolto esplicitamente: per un universo senza vincoli superiori = 100% nell'asset
+    # con rendimento più alto; con vincoli wmax < 1 l'ottimizzatore trova l'optimum reale.
+    def neg_ret(w): return -_port_perf(w, mu, cov)[0]
+    max_res = _opt(neg_ret, w0)
+    max_ret, _ = _port_perf(max_res.x, mu, cov)
+
     if risk in ('standard', 'vol', 'arima_garch'):
-        def obj_vol(w): return _port_perf(w, mu, cov)[1]
-        min_res = _opt(obj_vol, w0)
-        min_ret, _ = _port_perf(min_res.x, mu, cov)
-        max_ret = mu.max() * 252
-        targets = np.linspace(min_ret, max_ret * 0.999, n)
-        rows = []
-        prev_w = min_res.x.copy()
+        def obj_risk(w): return _port_perf(w, mu, cov)[1]
+
+        # Portafoglio a minimo rischio (estremo sinistro)
+        min_res = _opt(obj_risk, w0)
+        min_ret, min_risk = _port_perf(min_res.x, mu, cov)
+
+        rows = [{'Return': min_ret, 'Volatility': min_risk,
+                 'Sharpe': (min_ret-rf)/min_risk if min_risk>0 else 0,
+                 'Weights': min_res.x}]
+
+        # Portafogli intermedi: target uniformi tra MVP e MRP, con warm-starting
+        targets = np.linspace(min_ret, max_ret, n + 2)[1:-1]
+        prev_w  = min_res.x.copy()
         for t in targets:
             ret_cs = {'type':'eq','fun': lambda x,t=t: _port_perf(x,mu,cov)[0]-t}
-            r = _opt(obj_vol, prev_w, extra_cs=(ret_cs,))
+            r = _opt(obj_risk, prev_w, extra_cs=(ret_cs,))
             if r.success:
                 ret, vol_p = _port_perf(r.x, mu, cov)
                 rows.append({'Return':ret,'Volatility':vol_p,
                              'Sharpe':(ret-rf)/vol_p if vol_p>0 else 0,'Weights':r.x})
                 prev_w = r.x.copy()
-    else:
+
+        # Portafoglio a massimo rendimento (estremo esplicito)
+        max_risk = _port_perf(max_res.x, mu, cov)[1]
+        rows.append({'Return': max_ret, 'Volatility': max_risk,
+                     'Sharpe': (max_ret-rf)/max_risk if max_risk>0 else 0,
+                     'Weights': max_res.x})
+
+    else:  # CVaR
         pct = 10 if risk == 'cvar90' else 5
-        def obj_var(w): return _port_cvar(w, returns_df, pct)
-        min_res = _opt(obj_var, w0)
+        def obj_risk(w): return _port_cvar(w, returns_df, pct)
+
+        min_res  = _opt(obj_risk, w0)
         min_ret, _ = _port_perf(min_res.x, mu, cov)
-        max_ret = mu.max() * 252
-        targets = np.linspace(min_ret, max_ret * 0.999, n)
-        rows = []
-        prev_w = min_res.x.copy()
+        min_cvar = obj_risk(min_res.x)
+
+        rows = [{'Return': min_ret, 'Volatility': min_cvar,
+                 'Sharpe': (min_ret-rf)/min_cvar if min_cvar>0 else 0,
+                 'Weights': min_res.x}]
+
+        targets = np.linspace(min_ret, max_ret, n + 2)[1:-1]
+        prev_w  = min_res.x.copy()
         for t in targets:
             ret_cs = {'type':'eq','fun': lambda x,t=t: _port_perf(x,mu,cov)[0]-t}
-            r = _opt(obj_var, prev_w, extra_cs=(ret_cs,))
+            r = _opt(obj_risk, prev_w, extra_cs=(ret_cs,))
             if r.success:
                 ret, _ = _port_perf(r.x, mu, cov)
-                v      = obj_var(r.x)
+                v      = obj_risk(r.x)
                 rows.append({'Return':ret,'Volatility':v,
                              'Sharpe':(ret-rf)/v if v>0 else 0,'Weights':r.x})
                 prev_w = r.x.copy()
+
+        max_cvar = obj_risk(max_res.x)
+        rows.append({'Return': max_ret, 'Volatility': max_cvar,
+                     'Sharpe': (max_ret-rf)/max_cvar if max_cvar>0 else 0,
+                     'Weights': max_res.x})
 
     df_f = pd.DataFrame(rows)
     if not df_f.empty:
