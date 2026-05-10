@@ -468,24 +468,29 @@ def _build_perf_chart(prices_data, chart_assets, frontier_weights, show_frontier
                         line=dict(width=1.5), opacity=0.75,
                         hovertemplate=f'<b>{asset}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.1f}}%<extra></extra>',
                     ))
+        ret_df = prices_df.pct_change()
         for fname, fcolor in _FC.items():
             if not (show_frontiers or {}).get(fname, False):
                 continue
             fw = frontier_weights.get(fname, {})
             if not fw:
                 continue
-            names = prices_df.columns.tolist()
-            w_arr = np.array([fw.get(n, 0) / 100 for n in names], dtype=float)
-            s_w = w_arr.sum()
-            if s_w <= 0:
+            # solo gli asset che hanno un peso > 0 e una colonna nei prezzi
+            port_cols = [c for c in fw if fw[c] > 0 and c in prices_df.columns]
+            if not port_cols:
                 continue
-            w_arr /= s_w
-            port_prices = (prices_df * w_arr).sum(axis=1).dropna()
-            if len(port_prices) < 2:
+            w_raw = np.array([fw[c] for c in port_cols], dtype=float)
+            w_raw /= w_raw.sum()
+            # data di inizio comune: primo giorno in cui TUTTI gli asset hanno un prezzo
+            common_start = max(prices_df[c].first_valid_index() for c in port_cols)
+            sub_ret = ret_df.loc[common_start:, port_cols].dropna(how='any')
+            if len(sub_ret) < 2:
                 continue
-            cum_p = (port_prices / port_prices.iloc[0] - 1) * 100
+            # rendimento giornaliero del portafoglio = Σ wᵢ · rᵢ(t)
+            port_ret = sub_ret.values @ w_raw
+            cum_p = (np.cumprod(1 + port_ret) - 1) * 100
             fig2.add_trace(go.Scatter(
-                x=cum_p.index, y=cum_p.values, mode='lines',
+                x=sub_ret.index, y=cum_p, mode='lines',
                 name=f'Portafoglio {fname}',
                 line=dict(width=3, color=fcolor),
                 hovertemplate=f'<b>Portafoglio {fname}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.1f}}%<extra></extra>',
