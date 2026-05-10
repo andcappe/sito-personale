@@ -189,36 +189,52 @@ def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_
     na  = len(returns_df.columns)
     bounds = tuple((wmin, wmax) for _ in range(na))
     eq     = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
-    w0     = [1/na] * na
+    w0     = np.array([1/na] * na)
+
+    def _opt(obj, w_start, extra_cs=()):
+        cs = (eq,) + tuple(extra_cs)
+        r = minimize(obj, w_start, method='SLSQP', bounds=bounds, constraints=cs,
+                     options={'ftol': 1e-9, 'maxiter': 1000})
+        if not r.success:
+            # secondo tentativo da pesi uguali
+            r = minimize(obj, w0, method='SLSQP', bounds=bounds, constraints=cs,
+                         options={'ftol': 1e-9, 'maxiter': 1000})
+        return r
 
     if risk in ('standard', 'vol', 'arima_garch'):
         def obj_vol(w): return _port_perf(w, mu, cov)[1]
-        min_res = minimize(obj_vol, w0, method='SLSQP', bounds=bounds, constraints=eq)
+        min_res = _opt(obj_vol, w0)
         min_ret, _ = _port_perf(min_res.x, mu, cov)
-        targets = np.linspace(min_ret, mu.max()*252*0.95, n)
+        max_ret = mu.max() * 252
+        targets = np.linspace(min_ret, max_ret * 0.999, n)
         rows = []
+        prev_w = min_res.x.copy()
         for t in targets:
-            cs = (eq, {'type':'eq','fun': lambda x,t=t: _port_perf(x,mu,cov)[0]-t})
-            r  = minimize(obj_vol, w0, method='SLSQP', bounds=bounds, constraints=cs)
+            ret_cs = {'type':'eq','fun': lambda x,t=t: _port_perf(x,mu,cov)[0]-t}
+            r = _opt(obj_vol, prev_w, extra_cs=(ret_cs,))
             if r.success:
                 ret, vol_p = _port_perf(r.x, mu, cov)
                 rows.append({'Return':ret,'Volatility':vol_p,
                              'Sharpe':(ret-rf)/vol_p if vol_p>0 else 0,'Weights':r.x})
+                prev_w = r.x.copy()
     else:
         pct = 10 if risk == 'cvar90' else 5
         def obj_var(w): return _port_cvar(w, returns_df, pct)
-        min_res = minimize(obj_var, w0, method='SLSQP', bounds=bounds, constraints=eq)
+        min_res = _opt(obj_var, w0)
         min_ret, _ = _port_perf(min_res.x, mu, cov)
-        targets = np.linspace(min_ret, mu.max()*252*0.95, n)
+        max_ret = mu.max() * 252
+        targets = np.linspace(min_ret, max_ret * 0.999, n)
         rows = []
+        prev_w = min_res.x.copy()
         for t in targets:
-            cs = (eq, {'type':'eq','fun': lambda x,t=t: _port_perf(x,mu,cov)[0]-t})
-            r  = minimize(obj_var, w0, method='SLSQP', bounds=bounds, constraints=cs)
+            ret_cs = {'type':'eq','fun': lambda x,t=t: _port_perf(x,mu,cov)[0]-t}
+            r = _opt(obj_var, prev_w, extra_cs=(ret_cs,))
             if r.success:
                 ret, _ = _port_perf(r.x, mu, cov)
                 v      = obj_var(r.x)
                 rows.append({'Return':ret,'Volatility':v,
                              'Sharpe':(ret-rf)/v if v>0 else 0,'Weights':r.x})
+                prev_w = r.x.copy()
 
     df_f = pd.DataFrame(rows)
     if not df_f.empty:
@@ -1229,19 +1245,26 @@ def calc_and_render(n, stock_data, prices_data,
     fig = go.Figure()
     mu_all  = returns_df.mean()
     cov_all = returns_df.cov()
+    _cvar_pct = 10 if risk == 'cvar90' else (5 if risk == 'cvar95' else None)
 
-    # Singoli asset (sempre visibili)
+    # Singoli asset — posizione X usa la stessa misura di rischio della frontiera
     for asset in all_assets:
         w = np.zeros(len(all_assets))
         w[all_assets.index(asset)] = 1.0
         ret_a, vol_a = _port_perf(w, mu_all, cov_all)
+        if _cvar_pct is not None:
+            risk_a = _port_cvar(w, returns_df, _cvar_pct)
+            risk_lbl = f'CVaR {100-_cvar_pct}%: {risk_a*100:.2f}%'
+        else:
+            risk_a = vol_a
+            risk_lbl = f'Vol: {vol_a*100:.2f}%'
         fig.add_trace(go.Scatter(
-            x=[vol_a * 100], y=[ret_a * 100],
+            x=[risk_a * 100], y=[ret_a * 100],
             mode='markers+text', name=asset,
             marker=dict(size=6, symbol='circle', opacity=0.6),
             text=[asset[:9]], textposition='top center',
             textfont=dict(size=7), showlegend=False,
-            hovertemplate=f'<b>{asset}</b><br>Rischio: {vol_a*100:.2f}%<br>Rendimento: {ret_a*100:.2f}%<extra></extra>',
+            hovertemplate=f'<b>{asset}</b><br>{risk_lbl}<br>Rendimento: {ret_a*100:.2f}%<extra></extra>',
         ))
 
     for fname, (df_f, ms, mv, names) in frontier_res.items():
@@ -1680,15 +1703,22 @@ def on_arima_done(req_id, stock_data, prices_data,
     fig = go.Figure()
     mu_all  = mu_series.reindex(all_assets).fillna(returns_df.mean()) if mu_series is not None else returns_df.mean()
     cov_all = cov_df.reindex(index=all_assets, columns=all_assets).fillna(0) if cov_df is not None else returns_df.cov()
+    _cvar_pct_done = 10 if risk == 'cvar90' else (5 if risk == 'cvar95' else None)
     for asset in all_assets:
         w = np.zeros(len(all_assets))
         w[all_assets.index(asset)] = 1.0
         ret_a, vol_a = _port_perf(w, mu_all, cov_all)
+        if _cvar_pct_done is not None:
+            risk_a = _port_cvar(w, returns_df, _cvar_pct_done)
+            risk_lbl = f'CVaR {100-_cvar_pct_done}%: {risk_a*100:.2f}%'
+        else:
+            risk_a = vol_a
+            risk_lbl = f'Vol: {vol_a*100:.2f}%'
         fig.add_trace(go.Scatter(
-            x=[vol_a*100], y=[ret_a*100], mode='markers+text', name=asset,
+            x=[risk_a*100], y=[ret_a*100], mode='markers+text', name=asset,
             marker=dict(size=6, opacity=0.6), text=[asset[:9]], textposition='top center',
             textfont=dict(size=7), showlegend=False,
-            hovertemplate=f'<b>{asset}</b><br>Rischio:{vol_a*100:.2f}%<br>Ren:{ret_a*100:.2f}%<extra></extra>',
+            hovertemplate=f'<b>{asset}</b><br>{risk_lbl}<br>Ren:{ret_a*100:.2f}%<extra></extra>',
         ))
     for fname, (df_f, ms, mv, names) in frontier_res.items():
         fcolor  = _FC[fname]
