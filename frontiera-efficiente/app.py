@@ -61,14 +61,8 @@ _XLSX           = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'TARB
 DOWNLOAD_BATCH  = 5
 DOWNLOAD_TIMEOUT= 40
 _DL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
-_DL_BUFFER = {}
+_DL_BUFFER = {}   # buffer locale per upload personalizzati e Aggiorna
 _DL_LOCK   = threading.Lock()
-
-# pkl salvato da portafoglio/app.py dopo ogni download
-_PORT_PKL  = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    '..', 'portafoglio', 'sessions', 'market_data.pkl',
-))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Funzioni matematiche
@@ -283,29 +277,45 @@ def _load_asset_list():
 
 _TICKERS, _DESCRIZIONI, _VALUTA = _load_asset_list()
 
+_PORT_PKL = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', 'portafoglio', 'sessions', 'market_data.pkl',
+))
 
-def _preload_portafoglio_data():
-    """Legge market_data.pkl di portafoglio e pre-popola _DL_BUFFER."""
+
+def _read_shared_data():
+    """
+    Legge i dati di portafoglio condivisi.
+    1. Buffer live di _app_portafoglio nel processo wsgi (sempre aggiornato).
+    2. Fallback: market_data.pkl per esecuzione standalone.
+    Ritorna (prices_df, returns_df, saved_at) o (None, None, None).
+    """
+    # — buffer live (wsgi.py carica portafoglio prima di frontiera) —
     try:
-        if not os.path.exists(_PORT_PKL):
-            return
-        with open(_PORT_PKL, 'rb') as f:
-            data = pickle.load(f)
-        prices_df  = data.get('original_prices')
-        returns_df = data.get('close_returns')
-        if prices_df is None or returns_df is None:
-            return
-        with _DL_LOCK:
-            _DL_BUFFER['prices']  = prices_df
-            _DL_BUFFER['returns'] = returns_df
-            _DL_STATE['status']   = 'done'
-            _DL_STATE['total']    = len(prices_df.columns)
-            _DL_STATE['current']  = len(prices_df.columns)
-        print(f"✓ Frontiera: dati caricati da portafoglio — {len(prices_df.columns)} asset")
-    except Exception as e:
-        print(f"⚠ Frontiera: impossibile caricare market_data.pkl: {e}")
+        port = sys.modules.get('_app_portafoglio')
+        if port is not None:
+            with port._DL_LOCK:
+                buf = dict(port._DL_BUFFER)
+            prices  = buf.get('original_prices')
+            returns = buf.get('close_returns')
+            if prices is not None and returns is not None:
+                return prices, returns, buf.get('saved_at', '')
+    except Exception:
+        pass
 
-_preload_portafoglio_data()
+    # — fallback: pkl salvato da portafoglio —
+    try:
+        if os.path.exists(_PORT_PKL):
+            with open(_PORT_PKL, 'rb') as f:
+                data = pickle.load(f)
+            prices  = data.get('original_prices')
+            returns = data.get('close_returns')
+            if prices is not None and returns is not None:
+                return prices, returns, data.get('saved_at', '')
+    except Exception:
+        pass
+
+    return None, None, None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers dati
@@ -555,15 +565,26 @@ app.layout = html.Div([
     prevent_initial_call='initial_duplicate',
 )
 def on_page_load(_):
+    # 1. Dati personalizzati caricati in questa sessione (upload / Aggiorna)
     with _DL_LOCK:
-        buf     = dict(_DL_BUFFER)
-        saved_at = buf.get('saved_at', '')
-    if 'returns' in buf and 'prices' in buf:
-        ret_json    = buf['returns'].to_json(orient='split', date_format='iso')
-        prices_json = buf['prices'].to_json(orient='split', date_format='iso')
-        n_asset     = len(buf['prices'].columns)
-        label       = f'Da portafoglio ({n_asset} asset)' + (f' — {saved_at}' if saved_at else '')
-        return ret_json, prices_json, True, label
+        local_buf = dict(_DL_BUFFER)
+    if 'returns' in local_buf and 'prices' in local_buf:
+        prices  = local_buf['prices']
+        returns = local_buf['returns']
+        label   = f'Dati personalizzati ({len(prices.columns)} asset)'
+        return (returns.to_json(orient='split', date_format='iso'),
+                prices.to_json(orient='split', date_format='iso'),
+                True, label)
+
+    # 2. Dati condivisi da analisi di portafoglio (live o pkl)
+    prices, returns, saved_at = _read_shared_data()
+    if prices is not None:
+        n = len(prices.columns)
+        label = f'Da analisi di portafoglio ({n} asset)' + (f' — {saved_at}' if saved_at else '')
+        return (returns.to_json(orient='split', date_format='iso'),
+                prices.to_json(orient='split', date_format='iso'),
+                True, label)
+
     raise PreventUpdate
 
 
