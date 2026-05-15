@@ -8,16 +8,13 @@ import json
 import pickle
 import sys
 import threading
-import concurrent.futures
 import os
 import base64
-import requests
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import plotly.graph_objects as go
 from scipy.optimize import minimize
 
@@ -40,32 +37,55 @@ app.index_string = '''
 <!DOCTYPE html><html>
 <head>{%metas%}<title>Frontiera Efficiente — Andrea Cappelletti</title>{%favicon%}{%css%}
 <style>
+  html { font-size: 16px; }
   body { margin:0; font-family:'Inter',sans-serif; background:#f5f8fe; }
   @keyframes fe-spin { to { transform: rotate(360deg); } }
-  [data-tooltip]{ position:relative; }
-  [data-tooltip]::after{
-    content:attr(data-tooltip); position:absolute; left:100%; top:50%;
-    transform:translateY(-50%); background:#1a3a5c; color:#fff;
-    padding:4px 8px; border-radius:4px; font-size:11px;
-    white-space:nowrap; z-index:9999; pointer-events:none;
-    opacity:0; transition:opacity 0.15s; margin-left:6px;
-  }
-  [data-tooltip]:hover::after{ opacity:1; }
 </style>
 </head>
-<body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>
+<body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer>
+<script>
+(function(){
+  var _tip=null;
+  function _pos(el){
+    var r=el.getBoundingClientRect();
+    var color=el.getAttribute('data-tooltip-color')||'#1a3a6b';
+    var text=el.getAttribute('data-tooltip')||'';
+    if(!text)return;
+    if(_tip){_tip.remove();_tip=null;}
+    _tip=document.createElement('div');
+    _tip.textContent=text;
+    _tip.style.cssText='position:fixed;background:#fff;color:#1a2a4a;border:2px solid '+color+';border-radius:5px;padding:4px 10px;font-size:11px;font-family:Inter,sans-serif;font-weight:600;z-index:99999;pointer-events:none;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.13);';
+    document.body.appendChild(_tip);
+    var tx=r.right+8, ty=r.top+r.height/2-_tip.offsetHeight/2;
+    if(tx+_tip.offsetWidth>window.innerWidth-8) tx=r.left-_tip.offsetWidth-8;
+    _tip.style.left=Math.max(4,tx)+'px';
+    _tip.style.top=Math.max(4,Math.min(ty,window.innerHeight-_tip.offsetHeight-4))+'px';
+  }
+  function _find(e){
+    var el=e.target;
+    while(el&&el!==document.body){if(el.hasAttribute&&el.hasAttribute('data-tooltip'))return el;el=el.parentNode;}
+    return null;
+  }
+  document.addEventListener('mouseover',function(e){var el=_find(e);if(el)_pos(el);},true);
+  document.addEventListener('mouseout',function(e){
+    var el=_find(e);
+    if(el&&!el.contains(e.relatedTarget)){if(_tip){_tip.remove();_tip=null;}}
+  },true);
+})();
+</script>
+</body></html>
 '''
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Costanti
 # ─────────────────────────────────────────────────────────────────────────────
-_XLSX           = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'TARBIUTH.xlsx')
-DOWNLOAD_BATCH  = 5
-DOWNLOAD_TIMEOUT= 40
-_DL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
-_DL_BUFFER = {}   # buffer locale per upload personalizzati e Aggiorna
-_DL_LOCK   = threading.Lock()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Configurazione ottimizzatore
+# 0 = singolo start (veloce, originale)
+# 1 = doppio start: warm + uniforme, tiene il migliore (lieve overhead)
+# 2 = multi-start: warm + uniforme + MRP + mu-proporzionale (più preciso, ~4x più lento)
+FRONTIER_MULTISTART = 0
 # ─────────────────────────────────────────────────────────────────────────────
 # Funzioni matematiche
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,10 +107,20 @@ _ARIMA_STATE = {
     'req_id': None, 'running': False, 'done': False,
     'pct': 0, 'total': 0, 'error': None, 'mu': None, 'cov': None,
 }
+# Stato cache ARIMA pre-calcolata — letto una volta all'avvio, aggiornato dopo ogni calcolo
+_ARIMA_CACHE_INFO = {'available': False, 'ts': ''}
 
 def _arima_garch_mu_vol(returns_df, window=250, req_id=None):
-    """ARIMA(p,d,q) best-AIC per μ condizionale + GARCH(1,1) sui residui per σ.
-    Restituisce (mu_series_daily, cov_df_daily)."""
+    """ARIMA(p,0,q) best-AIC + GARCH(1,1) sui residui.
+    Restituisce (mu_series_daily, cov_df_daily).
+
+    μ  = media incondizionale ARIMA = const/(1-Σφᵢ)
+         → aspettativa a lungo orizzonte, stabile e coerente con Markowitz.
+         La previsione condizionale a 1 passo (forecast) NON va usata:
+         dipende dai residui recenti e annualizzata ×252 produce μ caotici.
+    σ  = volatilità condizionale GARCH 1-step → cattura il regime di rischio corrente.
+    Σ  = D_garch @ corr_resid @ D_garch   (correlazioni sui residui ARIMA).
+    """
     import warnings
     try:
         from statsmodels.tsa.arima.model import ARIMA as _ARIMA_CLS
@@ -102,8 +132,9 @@ def _arima_garch_mu_vol(returns_df, window=250, req_id=None):
     except ImportError:
         _has_arch = False
 
-    mu_dict       = {}
+    mu_dict        = {}
     vol_daily_dict = {}
+    resid_dict     = {}   # residui ARIMA allineati per calcolo correlazioni
     cols = returns_df.columns.tolist()
 
     with _ARIMA_LOCK:
@@ -116,39 +147,69 @@ def _arima_garch_mu_vol(returns_df, window=250, req_id=None):
         if len(s) < 30:
             mu_dict[col]        = float(s.mean())
             vol_daily_dict[col] = float(s.std())
+            resid_dict[col]     = (s - s.mean()).values
         else:
             best_aic   = np.inf
-            best_resid = s - s.mean()
-            best_mu    = float(s.mean())
+            best_resid = (s - s.mean()).values
+            best_model = None
             for p in range(3):
-                for d in [0, 1]:
-                    for q in range(3):
-                        if p == 0 and q == 0:
-                            continue
-                        try:
-                            with warnings.catch_warnings():
-                                warnings.simplefilter('ignore')
-                                m = _ARIMA_CLS(s, order=(p, d, q)).fit()
-                            if m.aic < best_aic:
-                                best_aic   = m.aic
-                                best_resid = m.resid
-                                best_mu    = float(m.fittedvalues.mean())
-                        except Exception:
-                            pass
-            mu_dict[col] = best_mu
+                for q in range(3):
+                    if p == 0 and q == 0:
+                        continue
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore')
+                            m = _ARIMA_CLS(s, order=(p, 0, q)).fit()
+                        if m.aic < best_aic:
+                            best_aic   = m.aic
+                            best_resid = m.resid.values
+                            best_model = m
+                    except Exception:
+                        pass
 
-            # GARCH(1,1) sui residui
+            # ── μ incondizionale: const / (1 - Σ φᵢ) ───────────────────────
+            # Aspettativa a lungo orizzonte del processo ARIMA.
+            # Guard: se Σφᵢ > 0.85 (near-unit-root), denom < 0.15 è mal
+            # identificato e amplifica la costante → fallback a media campionaria.
+            # Sanity cap: se il risultato supera 5× la media storica, è un
+            # artefatto numerico → fallback.
+            best_mu   = float(s.mean())   # default: media campionaria
+            hist_mean = float(s.mean())
+            if best_model is not None:
+                try:
+                    par = best_model.params
+                    ar_coefs = [par[k] for k in par.index if k.startswith('ar.')]
+                    ar_sum   = sum(ar_coefs)
+                    denom    = 1.0 - ar_sum
+                    if 'const' in par.index and abs(denom) > 0.15:
+                        mu_candidate = float(par['const'] / denom)
+                        # Sanity: scarta se > 5× la media storica in valore assoluto
+                        if hist_mean != 0 and abs(mu_candidate) > 5 * abs(hist_mean) + 1e-5:
+                            best_mu = hist_mean
+                        else:
+                            best_mu = mu_candidate
+                    else:
+                        best_mu = float(best_model.fittedvalues.mean())
+                except Exception:
+                    best_mu = float(s.mean())
+
+            mu_dict[col]    = best_mu
+            resid_dict[col] = best_resid
+
+            # ── σ condizionale: GARCH(1,1) 1-step ───────────────────────────
             if _has_arch and len(best_resid) > 20:
                 try:
-                    scaled = best_resid * 100
-                    gm = _arch_model(scaled, vol='Garch', p=1, q=1, rescale=False)
-                    gf = gm.fit(disp='off')
-                    fc = gf.forecast(horizon=1)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        scaled = best_resid * 100
+                        gm = _arch_model(scaled, vol='Garch', p=1, q=1, rescale=False)
+                        gf = gm.fit(disp='off')
+                        fc = gf.forecast(horizon=1)
                     vol_daily_dict[col] = float(np.sqrt(fc.variance.values[-1, 0])) / 100
                 except Exception:
-                    vol_daily_dict[col] = float(best_resid.std())
+                    vol_daily_dict[col] = float(np.std(best_resid))
             else:
-                vol_daily_dict[col] = float(best_resid.std())
+                vol_daily_dict[col] = float(np.std(best_resid))
 
         with _ARIMA_LOCK:
             if req_id and _ARIMA_STATE.get('req_id') == req_id:
@@ -156,12 +217,15 @@ def _arima_garch_mu_vol(returns_df, window=250, req_id=None):
 
     mu_series = pd.Series(mu_dict)
 
-    # Ricostruisci covarianza: D @ R @ D (giornaliera)
+    # ── Σ = D_garch @ corr @ D_garch ─────────────────────────────────────────
+    # Correlazioni sui rendimenti grezzi: allineate per data, robuste a serie
+    # di lunghezza diversa (pandas corr usa osservazioni pairwise complete).
     r_df = returns_df[cols].tail(window)
-    corr  = r_df.corr().values
+    corr = np.nan_to_num(r_df.corr().values, nan=0.0)
+    np.fill_diagonal(corr, 1.0)
     vols  = np.array([vol_daily_dict[c] for c in cols])
     D     = np.diag(vols)
-    cov_matrix = D @ corr @ D
+    cov_matrix = D @ corr @ D + 1e-8 * np.eye(len(cols))   # ensure positive-definite
     cov_df = pd.DataFrame(cov_matrix, index=cols, columns=cols)
 
     return mu_series, cov_df
@@ -186,18 +250,38 @@ def _run_arima_thread(req_id, returns_df, window):
 def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_override=None, cov_override=None):
     mu  = mu_override if mu_override is not None else returns_df.mean()
     cov = cov_override if cov_override is not None else returns_df.cov()
+    # Sanifica NaN nella matrice di covarianza (asset senza dati nella finestra)
+    if hasattr(cov, 'values'):
+        cov_arr = np.nan_to_num(cov.values, nan=0.0)
+        np.fill_diagonal(cov_arr, np.where(np.isnan(np.diag(cov.values)), 0.0, np.diag(cov.values)))
+        cov = pd.DataFrame(cov_arr, index=cov.index, columns=cov.columns)
     na  = len(returns_df.columns)
     bounds = tuple((wmin, wmax) for _ in range(na))
     eq     = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
     w0     = np.array([1/na] * na)
     opts   = {'ftol': 1e-10, 'maxiter': 2000}
 
-    def _opt(obj, w_start, extra_cs=()):
+    def _opt(obj, w_start, extra_cs=(), extra_starts=()):
         cs = (eq,) + tuple(extra_cs)
-        r = minimize(obj, w_start, method='SLSQP', bounds=bounds, constraints=cs, options=opts)
-        if not r.success:
-            r = minimize(obj, w0,      method='SLSQP', bounds=bounds, constraints=cs, options=opts)
-        return r
+        if FRONTIER_MULTISTART == 0:
+            # singolo start
+            r = minimize(obj, w_start, method='SLSQP', bounds=bounds, constraints=cs, options=opts)
+            if not r.success:
+                r = minimize(obj, w0, method='SLSQP', bounds=bounds, constraints=cs, options=opts)
+            return r
+        elif FRONTIER_MULTISTART == 1:
+            # doppio start: warm + uniforme
+            candidates = (w_start, w0)
+        else:
+            # multi-start completo
+            candidates = (w_start, w0) + tuple(extra_starts)
+        best = None
+        for w_init in candidates:
+            r = minimize(obj, w_init, method='SLSQP', bounds=bounds, constraints=cs, options=opts)
+            if r.success and (best is None or r.fun < best.fun):
+                best = r
+        return best if best is not None else minimize(obj, w0, method='SLSQP',
+                                                      bounds=bounds, constraints=cs, options=opts)
 
     # ── Portafoglio a massimo rendimento (estremo destro della frontiera) ──────
     # Risolto esplicitamente: per un universo senza vincoli superiori = 100% nell'asset
@@ -205,6 +289,10 @@ def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_
     def neg_ret(w): return -_port_perf(w, mu, cov)[0]
     max_res = _opt(neg_ret, w0)
     max_ret, _ = _port_perf(max_res.x, mu, cov)
+
+    mu_arr = mu.values if hasattr(mu, 'values') else np.array(mu)
+    mu_w   = np.clip(mu_arr - mu_arr.min() + 1e-8, 0, None)
+    mu_w   = np.clip(mu_w, wmin, wmax); mu_w /= mu_w.sum()
 
     if risk in ('standard', 'vol', 'arima_garch'):
         def obj_risk(w): return _port_perf(w, mu, cov)[1]
@@ -217,12 +305,12 @@ def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_
                  'Sharpe': (min_ret-rf)/min_risk if min_risk>0 else 0,
                  'Weights': min_res.x}]
 
-        # Portafogli intermedi: target uniformi tra MVP e MRP, con warm-starting
-        targets = np.linspace(min_ret, max_ret, n + 2)[1:-1]
+        # Portafogli intermedi: target uniformi tra MVP e MRP
+        targets = np.linspace(min_ret, max_ret, n)[1:-1]
         prev_w  = min_res.x.copy()
         for t in targets:
             ret_cs = {'type':'eq','fun': lambda x,t=t: _port_perf(x,mu,cov)[0]-t}
-            r = _opt(obj_risk, prev_w, extra_cs=(ret_cs,))
+            r = _opt(obj_risk, prev_w, extra_cs=(ret_cs,), extra_starts=(max_res.x, mu_w))
             if r.success:
                 ret, vol_p = _port_perf(r.x, mu, cov)
                 rows.append({'Return':ret,'Volatility':vol_p,
@@ -247,11 +335,11 @@ def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_
                  'Sharpe': (min_ret-rf)/min_cvar if min_cvar>0 else 0,
                  'Weights': min_res.x}]
 
-        targets = np.linspace(min_ret, max_ret, n + 2)[1:-1]
+        targets = np.linspace(min_ret, max_ret, n)[1:-1]
         prev_w  = min_res.x.copy()
         for t in targets:
             ret_cs = {'type':'eq','fun': lambda x,t=t: _port_perf(x,mu,cov)[0]-t}
-            r = _opt(obj_risk, prev_w, extra_cs=(ret_cs,))
+            r = _opt(obj_risk, prev_w, extra_cs=(ret_cs,), extra_starts=(max_res.x, mu_w))
             if r.success:
                 ret, _ = _port_perf(r.x, mu, cov)
                 v      = obj_risk(r.x)
@@ -288,126 +376,6 @@ def calc_single_portfolio(weights_dict, returns_df, rf=0.02):
     ret, vol = _port_perf(w, mu, cov)
     sharpe = (ret - rf) / vol if vol > 0 else 0
     return ret, vol, sharpe, w
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Download dati
-# ─────────────────────────────────────────────────────────────────────────────
-def _make_session():
-    s = requests.Session()
-    s.headers.update({'User-Agent': (
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-    )})
-    return s
-
-def _yf_safe(tickers, start, timeout=DOWNLOAD_TIMEOUT):
-    sess = _make_session()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        f = ex.submit(yf.download, tickers, start=start,
-                      group_by='ticker', auto_adjust=True, progress=False, session=sess)
-        try:
-            return f.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            raise TimeoutError(f"Timeout {timeout}s")
-
-def _process_batch(bt, bd, bv, start, eurusd, eurgbp):
-    prices, errors = {}, []
-    raw = None
-    for attempt in range(2):
-        try:
-            raw = _yf_safe(bt, start)
-            if raw is not None and not raw.empty:
-                break
-        except Exception as e:
-            if attempt == 0:
-                import time; time.sleep(1)
-            else:
-                errors.append(f"{bt[0]}: {e}")
-    if raw is not None and not raw.empty:
-        for j, t in enumerate(bt):
-            try:
-                px = raw[(t,'Close')].copy() if isinstance(raw.columns, pd.MultiIndex) \
-                     else raw['Close'].copy()
-                px = px.ffill()
-                if bv[j] == 'USD' and eurusd is not None:
-                    px = px / eurusd.reindex(px.index).ffill()
-                elif bv[j] == 'GBP' and eurgbp is not None:
-                    px = px / eurgbp.reindex(px.index).ffill()
-                prices[bd[j]] = px
-            except Exception as e2:
-                errors.append(f"{t}: {e2}")
-    return prices, errors
-
-def _download_worker(tickers, descrizione, valuta, start_date):
-    global _DL_STATE, _DL_BUFFER
-    total = len(tickers)
-    with _DL_LOCK:
-        _DL_STATE  = {'status':'running','current':0,'total':total,'errors':[]}
-        _DL_BUFFER = {}
-
-    fx = None
-    try:
-        fx = _yf_safe(['EURUSD=X','EURGBP=X'], start_date, timeout=30)
-    except Exception:
-        pass
-
-    def _fx(name):
-        if fx is None or fx.empty: return None
-        try:
-            return fx[(name,'Close')] if isinstance(fx.columns, pd.MultiIndex) else fx['Close']
-        except: return None
-
-    eurusd = _fx('EURUSD=X')
-    eurgbp = _fx('EURGBP=X')
-
-    batches = [(tickers[i:i+DOWNLOAD_BATCH], descrizione[i:i+DOWNLOAD_BATCH],
-                valuta[i:i+DOWNLOAD_BATCH]) for i in range(0, total, DOWNLOAD_BATCH)]
-
-    all_prices = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-        fmap = {ex.submit(_process_batch, bt, bd, bv, start_date, eurusd, eurgbp): len(bt)
-                for bt, bd, bv in batches}
-        for fut in concurrent.futures.as_completed(fmap):
-            bs = fmap[fut]
-            try:
-                prices, errors = fut.result()
-                all_prices.update(prices)
-                with _DL_LOCK:
-                    _DL_STATE['errors'].extend(errors)
-            except Exception as e:
-                with _DL_LOCK:
-                    _DL_STATE['errors'].append(str(e))
-            with _DL_LOCK:
-                _DL_STATE['current'] = min(_DL_STATE['current'] + bs, total)
-
-    if all_prices:
-        prices_df = pd.DataFrame(all_prices)
-        prices_df.index = pd.to_datetime(prices_df.index)
-        prices_df = prices_df.ffill()
-        returns_df = prices_df.pct_change(fill_method=None)
-        with _DL_LOCK:
-            _DL_BUFFER['prices']  = prices_df
-            _DL_BUFFER['returns'] = returns_df
-            _DL_STATE['status']   = 'done'
-    else:
-        with _DL_LOCK:
-            _DL_STATE['status'] = 'error'
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Carica nomi asset da XLSX
-# ─────────────────────────────────────────────────────────────────────────────
-def _load_asset_list():
-    try:
-        df = pd.read_excel(_XLSX)
-        cols = df.columns.tolist()
-        tickers    = list(df[cols[0]])
-        descrizione= list(df[cols[1]])
-        valuta     = list(df[cols[2]]) if len(cols) > 2 else ['EUR']*len(tickers)
-        return tickers, descrizione, valuta
-    except Exception:
-        return [], [], []
-
-_TICKERS, _DESCRIZIONI, _VALUTA = _load_asset_list()
 
 _PORT_PKL = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -449,6 +417,87 @@ def _read_shared_data():
 
     return None, None, None
 
+
+def _read_arima_cache():
+    """Legge mu/cov ARIMA pre-calcolati dal buffer live o dal pkl.
+    Preferisce il dato più recente tra buffer e pkl (confronto timestamp).
+    Restituisce (mu_series, cov_df, computed_at) o (None, None, None)."""
+    def _parse(arima_data):
+        if not arima_data or not isinstance(arima_data, dict):
+            return None, None, None
+        mu_raw  = arima_data.get('mu')
+        cov_raw = arima_data.get('cov')
+        ts      = arima_data.get('computed_at', '')
+        if not mu_raw or not cov_raw:
+            return None, None, None
+        mu_series = pd.Series(mu_raw)
+        cov_df    = pd.DataFrame(cov_raw)
+        return mu_series, cov_df, ts
+
+    def _parse_ts(ts_str):
+        from datetime import datetime
+        for fmt in ('%d/%m/%Y %H:%M', '%Y-%m-%d %H:%M:%S'):
+            try:
+                return datetime.strptime(ts_str, fmt)
+            except Exception:
+                pass
+        return None
+
+    buf_mu = buf_cov = buf_ts = None
+    buf_raw = None
+    try:
+        port = sys.modules.get('_app_portafoglio')
+        if port is not None:
+            with port._DL_LOCK:
+                buf_raw = port._DL_BUFFER.get('arima')
+            buf_mu, buf_cov, buf_ts = _parse(buf_raw)
+    except Exception:
+        pass
+
+    pkl_mu = pkl_cov = pkl_ts = None
+    pkl_raw = None
+    try:
+        if os.path.exists(_PORT_PKL):
+            with open(_PORT_PKL, 'rb') as f:
+                pkl_data = pickle.load(f)
+            pkl_raw = pkl_data.get('arima')
+            pkl_mu, pkl_cov, pkl_ts = _parse(pkl_raw)
+    except Exception:
+        pass
+
+    # Usa il dato più recente: se il pkl è più nuovo, aggiorna anche il buffer
+    if buf_mu is not None and pkl_mu is not None:
+        buf_dt = _parse_ts(buf_ts or '')
+        pkl_dt = _parse_ts(pkl_ts or '')
+        if pkl_dt and buf_dt and pkl_dt > buf_dt:
+            try:
+                port = sys.modules.get('_app_portafoglio')
+                if port is not None:
+                    with port._DL_LOCK:
+                        port._DL_BUFFER['arima']             = pkl_raw
+                        port._DL_BUFFER['arima_computed_at'] = pkl_ts
+            except Exception:
+                pass
+            return pkl_mu, pkl_cov, pkl_ts
+        return buf_mu, buf_cov, buf_ts
+
+    if buf_mu is not None:
+        return buf_mu, buf_cov, buf_ts
+    if pkl_mu is not None:
+        return pkl_mu, pkl_cov, pkl_ts
+    return None, None, None
+
+
+def _refresh_arima_cache_info():
+    """Aggiorna _ARIMA_CACHE_INFO leggendo il pkl una volta sola (chiamata ad avvio e post-calcolo)."""
+    mu, _, ts = _read_arima_cache()
+    _ARIMA_CACHE_INFO['available'] = mu is not None
+    _ARIMA_CACHE_INFO['ts'] = ts or ''
+
+
+# Leggi la cache ARIMA una volta all'avvio (in un thread per non bloccare l'import)
+threading.Thread(target=_refresh_arima_cache_info, daemon=True).start()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers dati
 # ─────────────────────────────────────────────────────────────────────────────
@@ -467,18 +516,36 @@ def _get_returns(data_json):
 # ─────────────────────────────────────────────────────────────────────────────
 # Stili
 # ─────────────────────────────────────────────────────────────────────────────
-_MODAL_HIDDEN = {'display':'none','position':'fixed','top':'0','left':'0',
-                 'width':'100%','height':'100%','background':'rgba(26,58,92,0.45)',
-                 'zIndex':'2000','justifyContent':'center','alignItems':'center'}
-_MODAL_SHOWN  = {**_MODAL_HIDDEN, 'display':'flex'}
-_FILL_LOADING = {'height':'100%','width':'0%',
-                 'background':'linear-gradient(90deg,#0066cc,#3399ff)',
-                 'borderRadius':'8px','transition':'width 0.5s ease'}
-
 # Colori frontiere
 _FC = {'F1': '#0066cc', 'F2': '#2ca02c', 'F3': '#e6550d'}
 _CML_C = {'F1': '#6633cc', 'F2': '#007700', 'F3': '#cc4400'}
+_PALETTE = [
+    '#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd',
+    '#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf',
+    '#aec7e8','#ffbb78','#98df8a','#ff9896','#c5b0d5',
+]
 
+
+def _short_history(returns_df):
+    """Restituisce un dict {asset: 'YYYY-MM-DD'} per gli asset che iniziano
+    dopo la prima data disponibile nel dataset (storia incompleta)."""
+    first_dates = {col: returns_df[col].first_valid_index() for col in returns_df.columns}
+    dataset_start = min(d for d in first_dates.values() if d is not None)
+    return {asset: d.strftime('%d/%m/%Y')
+            for asset, d in first_dates.items()
+            if d is not None and d > dataset_start}
+
+def _asset_name_div(asset, short_map):
+    color   = '#cc2200' if asset in short_map else '#1a3a5c'
+    tooltip = f'{asset} — dati dal {short_map[asset]}' if asset in short_map else asset
+    return html.Div(
+        html.Span(asset, style={'overflow':'hidden','whiteSpace':'nowrap',
+                                'textOverflow':'ellipsis','maxWidth':'100%',
+                                'fontSize':'7px','color':color,'fontWeight':'600'}),
+        **{'data-tooltip': tooltip, 'data-tooltip-color': color},
+        style={'width':'25%','height':'24px','display':'flex','alignItems':'center',
+               'paddingLeft':'4px','overflow':'hidden','position':'relative','cursor':'default'}
+    )
 
 def _w_cell(w, color):
     if w is None or w < 0.05:
@@ -502,16 +569,21 @@ def _build_perf_chart(prices_data, chart_assets, frontier_weights, show_frontier
         if date_start: prices_df = prices_df.loc[date_start:]
         if date_end:   prices_df = prices_df.loc[:date_end]
         fig2 = go.Figure()
-        for asset in (chart_assets or []):
-            if asset in prices_df.columns:
-                s = prices_df[asset].dropna()
-                if len(s) > 1:
-                    cum = (s / s.iloc[0] - 1) * 100
-                    fig2.add_trace(go.Scatter(
-                        x=cum.index, y=cum.values, mode='lines', name=asset,
-                        line=dict(width=1.5), opacity=0.75,
-                        hovertemplate=f'<b>{asset}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.1f}}%<extra></extra>',
-                    ))
+        for i, asset in enumerate(chart_assets or []):
+            if asset not in prices_df.columns:
+                continue
+            s = prices_df[asset].dropna()
+            if len(s) <= 1:
+                continue
+            cum   = (s / s.iloc[0] - 1) * 100
+            color = _PALETTE[i % len(_PALETTE)]
+            fig2.add_trace(go.Scatter(
+                x=cum.index, y=cum.values, mode='lines', name=asset,
+                line=dict(width=1.5, color=color), opacity=0.85,
+                hoverlabel=dict(bgcolor='white', bordercolor=color,
+                                font=dict(color='black', size=11)),
+                hovertemplate=f'<b>{asset}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.1f}}%<extra></extra>',
+            ))
         ret_df = prices_df.pct_change()
         for fname, fcolor in _FC.items():
             if not (show_frontiers or {}).get(fname, False):
@@ -519,24 +591,23 @@ def _build_perf_chart(prices_data, chart_assets, frontier_weights, show_frontier
             fw = frontier_weights.get(fname, {})
             if not fw:
                 continue
-            # solo gli asset che hanno un peso > 0 e una colonna nei prezzi
             port_cols = [c for c in fw if fw[c] > 0 and c in prices_df.columns]
             if not port_cols:
                 continue
             w_raw = np.array([fw[c] for c in port_cols], dtype=float)
             w_raw /= w_raw.sum()
-            # data di inizio comune: primo giorno in cui TUTTI gli asset hanno un prezzo
             common_start = max(prices_df[c].first_valid_index() for c in port_cols)
             sub_ret = ret_df.loc[common_start:, port_cols].dropna(how='any')
             if len(sub_ret) < 2:
                 continue
-            # rendimento giornaliero del portafoglio = Σ wᵢ · rᵢ(t)
             port_ret = sub_ret.values @ w_raw
             cum_p = (np.cumprod(1 + port_ret) - 1) * 100
             fig2.add_trace(go.Scatter(
                 x=sub_ret.index, y=cum_p, mode='lines',
                 name=f'Portafoglio {fname}',
                 line=dict(width=3, color=fcolor),
+                hoverlabel=dict(bgcolor='white', bordercolor=fcolor,
+                                font=dict(color='black', size=11)),
                 hovertemplate=f'<b>Portafoglio {fname}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.1f}}%<extra></extra>',
             ))
         if not fig2.data:
@@ -550,9 +621,10 @@ def _build_perf_chart(prices_data, chart_assets, frontier_weights, show_frontier
                        zeroline=True, zerolinecolor='#aaa'),
             paper_bgcolor='white', plot_bgcolor='#f8faff',
             font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
-            margin=dict(l=50, r=30, t=40, b=50),
-            hovermode='x unified',
+            legend=dict(orientation='v', yanchor='top', y=1, xanchor='left', x=1.01,
+                        font=dict(size=10)),
+            margin=dict(l=50, r=150, t=40, b=50),
+            hovermode='closest',
         )
         return fig2
     except Exception:
@@ -575,13 +647,6 @@ app.layout = html.Div([
         # ── Barra comandi ────────────────────────────────────────────────────
         html.Div([
             html.Div([
-                dcc.Loading(type='circle', color='#007755', children=[
-                    html.Button('⟳ Aggiorna', id='fe-load-btn', n_clicks=0,
-                                title='Scarica dati aggiornati da Yahoo Finance',
-                                style={'background':'#007755','color':'white','border':'none',
-                                       'padding':'7px 16px','borderRadius':'4px',
-                                       'cursor':'pointer','fontWeight':'bold','fontSize':'12px'}),
-                ]),
                 html.Span(id='fe-last-updated',
                           style={'fontSize':'10px','color':'#6b7a99','fontStyle':'italic',
                                  'alignSelf':'center','whiteSpace':'nowrap'}),
@@ -616,14 +681,6 @@ app.layout = html.Div([
                                    'border':'1px solid #c0d0e8','color':'#1a3a5c'}),
                 html.Div(id='fe-upload-status',
                          style={'fontSize':'10px','color':'#555','alignSelf':'center'}),
-                html.Div([
-                    html.Div(id='fe-progress-text',
-                             style={'fontSize':'10px','color':'#555','marginRight':'6px'}),
-                    html.Div(html.Div(id='fe-progress-fill', style=_FILL_LOADING),
-                             id='fe-progress-bar',
-                             style={'display':'none','width':'140px','height':'8px',
-                                    'background':'#ddd','borderRadius':'8px','overflow':'hidden'}),
-                ], style={'display':'flex','alignItems':'center','marginLeft':'auto'}),
             ], style={'display':'flex','alignItems':'center','gap':'8px','flexWrap':'wrap'}),
         ], style={'padding':'8px 10px','background':'#f0f4fb',
                   'borderBottom':'1px solid #ccd9ee','display':'flex',
@@ -633,7 +690,7 @@ app.layout = html.Div([
         html.Div([
             html.Div([
                 html.Div('Asset',
-                         style={'width':'25%','fontWeight':'bold','fontSize':'8px',
+                         style={'width':'25%','fontWeight':'bold','fontSize':'7px',
                                 'paddingLeft':'4px','color':'#1a3a5c'}),
                 html.Div([
                     html.Span('📊', style={'fontSize':'9px'}),
@@ -697,10 +754,10 @@ app.layout = html.Div([
                 dcc.RadioItems(id='fe-risk-measure',
                     options=[
                         {'label': ' Standard',    'value': 'standard'},
-                        {'label': ' Vol (fin.)',   'value': 'vol'},
                         {'label': ' CVaR 90%',    'value': 'cvar90'},
                         {'label': ' CVaR 95%',    'value': 'cvar95'},
                         {'label': ' ARIMA+GARCH', 'value': 'arima_garch'},
+                        {'label': ' Vol (fin.)',   'value': 'vol'},
                     ],
                     value='standard', inline=True,
                     inputStyle={'marginRight':'3px','cursor':'pointer'},
@@ -711,6 +768,9 @@ app.layout = html.Div([
                               style={'width':'55px','fontSize':'10px'}),
                 ], id='fe-arima-window-div',
                    style={'display':'none','alignItems':'center','marginRight':'8px'}),
+                html.Div(id='fe-arima-cache-status',
+                         style={'display':'none','fontSize':'9px','padding':'2px 6px',
+                                'borderRadius':'3px','fontWeight':'600'}),
                 html.Button('Calcola Frontiera', id='fe-calc-btn', n_clicks=0,
                             style={'background':'#0066cc','color':'white','border':'none',
                                    'padding':'6px 14px','borderRadius':'4px','cursor':'pointer',
@@ -734,7 +794,7 @@ app.layout = html.Div([
                                     'fontSize':'11px','padding':'12px 8px'})
                 ]),
             ], style={'width':'35%','overflowY':'auto','borderRight':'1px solid #ccd9ee',
-                      'background':'white'}),
+                      'background':'white','maxHeight':'870px'}),
 
             # Destra: grafici — flex-column per riempire esattamente lo spazio disponibile
             html.Div([
@@ -780,19 +840,18 @@ app.layout = html.Div([
                     children=dcc.Graph(id='fe-frontier-chart',
                                        style={'height':'100%'},
                                        config={'displayModeBar':True}),
-                    style={'flex':'55','minHeight':'0'},
+                    style={'height':'420px'},
                 ),
                 dcc.Graph(id='fe-perf-chart',
-                          style={'flex':'45','minHeight':'0','marginTop':'6px'},
+                          style={'height':'420px','marginTop':'6px'},
                           config={'displayModeBar':True}),
                 html.Div(id='fe-stats-panel',
-                         style={'padding':'4px 10px','fontSize':'11px','color':'#1a3a5c',
-                                'flexShrink':'0'}),
+                         style={'padding':'4px 10px','fontSize':'11px','color':'#1a3a5c'}),
             ], style={
                 'width':'65%','padding':'6px','background':'white',
-                'display':'flex','flexDirection':'column','overflow':'hidden',
+                'display':'flex','flexDirection':'column',
             }),
-        ], style={'display':'flex','height':'calc(100vh - 178px)','overflow':'hidden'}),
+        ], style={'display':'flex','alignItems':'flex-start'}),
 
     ], style={'marginTop':'64px'}),
 
@@ -807,34 +866,10 @@ app.layout = html.Div([
     dcc.Store(id='fe-frontier-rawdata',data=None),
     dcc.Store(id='fe-selected-pt',     data=None),
     dcc.Store(id='fe-arima-reqid',     data=None),
-    dcc.Interval(id='fe-poll',       interval=800,  n_intervals=0, disabled=True),
     dcc.Interval(id='fe-arima-poll', interval=600,  n_intervals=0, disabled=True),
     dcc.Download(id='fe-dl-template'),
     dcc.Download(id='fe-dl-prices'),
 
-    # Modale progresso
-    html.Div([
-        html.Div([
-            html.Div('Download dati in corso…',
-                     style={'fontFamily':"'Playfair Display',serif",
-                            'fontSize':'1.1rem','color':'#1a3a6b',
-                            'fontWeight':'700','marginBottom':'16px','textAlign':'center'}),
-            html.Div([html.Div(id='fe-modal-fill', style=_FILL_LOADING)],
-                     style={'width':'100%','height':'10px','background':'#dde6f5',
-                            'borderRadius':'8px','overflow':'hidden','marginBottom':'10px'}),
-            html.Div(id='fe-modal-pct',
-                     style={'textAlign':'center','fontSize':'0.9rem','color':'#2554a0',
-                            'fontWeight':'600','marginBottom':'4px'}),
-            html.Div(id='fe-modal-status',
-                     style={'textAlign':'center','fontSize':'0.78rem','color':'#6b7a99'}),
-            html.Button('✕', id='fe-modal-close', n_clicks=0,
-                        style={'position':'absolute','top':'12px','right':'16px',
-                               'background':'none','border':'none','fontSize':'1.2rem',
-                               'cursor':'pointer','color':'#6b7a99'}),
-        ], style={'background':'white','borderRadius':'16px','padding':'32px 40px',
-                  'minWidth':'340px','maxWidth':'420px','position':'relative',
-                  'boxShadow':'0 8px 40px rgba(26,58,107,0.18)'}),
-    ], id='fe-modal', style=_MODAL_HIDDEN),
 ], style={'minHeight':'100vh'})
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -850,18 +885,6 @@ app.layout = html.Div([
     prevent_initial_call='initial_duplicate',
 )
 def on_page_load(_):
-    # 1. Dati personalizzati caricati in questa sessione (upload / Aggiorna)
-    with _DL_LOCK:
-        local_buf = dict(_DL_BUFFER)
-    if 'returns' in local_buf and 'prices' in local_buf:
-        prices  = local_buf['prices']
-        returns = local_buf['returns']
-        label   = f'Dati personalizzati ({len(prices.columns)} asset)'
-        return (returns.to_json(orient='split', date_format='iso'),
-                prices.to_json(orient='split', date_format='iso'),
-                True, label)
-
-    # 2. Dati condivisi da analisi di portafoglio (live o pkl)
     prices, returns, saved_at = _read_shared_data()
     if prices is not None:
         n = len(prices.columns)
@@ -874,34 +897,89 @@ def on_page_load(_):
 
 
 @app.callback(
-    Output('fe-arima-window-div', 'style'),
+    Output('fe-grid',        'children', allow_duplicate=True),
+    Output('fe-asset-count', 'children', allow_duplicate=True),
+    Input('fe-loaded-flag',  'data'),
+    State('fe-stock-data',   'data'),
+    prevent_initial_call=True,
+)
+def build_grid_on_load(loaded, stock_data):
+    if not loaded or not stock_data:
+        raise PreventUpdate
+    returns_df = _get_returns(stock_data)
+    if returns_df is None or returns_df.empty:
+        raise PreventUpdate
+    assets    = returns_df.dropna(how='all', axis=1).columns.tolist()
+    short_map = _short_history(returns_df)
+    rows = []
+    for i, asset in enumerate(assets):
+        row = html.Div([
+            _asset_name_div(asset, short_map),
+            html.Div(
+                dcc.Checklist(id={'type':'fe-chart','index':asset},
+                              options=[{'label':'','value':asset}], value=[],
+                              style={'display':'flex','justifyContent':'center'}),
+                style={'width':'7%','display':'flex','justifyContent':'center','alignItems':'center'}
+            ),
+            html.Div(
+                dcc.Checklist(id={'type':'fe-p1','index':asset},
+                              options=[{'label':'','value':asset}], value=[],
+                              inputStyle={'accentColor':'#0066cc'},
+                              style={'display':'flex','justifyContent':'center'}),
+                style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}
+            ),
+            html.Div(
+                dcc.Checklist(id={'type':'fe-p2','index':asset},
+                              options=[{'label':'','value':asset}], value=[],
+                              inputStyle={'accentColor':'#2ca02c'},
+                              style={'display':'flex','justifyContent':'center'}),
+                style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}
+            ),
+            html.Div(
+                dcc.Checklist(id={'type':'fe-p3','index':asset},
+                              options=[{'label':'','value':asset}], value=[],
+                              inputStyle={'accentColor':'#e6550d'},
+                              style={'display':'flex','justifyContent':'center'}),
+                style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}
+            ),
+            html.Div(id={'type':'fe-wgt-f1','index':asset}, children=_w_cell(None,'#0066cc'),
+                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
+            html.Div(id={'type':'fe-wgt-f2','index':asset}, children=_w_cell(None,'#2ca02c'),
+                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
+            html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(None,'#e6550d'),
+                     style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
+        ], style={'display':'flex','alignItems':'center','height':'24px',
+                  'borderBottom':'1px solid #f0f4fb',
+                  'background':'white' if i % 2 == 0 else '#fafcff'})
+        rows.append(row)
+    return rows, f'{len(assets)} asset'
+
+
+@app.callback(
+    Output('fe-arima-window-div',    'style'),
+    Output('fe-arima-cache-status',  'children'),
+    Output('fe-arima-cache-status',  'style'),
     Input('fe-risk-measure', 'value'),
 )
 def toggle_window_div(risk):
     base = {'alignItems':'center','marginRight':'8px'}
-    if risk == 'standard':
-        return {'display':'none', **base}
-    return {'display':'flex', **base}
+    # Finestra configurabile solo per Vol (fin.)
+    win_style = {'display':'flex', **base} if risk == 'vol' else {'display':'none', **base}
 
+    if risk != 'arima_garch':
+        return win_style, '', {'display':'none'}
 
-@app.callback(
-    Output('fe-poll',       'disabled'),
-    Output('fe-modal',      'style'),
-    Output('fe-modal-fill', 'style'),
-    Output('fe-modal-pct',  'children'),
-    Output('fe-modal-status','children'),
-    Input('fe-load-btn',    'n_clicks'),
-    State('fe-date-start',  'date'),
-    prevent_initial_call=True,
-)
-def start_download(n, start_date):
-    if not n:
-        raise PreventUpdate
-    sd = start_date or (pd.Timestamp.today()-pd.DateOffset(years=10)).strftime('%Y-%m-%d')
-    t = threading.Thread(target=_download_worker,
-                         args=(_TICKERS, _DESCRIZIONI, _VALUTA, sd), daemon=True)
-    t.start()
-    return False, _MODAL_SHOWN, _FILL_LOADING, '0 / … (0%)', 'Avvio download…'
+    if _ARIMA_CACHE_INFO['available']:
+        txt   = f'⚡ cache {_ARIMA_CACHE_INFO["ts"]}'
+        style = {'display':'inline-block','fontSize':'9px','padding':'2px 6px',
+                 'borderRadius':'3px','fontWeight':'600',
+                 'background':'#d4edda','color':'#155724','border':'1px solid #c3e6cb'}
+    else:
+        txt   = '⏳ nessuna cache — calcolo in background'
+        style = {'display':'inline-block','fontSize':'9px','padding':'2px 6px',
+                 'borderRadius':'3px','fontWeight':'600',
+                 'background':'#fff3cd','color':'#856404','border':'1px solid #ffc107'}
+    return win_style, txt, style
 
 
 @app.callback(
@@ -910,14 +988,11 @@ def start_download(n, start_date):
     Output('fe-loaded-flag',     'data',            allow_duplicate=True),
     Output('fe-upload-status',   'children'),
     Output('fe-last-updated',    'children'),
-    Output('fe-poll',            'disabled',        allow_duplicate=True),
-    Output('fe-modal',           'style',           allow_duplicate=True),
     Input('fe-upload-data',      'contents'),
     State('fe-upload-data',      'filename'),
-    State('fe-date-start',       'date'),
     prevent_initial_call=True,
 )
-def upload_file(contents, filename, start_date):
+def upload_file(contents, filename):
     if not contents:
         raise PreventUpdate
     try:
@@ -926,45 +1001,21 @@ def upload_file(contents, filename, start_date):
         df      = pd.read_excel(io.BytesIO(decoded))
         cols    = df.columns.tolist()
 
-        # Detect price file: first col parseable as dates + remaining cols numeric
-        is_price_file = False
-        try:
-            pd.to_datetime(df[cols[0]], errors='raise')
-            num_cols = df.drop(columns=[cols[0]]).select_dtypes(include='number').columns.tolist()
-            is_price_file = len(num_cols) >= 1
-        except Exception:
-            pass
-
-        if is_price_file:
-            df_prices = df.set_index(cols[0])
-            df_prices.index = pd.to_datetime(df_prices.index)
-            df_prices = df_prices.select_dtypes(include='number').ffill().dropna(how='all')
-            returns_df = df_prices.pct_change(fill_method=None)
-            saved_at   = datetime.now().strftime('%d/%m/%Y %H:%M')
-            return (
-                returns_df.to_json(orient='split', date_format='iso'),
-                df_prices.to_json(orient='split', date_format='iso'),
-                True,
-                f'✓ {len(df_prices.columns)} asset — prezzi dal file',
-                f'Caricati: {saved_at}',
-                True, _MODAL_HIDDEN,
-            )
-        else:
-            # Ticker list → background download
-            tickers     = list(df[cols[0]])
-            descrizione = list(df[cols[1]]) if len(cols) > 1 else [str(t) for t in tickers]
-            valuta      = list(df[cols[2]]) if len(cols) > 2 else ['EUR'] * len(tickers)
-            sd = start_date or (pd.Timestamp.today()-pd.DateOffset(years=10)).strftime('%Y-%m-%d')
-            threading.Thread(target=_download_worker,
-                             args=(tickers, descrizione, valuta, sd), daemon=True).start()
-            return (
-                no_update, no_update, no_update,
-                f'⏳ Download avviato — {len(tickers)} asset da Yahoo Finance…',
-                '',
-                False, _MODAL_SHOWN,
-            )
+        pd.to_datetime(df[cols[0]], errors='raise')
+        df_prices = df.set_index(cols[0])
+        df_prices.index = pd.to_datetime(df_prices.index)
+        df_prices = df_prices.select_dtypes(include='number').ffill().dropna(how='all')
+        returns_df = df_prices.pct_change(fill_method=None)
+        saved_at   = datetime.now().strftime('%d/%m/%Y %H:%M')
+        return (
+            returns_df.to_json(orient='split', date_format='iso'),
+            df_prices.to_json(orient='split', date_format='iso'),
+            True,
+            f'✓ {len(df_prices.columns)} asset — prezzi dal file',
+            f'Caricati: {saved_at}',
+        )
     except Exception as e:
-        return no_update, no_update, no_update, f'Errore: {e}', '', no_update, no_update
+        return no_update, no_update, no_update, f'Errore: {e}', ''
 
 
 @app.callback(
@@ -1007,75 +1058,6 @@ def download_prices(n, prices_data):
 
 
 @app.callback(
-    Output('fe-progress-text',   'children'),
-    Output('fe-progress-fill',   'style'),
-    Output('fe-progress-bar',    'style'),
-    Output('fe-modal-fill',      'style',    allow_duplicate=True),
-    Output('fe-modal-pct',       'children', allow_duplicate=True),
-    Output('fe-modal-status',    'children', allow_duplicate=True),
-    Output('fe-poll',            'disabled', allow_duplicate=True),
-    Output('fe-stock-data',      'data',     allow_duplicate=True),
-    Output('fe-prices-data',     'data',     allow_duplicate=True),
-    Output('fe-loaded-flag',     'data',     allow_duplicate=True),
-    Output('fe-modal',           'style',    allow_duplicate=True),
-    Output('fe-last-updated',    'children', allow_duplicate=True),
-    Input('fe-poll',             'n_intervals'),
-    prevent_initial_call=True,
-)
-def poll_progress(n):
-    with _DL_LOCK:
-        st  = dict(_DL_STATE)
-        buf = dict(_DL_BUFFER)
-
-    if st['status'] == 'idle':
-        raise PreventUpdate
-
-    total   = st['total'] or 1
-    current = st['current']
-    pct     = int(current / total * 100)
-    bar_s   = {**_FILL_LOADING, 'width': f'{pct}%'}
-    bar_c   = {'display':'block','width':'140px','height':'8px',
-               'background':'#ddd','borderRadius':'8px','overflow':'hidden'}
-
-    if st['status'] == 'running':
-        txt = f'{current}/{total} ({pct}%)'
-        return (txt, bar_s, bar_c, bar_s, f'{current}/{total} ({pct}%)',
-                'Download in corso…', False,
-                no_update, no_update, no_update, no_update, no_update)
-
-    if st['status'] in ('done','error'):
-        if st['status'] == 'done' and 'returns' in buf and 'prices' in buf:
-            ret_json    = buf['returns'].to_json(orient='split', date_format='iso')
-            prices_json = buf['prices'].to_json(orient='split', date_format='iso')
-            n_assets    = len(buf['prices'].columns)
-            errs        = len(st['errors'])
-            msg_bar     = f'✓ {n_assets} asset caricati' + (f' ({errs} errori)' if errs else '')
-            saved_at    = datetime.now().strftime('%d/%m/%Y %H:%M')
-            return (msg_bar, {**_FILL_LOADING,'width':'100%'}, bar_c,
-                    {**_FILL_LOADING,'width':'100%'},
-                    f'{total}/{total} (100%)', '✓ Completato',
-                    True, ret_json, prices_json, True, _MODAL_HIDDEN,
-                    f'Aggiornati: {saved_at}')
-        else:
-            return ('✗ Errore', bar_s, bar_c, bar_s, '–',
-                    '✗ Download fallito', True,
-                    no_update, no_update, False, _MODAL_HIDDEN, no_update)
-
-    raise PreventUpdate
-
-
-@app.callback(
-    Output('fe-modal', 'style', allow_duplicate=True),
-    Input('fe-modal-close', 'n_clicks'),
-    prevent_initial_call=True,
-)
-def close_modal(n):
-    if n:
-        return _MODAL_HIDDEN
-    raise PreventUpdate
-
-
-@app.callback(
     Output('fe-hint', 'style'),
     Input('fe-loaded-flag', 'data'),
     Input('fe-calc-btn',    'n_clicks'),
@@ -1094,20 +1076,20 @@ def toggle_hint(loaded, calc):
     return hidden
 
 
-# ── Aggiorna performance chart al click di 📊 ─────────────────────────────────
+# ── Aggiorna performance chart al click di 📊, cambio date o cambio pesi ──────
 @app.callback(
     Output('fe-perf-chart',  'figure', allow_duplicate=True),
     Input({'type':'fe-chart','index':ALL},      'value'),
     Input({'type':'fe-chart-port','index':ALL}, 'value'),
+    Input('fe-date-start',   'date'),
+    Input('fe-date-end',     'date'),
+    Input('fe-f1-weights',   'data'),
+    Input('fe-f2-weights',   'data'),
+    Input('fe-f3-weights',   'data'),
     State('fe-prices-data',  'data'),
-    State('fe-f1-weights',   'data'),
-    State('fe-f2-weights',   'data'),
-    State('fe-f3-weights',   'data'),
-    State('fe-date-start',   'date'),
-    State('fe-date-end',     'date'),
     prevent_initial_call=True,
 )
-def update_perf_chart(chart_vals, port_chart_vals, prices_data, f1j, f2j, f3j, date_start, date_end):
+def update_perf_chart(chart_vals, port_chart_vals, date_start, date_end, f1j, f2j, f3j, prices_data):
     chart_assets = [a for v in (chart_vals or []) if v for a in v]
     ctx = callback_context
     port_inputs = ctx.inputs_list[1] if len(ctx.inputs_list) > 1 else []
@@ -1183,7 +1165,13 @@ def calc_and_render(n, stock_data, prices_data,
     # Rimuove solo colonne/righe interamente NaN — NON il dropna globale che
     # taglierebbe il dataset al periodo del titolo più recente (es. crypto/futures).
     returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-    win = int(arima_window or 250) if risk != 'standard' else None
+    # Standard/CVaR: tutta la storia. ARIMA: 250 fissi. Vol: finestra configurabile.
+    if risk == 'vol':
+        win = int(arima_window or 250)
+    elif risk == 'arima_garch':
+        win = 250
+    else:
+        win = None  # standard, cvar90, cvar95 → tutta la storia
     all_assets = returns_df.columns.tolist()
 
     # P1: default tutti gli asset; P2/P3: solo se l'utente ha spuntato almeno 2 asset
@@ -1195,7 +1183,7 @@ def calc_and_render(n, stock_data, prices_data,
             return all_assets if default_all else []
         return sel if len(sel) >= 2 else []
 
-    p1_sel = _p_assets(p1_vals, p_ids, default_all=True)
+    p1_sel = _p_assets(p1_vals, p_ids, default_all=False)
     p2_sel = _p_assets(p2_vals, p_ids, default_all=False)
     p3_sel = _p_assets(p3_vals, p_ids, default_all=False)
 
@@ -1203,6 +1191,10 @@ def calc_and_render(n, stock_data, prices_data,
     port_chart_checked = {
         pid['index'] for v, pid in zip(port_chart_vals or [], port_chart_ids or []) if v
     }
+
+    if not p1_sel and not p2_sel and not p3_sel:
+        return (no_update, no_update, _EMPTY_FIG, _EMPTY_FIG, '',
+                None, None, None, None, None, True, None, {'display':'none'})
 
     wmin_f = (wmin or 0) / 100
     wmax_f = (wmax or 100) / 100
@@ -1219,29 +1211,51 @@ def calc_and_render(n, stock_data, prices_data,
 
     _existing_sel = json.loads(sel_pt_cur) if sel_pt_cur else {}
 
-    # ── ARIMA+GARCH: avvia thread in background e ritorna subito ──────────────
+    # ── ARIMA+GARCH: prova cache pre-calcolata, altrimenti avvia thread ────────
     if risk == 'arima_garch':
-        import uuid as _uuid
-        req_id = str(_uuid.uuid4())[:8]
         arima_win = int(arima_window or 250)
-        with _ARIMA_LOCK:
-            _ARIMA_STATE.update({
-                'req_id': req_id, 'running': True, 'done': False,
-                'pct': 0, 'total': len(all_assets), 'error': None, 'mu': None, 'cov': None,
-            })
-        t = threading.Thread(
-            target=_run_arima_thread,
-            args=(req_id, returns_df, arima_win),
-            daemon=True,
-        )
-        t.start()
-        _prog_style = {'display':'flex','alignItems':'center','justifyContent':'center',
-                       'gap':'10px','padding':'8px 16px','background':'#eef4ff',
-                       'borderRadius':'8px','margin':'4px 0','flexShrink':'0'}
-        no_upd = dash.no_update
-        return (no_upd, no_upd, no_upd, no_upd, no_upd,
-                no_upd, no_upd, no_upd, no_upd, no_upd,
-                False, req_id, _prog_style)
+        mu_cached, cov_cached, arima_ts = _read_arima_cache()
+        print(f"[calc_and_render] ARIMA cache: {'trovata' if mu_cached is not None else 'VUOTA'}")
+        if mu_cached is not None:
+            # Cache disponibile → inietta nel _ARIMA_STATE e scatta on_arima_done subito
+            import uuid as _uuid
+            req_id = str(_uuid.uuid4())[:8]
+            with _ARIMA_LOCK:
+                _ARIMA_STATE.update({
+                    'req_id': req_id, 'running': False, 'done': True,
+                    'pct': len(all_assets), 'total': len(all_assets),
+                    'error': None, 'mu': mu_cached, 'cov': cov_cached,
+                })
+            _prog_style = {'display':'flex','alignItems':'center','justifyContent':'center',
+                           'gap':'10px','padding':'8px 16px','background':'#eef4ff',
+                           'borderRadius':'8px','margin':'4px 0','flexShrink':'0'}
+            _nu = no_update
+            # Restituisce req_id + ':done' così on_arima_done scatta immediatamente
+            return (_nu, _nu, _nu, _nu, _nu,
+                    _nu, _nu, _nu, _nu, _nu,
+                    True, req_id + ':done', _prog_style)
+        else:
+            # Nessuna cache → calcolo in background
+            import uuid as _uuid
+            req_id = str(_uuid.uuid4())[:8]
+            with _ARIMA_LOCK:
+                _ARIMA_STATE.update({
+                    'req_id': req_id, 'running': True, 'done': False,
+                    'pct': 0, 'total': len(all_assets), 'error': None, 'mu': None, 'cov': None,
+                })
+            t = threading.Thread(
+                target=_run_arima_thread,
+                args=(req_id, returns_df, arima_win),
+                daemon=True,
+            )
+            t.start()
+            _prog_style = {'display':'flex','alignItems':'center','justifyContent':'center',
+                           'gap':'10px','padding':'8px 16px','background':'#eef4ff',
+                           'borderRadius':'8px','margin':'4px 0','flexShrink':'0'}
+            _nu = no_update
+            return (_nu, _nu, _nu, _nu, _nu,
+                    _nu, _nu, _nu, _nu, _nu,
+                    False, req_id, _prog_style)
 
     for fname, assets_sel in [('F1', p1_sel), ('F2', p2_sel), ('F3', p3_sel)]:
         valid = [a for a in assets_sel if a in returns_df.columns]
@@ -1279,7 +1293,7 @@ def calc_and_render(n, stock_data, prices_data,
 
     # Singoli asset: media e rischio calcolati sulla serie propria di ogni asset
     # (finestra applicata individualmente, no dropna globale su tutti gli asset)
-    for asset in all_assets:
+    for ai, asset in enumerate(all_assets):
         s = returns_df[asset].dropna()
         if win and win < len(s):
             s = s.tail(win)
@@ -1293,12 +1307,15 @@ def calc_and_render(n, stock_data, prices_data,
         else:
             risk_a = vol_a
             risk_lbl = f'Vol: {vol_a*100:.2f}%'
+        color = _PALETTE[ai % len(_PALETTE)]
         fig.add_trace(go.Scatter(
             x=[risk_a * 100], y=[ret_a * 100],
             mode='markers+text', name=asset,
-            marker=dict(size=6, symbol='circle', opacity=0.6),
+            marker=dict(size=6, symbol='circle', opacity=0.75, color=color),
             text=[asset[:9]], textposition='top center',
-            textfont=dict(size=7), showlegend=False,
+            textfont=dict(size=7, color=color), showlegend=False,
+            hoverlabel=dict(bgcolor='white', bordercolor=color,
+                            font=dict(color='black', size=11)),
             hovertemplate=f'<b>{asset}</b><br>{risk_lbl}<br>Rendimento: {ret_a*100:.2f}%<extra></extra>',
         ))
 
@@ -1324,11 +1341,13 @@ def calc_and_render(n, stock_data, prices_data,
                 hovertemplate=f'<b>CML {fname}</b><br>%{{x:.2f}}% → %{{y:.2f}}%<extra></extra>',
             ))
         if ms is not None:
+            idx_ms = int(df_f['Sharpe'].idxmax())
             fig.add_trace(go.Scatter(
                 x=[ms['Volatility'] * 100], y=[ms['Return'] * 100],
                 mode='markers', name=f'Max Sharpe {fname}',
                 marker=dict(symbol='circle', size=12, color='red',
                             line=dict(color='#880000', width=1.5)),
+                customdata=[[fname, idx_ms, 'sharpe']],
                 hovertemplate=(f'<b>Max Sharpe {fname}: {ms["Sharpe"]:.2f}</b>'
                                f'<br>Rischio: {ms["Volatility"]*100:.2f}%'
                                f'<br>Rendimento: {ms["Return"]*100:.2f}%<extra></extra>'),
@@ -1363,20 +1382,14 @@ def calc_and_render(n, stock_data, prices_data,
     chart_set = set(chart_assets)
 
 
+    short_map = _short_history(returns_df)
     rows = []
     for i, asset in enumerate(all_assets):
         f1w = frontier_wgts.get('F1', {}).get(asset)
         f2w = frontier_wgts.get('F2', {}).get(asset)
         f3w = frontier_wgts.get('F3', {}).get(asset)
         row = html.Div([
-            html.Div(
-                html.Span(asset, style={'overflow':'hidden','whiteSpace':'nowrap',
-                                        'textOverflow':'ellipsis','maxWidth':'100%',
-                                        'fontSize':'8px','color':'#1a3a5c','fontWeight':'600'}),
-                **{'data-tooltip': asset},
-                style={'width':'25%','height':'28px','display':'flex','alignItems':'center',
-                       'paddingLeft':'4px','overflow':'hidden','position':'relative','cursor':'default'}
-            ),
+            _asset_name_div(asset, short_map),
             html.Div(
                 dcc.Checklist(id={'type':'fe-chart','index':asset},
                               options=[{'label':'','value':asset}],
@@ -1414,7 +1427,7 @@ def calc_and_render(n, stock_data, prices_data,
                      style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
             html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(f3w, '#e6550d'),
                      style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
-        ], style={'display':'flex','alignItems':'center','height':'28px',
+        ], style={'display':'flex','alignItems':'center','height':'24px',
                   'borderBottom':'1px solid #f0f4fb',
                   'background':'white' if i % 2 == 0 else '#fafcff'})
         rows.append(row)
@@ -1427,8 +1440,9 @@ def calc_and_render(n, stock_data, prices_data,
     for fname, (df_f, ms, _mv, _names) in frontier_res.items():
         ex = _existing_sel.get(fname, {})
         pt_idx = ex.get('pt_idx', -1)
+        ex_label = ex.get('label', '')
         if pt_idx >= 0 and pt_idx < len(df_f):
-            label = f'P({pt_idx + 1})'
+            label = ex_label if ex_label == 'Sharpe' else f'P({pt_idx + 1})'
         else:
             label = 'Sharpe'
         sel_pt[fname] = {'label': label, 'pt_idx': pt_idx}
@@ -1530,14 +1544,18 @@ def calc_and_render(n, stock_data, prices_data,
             True, None, {'display':'none'})
 
 
-# ── Click su frontiera → aggiorna solo la riga riepilogo (label) ─────────────
+# ── Click su frontiera → aggiorna label + pesi della frontiera cliccata ───────
 @app.callback(
-    Output('fe-selected-pt', 'data', allow_duplicate=True),
-    Input('fe-frontier-chart', 'clickData'),
-    State('fe-selected-pt',    'data'),
+    Output('fe-selected-pt', 'data',             allow_duplicate=True),
+    Output('fe-f1-weights',  'data',             allow_duplicate=True),
+    Output('fe-f2-weights',  'data',             allow_duplicate=True),
+    Output('fe-f3-weights',  'data',             allow_duplicate=True),
+    Input('fe-frontier-chart',   'clickData'),
+    State('fe-selected-pt',      'data'),
+    State('fe-frontier-rawdata', 'data'),
     prevent_initial_call=True,
 )
-def on_frontier_click(click_data, sel_pt_json):
+def on_frontier_click(click_data, sel_pt_json, rawdata_json):
     if not click_data:
         raise PreventUpdate
     pt = click_data['points'][0]
@@ -1545,9 +1563,25 @@ def on_frontier_click(click_data, sel_pt_json):
     if not cd or len(cd) < 2:
         raise PreventUpdate
     fname, pt_idx = cd[0], int(cd[1])
+    is_sharpe = len(cd) >= 3 and cd[2] == 'sharpe'
     sel_pt = json.loads(sel_pt_json) if sel_pt_json else {}
-    sel_pt[fname] = {'label': f'P({pt_idx + 1})', 'pt_idx': pt_idx}
-    return json.dumps(sel_pt)
+    sel_pt[fname] = {'label': 'Sharpe' if is_sharpe else f'P({pt_idx + 1})', 'pt_idx': pt_idx}
+
+    # Aggiorna i pesi della frontiera cliccata
+    w_out = {k: no_update for k in ('F1', 'F2', 'F3')}
+    try:
+        raw = json.loads(rawdata_json) if rawdata_json else {}
+        fdata = raw.get(fname)
+        if fdata and pt_idx < len(fdata['points']):
+            assets  = fdata['assets']
+            weights = fdata['points'][pt_idx]['weights']
+            w_dict  = json.dumps({assets[i]: round(weights[i] * 100, 2)
+                                  for i in range(len(assets))})
+            w_out[fname] = w_dict
+    except Exception:
+        pass
+
+    return json.dumps(sel_pt), w_out['F1'], w_out['F2'], w_out['F3']
 
 
 # ── Aggiorna riga riepilogo portafoglio selezionato ──────────────────────────
@@ -1564,10 +1598,10 @@ def update_sel_info(sel_pt_json, ids):
         fname = d['index']
         info  = sel_pt.get(fname, {})
         label = info.get('label', '') if info else ''
+        color = 'red' if label == 'Sharpe' else (_FC.get(fname, '#888') if label else '#bbb')
         result.append(
             html.Span(label or '—',
-                      style={'fontSize':'9px','fontWeight':'700',
-                             'color': _FC.get(fname, '#888') if label else '#bbb'})
+                      style={'fontSize':'9px','fontWeight':'700', 'color': color})
         )
     return result
 
@@ -1602,17 +1636,18 @@ _wgt_f3_cb = _make_wgt_cell_cb('fe-f3-weights', 'fe-wgt-f3', '#e6550d')
 def arima_poll(n_int, cur_req_id):
     if not cur_req_id:
         raise PreventUpdate
+    raw_id = cur_req_id.replace(':done', '').replace(':error', '')
     with _ARIMA_LOCK:
         s = dict(_ARIMA_STATE)
-    if s.get('req_id') != cur_req_id:
+    if s.get('req_id') != raw_id:
         raise PreventUpdate
     if s.get('error'):
-        return cur_req_id, f"❌ Errore: {s['error'][:50]}", True
+        return cur_req_id + ':error', f"❌ Errore: {s['error'][:50]}", True
     if s.get('done'):
-        return cur_req_id, '✓ Completato', True
+        return cur_req_id + ':done', '✓ Completato', True
     total = s['total'] or 1
     pct   = int(s['pct'] / total * 100)
-    return (dash.no_update,
+    return (no_update,
             f"ARIMA: {s['pct']}/{total} titoli ({pct}%)",
             False)
 
@@ -1657,9 +1692,10 @@ def on_arima_done(req_id, stock_data, prices_data,
                   date_start, date_end, port_chart_vals, port_chart_ids, sel_pt_cur):
     if not req_id:
         raise PreventUpdate
+    raw_id = req_id.replace(':done', '').replace(':error', '')
     with _ARIMA_LOCK:
         s = dict(_ARIMA_STATE)
-    if s.get('req_id') != req_id or not s.get('done') or s.get('error'):
+    if s.get('req_id') != raw_id or not s.get('done') or s.get('error'):
         raise PreventUpdate
     mu_series = s.get('mu')
     cov_df = s.get('cov')
@@ -1686,7 +1722,7 @@ def on_arima_done(req_id, stock_data, prices_data,
             return all_assets if default_all else []
         return sel if len(sel) >= 2 else []
 
-    p1_sel = _p_assets(p1_vals, p_ids, default_all=True)
+    p1_sel = _p_assets(p1_vals, p_ids, default_all=False)
     p2_sel = _p_assets(p2_vals, p_ids, default_all=False)
     p3_sel = _p_assets(p3_vals, p_ids, default_all=False)
 
@@ -1702,11 +1738,13 @@ def on_arima_done(req_id, stock_data, prices_data,
     arima_label = f' [ARIMA+GARCH finestra {arima_window or 250}gg]'
     _existing_sel = json.loads(sel_pt_cur) if sel_pt_cur else {}
 
+    print(f"[on_arima_done] p1={len(p1_sel)} p2={len(p2_sel)} p3={len(p3_sel)} mu={len(mu_series) if mu_series is not None else 'None'}")
     frontier_res  = {}
     frontier_wgts = {}
     for fname, assets_sel in [('F1', p1_sel), ('F2', p2_sel), ('F3', p3_sel)]:
         valid = [a for a in assets_sel if a in returns_df.columns]
         if len(valid) < 2:
+            print(f"[on_arima_done] {fname}: valid={len(valid)} — skip")
             continue
         df_sub = returns_df[valid].dropna()
         if win_ag < len(df_sub):
@@ -1715,6 +1753,36 @@ def on_arima_done(req_id, stock_data, prices_data,
             continue
         mu_sub  = mu_series.reindex(valid).fillna(mu_series.mean()) if mu_series is not None else None
         cov_sub = cov_df.reindex(index=valid, columns=valid) if cov_df is not None else None
+
+        # Filtra asset con diagonale della cov nulla/NaN (es. Russell2000 senza dati)
+        if cov_sub is not None:
+            cov_arr_chk = np.nan_to_num(cov_sub.values, nan=0.0)
+            diag_chk    = np.diag(cov_arr_chk)
+            bad_assets  = [valid[i] for i, d in enumerate(diag_chk) if d <= 1e-10]
+            if bad_assets:
+                print(f"[on_arima_done] {fname}: escludo asset cov-zero: {bad_assets}")
+                valid   = [a for a in valid if a not in bad_assets]
+                if len(valid) < 2:
+                    continue
+                df_sub  = returns_df[valid].dropna()
+                if win_ag < len(df_sub):
+                    df_sub = df_sub.tail(win_ag)
+                mu_sub  = mu_series.reindex(valid).fillna(mu_series.mean())
+                cov_sub = cov_df.reindex(index=valid, columns=valid)
+
+        # Winsorizza mu estremi (±3σ cross-sectionale) per evitare frontiere verticali
+        if mu_sub is not None and len(mu_sub) > 1:
+            _m_mean = mu_sub.mean()
+            _m_std  = mu_sub.std()
+            if _m_std > 0:
+                _lo, _hi = _m_mean - 3 * _m_std, _m_mean + 3 * _m_std
+                _clipped = mu_sub.clip(_lo, _hi)
+                _outliers = mu_sub[mu_sub != _clipped]
+                if not _outliers.empty:
+                    print(f"[on_arima_done] {fname}: winsorize mu outliers: {_outliers.to_dict()}")
+                mu_sub = _clipped
+
+        print(f"[on_arima_done] {fname}: valid={len(valid)} df_sub={df_sub.shape} mu_sub={mu_sub is not None} cov_sub={cov_sub is not None}")
         try:
             df_f, ms, mv, names = calc_frontier(
                 df_sub, n=n_f, wmin=wmin_f, wmax=wmax_f,
@@ -1731,8 +1799,9 @@ def on_arima_done(req_id, stock_data, prices_data,
             else:
                 continue
             frontier_wgts[fname] = {names[i]: round(wvec[i] * 100, 2) for i in range(len(names))}
-        except Exception:
-            pass
+        except Exception as _e:
+            import traceback; traceback.print_exc()
+            print(f"[on_arima_done] ERRORE {fname}: {_e}")
 
     # Re-use the same chart/grid/stats building as calc_and_render
     # (frontier_res, frontier_wgts, all_assets, etc. are all set)
@@ -1740,7 +1809,7 @@ def on_arima_done(req_id, stock_data, prices_data,
     _EMPTY_FIG = go.Figure().update_layout(paper_bgcolor='white', plot_bgcolor='#f8faff')
     fig = go.Figure()
     _cvar_pct_done = 10 if risk == 'cvar90' else (5 if risk == 'cvar95' else None)
-    for asset in all_assets:
+    for ai, asset in enumerate(all_assets):
         s = returns_df[asset].dropna()
         if win_ag < len(s):
             s = s.tail(win_ag)
@@ -1761,10 +1830,14 @@ def on_arima_done(req_id, stock_data, prices_data,
         else:
             risk_a = vol_a
             risk_lbl = f'Vol: {vol_a*100:.2f}%'
+        color = _PALETTE[ai % len(_PALETTE)]
         fig.add_trace(go.Scatter(
             x=[risk_a*100], y=[ret_a*100], mode='markers+text', name=asset,
-            marker=dict(size=6, opacity=0.6), text=[asset[:9]], textposition='top center',
-            textfont=dict(size=7), showlegend=False,
+            marker=dict(size=6, opacity=0.75, color=color),
+            text=[asset[:9]], textposition='top center',
+            textfont=dict(size=7, color=color), showlegend=False,
+            hoverlabel=dict(bgcolor='white', bordercolor=color,
+                            font=dict(color='black', size=11)),
             hovertemplate=f'<b>{asset}</b><br>{risk_lbl}<br>Ren:{ret_a*100:.2f}%<extra></extra>',
         ))
     for fname, (df_f, ms, mv, names) in frontier_res.items():
@@ -1822,18 +1895,14 @@ def on_arima_done(req_id, stock_data, prices_data,
     p1_set    = set(p1_sel)
     p2_set    = set(p2_sel)
     p3_set    = set(p3_sel)
+    short_map = _short_history(returns_df)
     rows = []
     for i, asset in enumerate(all_assets):
         f1w = frontier_wgts.get('F1', {}).get(asset)
         f2w = frontier_wgts.get('F2', {}).get(asset)
         f3w = frontier_wgts.get('F3', {}).get(asset)
         rows.append(html.Div([
-            html.Div(html.Span(asset, style={'overflow':'hidden','whiteSpace':'nowrap',
-                                             'textOverflow':'ellipsis','maxWidth':'100%',
-                                             'fontSize':'8px','color':'#1a3a5c','fontWeight':'600'}),
-                     **{'data-tooltip':asset},
-                     style={'width':'25%','height':'28px','display':'flex','alignItems':'center',
-                            'paddingLeft':'4px','overflow':'hidden','position':'relative','cursor':'default'}),
+            _asset_name_div(asset, short_map),
             html.Div(dcc.Checklist(id={'type':'fe-chart','index':asset},
                                    options=[{'label':'','value':asset}],
                                    value=[asset] if asset in chart_set else [],
@@ -1863,7 +1932,7 @@ def on_arima_done(req_id, stock_data, prices_data,
                      style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
             html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(f3w,'#e6550d'),
                      style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
-        ], style={'display':'flex','alignItems':'center','height':'28px',
+        ], style={'display':'flex','alignItems':'center','height':'24px',
                   'borderBottom':'1px solid #f0f4fb',
                   'background':'white' if i % 2 == 0 else '#fafcff'}))
 
@@ -1947,6 +2016,10 @@ def on_arima_done(req_id, stock_data, prices_data,
             'points': [{'vol':float(r['Volatility']),'ret':float(r['Return']),'weights':list(r['Weights'])}
                        for _, r in df_f.iterrows()],
         }
+
+    # Aggiorna la cache info in memoria — ora disponibile per toggle_window_div
+    _ARIMA_CACHE_INFO['available'] = True
+    _ARIMA_CACHE_INFO['ts'] = datetime.now().strftime('%d/%m/%Y %H:%M')
 
     return (rows, count, fig, fig2,
             html.Div(stats, style={'display':'flex','flexWrap':'wrap','gap':'4px'}),

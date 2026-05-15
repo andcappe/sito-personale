@@ -48,26 +48,7 @@ app.index_string = '''
 {%favicon%}
 {%css%}
 <style>
-  [data-tooltip] { position: relative; }
-  [data-tooltip]::after {
-    content: attr(data-tooltip);
-    position: absolute;
-    left: 100%;
-    top: 50%;
-    transform: translateY(-50%);
-    background: #1a3a5c;
-    color: #fff;
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    white-space: nowrap;
-    z-index: 9999;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 0.15s;
-    margin-left: 6px;
-  }
-  [data-tooltip]:hover::after { opacity: 1; }
+  html { font-size: 16px; }
   @keyframes spin {
     0%   { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
@@ -77,6 +58,36 @@ app.index_string = '''
 <body>
 {%app_entry%}
 <footer>{%config%}{%scripts%}{%renderer%}</footer>
+<script>
+(function(){
+  var _tip=null;
+  function _pos(el){
+    var r=el.getBoundingClientRect();
+    var color=el.getAttribute('data-tooltip-color')||'#1a3a6b';
+    var text=el.getAttribute('data-tooltip')||'';
+    if(!text)return;
+    if(_tip){_tip.remove();_tip=null;}
+    _tip=document.createElement('div');
+    _tip.textContent=text;
+    _tip.style.cssText='position:fixed;background:#fff;color:#1a2a4a;border:2px solid '+color+';border-radius:5px;padding:4px 10px;font-size:11px;font-family:Inter,sans-serif;font-weight:600;z-index:99999;pointer-events:none;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.13);';
+    document.body.appendChild(_tip);
+    var tx=r.right+8, ty=r.top+r.height/2-_tip.offsetHeight/2;
+    if(tx+_tip.offsetWidth>window.innerWidth-8) tx=r.left-_tip.offsetWidth-8;
+    _tip.style.left=Math.max(4,tx)+'px';
+    _tip.style.top=Math.max(4,Math.min(ty,window.innerHeight-_tip.offsetHeight-4))+'px';
+  }
+  function _find(e){
+    var el=e.target;
+    while(el&&el!==document.body){if(el.hasAttribute&&el.hasAttribute('data-tooltip'))return el;el=el.parentNode;}
+    return null;
+  }
+  document.addEventListener('mouseover',function(e){var el=_find(e);if(el)_pos(el);},true);
+  document.addEventListener('mouseout',function(e){
+    var el=_find(e);
+    if(el&&!el.contains(e.relatedTarget)){if(_tip){_tip.remove();_tip=null;}}
+  },true);
+})();
+</script>
 </body>
 </html>
 '''
@@ -394,6 +405,127 @@ def _do_download(tickers, descrizione, valuta, start_date):
         _DL_STATE['current'] = total
 
 
+def _compute_arima_cache(returns_df, window=250):
+    """ARIMA(p,0,q) best-AIC + GARCH(1,1) per tutti gli asset. Restituisce (mu_series, cov_df).
+
+    μ = media incondizionale ARIMA = const/(1-Σφᵢ) → aspettativa a lungo orizzonte.
+    σ = volatilità condizionale GARCH 1-step → regime di rischio corrente.
+    Σ = D_garch @ corr_resid @ D_garch (correlazioni sui residui ARIMA).
+    """
+    import warnings
+    try:
+        from statsmodels.tsa.arima.model import ARIMA as _ARIMA_CLS
+    except ImportError:
+        print("⚠ statsmodels non installato — ARIMA cache saltata")
+        return None, None
+    try:
+        from arch import arch_model as _arch_model
+        _has_arch = True
+    except ImportError:
+        _has_arch = False
+
+    cols = returns_df.columns.tolist()
+    mu_dict, vol_dict, resid_dict = {}, {}, {}
+    print(f"  ARIMA cache: {len(cols)} asset, finestra {window}gg")
+
+    for i, col in enumerate(cols):
+        s = returns_df[col].dropna().tail(window)
+        if len(s) < 30:
+            mu_dict[col]    = float(s.mean())
+            vol_dict[col]   = float(s.std())
+            resid_dict[col] = (s - s.mean()).values
+        else:
+            best_aic   = np.inf
+            best_resid = (s - s.mean()).values
+            best_model = None
+            for p in range(3):
+                for q in range(3):
+                    if p == 0 and q == 0:
+                        continue
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore')
+                            m = _ARIMA_CLS(s, order=(p, 0, q)).fit()
+                        if m.aic < best_aic:
+                            best_aic   = m.aic
+                            best_resid = m.resid.values
+                            best_model = m
+                    except Exception:
+                        pass
+
+            # μ incondizionale: const / (1 - Σ φᵢ)
+            # Guard: soglia 0.15 evita amplificazione quando Σφᵢ ≈ 0.85 (near-unit-root).
+            # Sanity cap: se risultato > 5× media storica → artefatto → fallback.
+            best_mu   = float(s.mean())
+            hist_mean = float(s.mean())
+            if best_model is not None:
+                try:
+                    par      = best_model.params
+                    ar_coefs = [par[k] for k in par.index if k.startswith('ar.')]
+                    denom    = 1.0 - sum(ar_coefs)
+                    if 'const' in par.index and abs(denom) > 0.15:
+                        mu_candidate = float(par['const'] / denom)
+                        if hist_mean != 0 and abs(mu_candidate) > 5 * abs(hist_mean) + 1e-5:
+                            best_mu = hist_mean
+                        else:
+                            best_mu = mu_candidate
+                    else:
+                        best_mu = float(best_model.fittedvalues.mean())
+                except Exception:
+                    best_mu = float(s.mean())
+
+            mu_dict[col]    = best_mu
+            resid_dict[col] = best_resid
+
+            if _has_arch and len(best_resid) > 20:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        gm = _arch_model(best_resid * 100, vol='Garch', p=1, q=1, rescale=False)
+                        gf = gm.fit(disp='off')
+                        fc = gf.forecast(horizon=1)
+                    vol_dict[col] = float(np.sqrt(fc.variance.values[-1, 0])) / 100
+                except Exception:
+                    vol_dict[col] = float(np.std(best_resid))
+            else:
+                vol_dict[col] = float(np.std(best_resid))
+        print(f"    [{i+1}/{len(cols)}] {col}: mu={mu_dict[col]:.5f} vol={vol_dict[col]:.5f}")
+
+    r_df  = returns_df[cols].tail(window)
+    corr  = np.nan_to_num(r_df.corr().values, nan=0.0)
+    np.fill_diagonal(corr, 1.0)
+    vols  = np.array([vol_dict[c] for c in cols])
+    D     = np.diag(vols)
+    cov_m = D @ corr @ D + 1e-8 * np.eye(len(cols))
+    cov_df    = pd.DataFrame(cov_m, index=cols, columns=cols)
+    mu_series = pd.Series(mu_dict)
+    return mu_series, cov_df
+
+
+def _save_arima_to_pkl(mu_series, cov_df):
+    """Aggiunge i risultati ARIMA al pkl esistente e al buffer."""
+    arima_ts = datetime.now().strftime('%d/%m/%Y %H:%M')
+    arima_data = {
+        'mu':              mu_series.to_dict(),
+        'cov':             cov_df.to_dict(),
+        'computed_at':     arima_ts,
+    }
+    try:
+        if os.path.exists(_MARKET_DATA_FILE):
+            with open(_MARKET_DATA_FILE, 'rb') as f:
+                pkl = pickle.load(f)
+            pkl['arima']             = arima_data
+            pkl['arima_computed_at'] = arima_ts
+            with open(_MARKET_DATA_FILE, 'wb') as f:
+                pickle.dump(pkl, f)
+            print(f"✓ ARIMA salvato nel pkl — {arima_ts}")
+    except Exception as e:
+        print(f"⚠ Salvataggio ARIMA su disco fallito: {e}")
+    with _DL_LOCK:
+        _DL_BUFFER['arima']             = arima_data
+        _DL_BUFFER['arima_computed_at'] = arima_ts
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Carica solo nomi (avvio rapido)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -700,35 +832,39 @@ def get_portfolio_analysis_tab(options_tickers):
 
             # ── Intestazione full-width: etichette colonne (sx) + range date (dx) ──
             html.Div([
-                # Sx 35%: etichette colonne — speculari alle colonne della griglia
+                # Sx 35%: etichette colonne con pulsanti ☑ integrati
                 html.Div([
                     html.Div('Asset', **{'data-tooltip': 'Nome dell\'asset'}, style={
-                        'width': '24%', 'font-weight': 'bold', 'font-size': '10px',
-                        'padding-left': '5px', 'color': '#1a3a5c',
-                        'display': 'flex', 'align-items': 'center',
+                        'width': '24%', 'fontWeight': 'bold', 'fontSize': '6px',
+                        'paddingLeft': '5px', 'color': '#1a3a5c',
+                        'display': 'flex', 'alignItems': 'center',
                         'position': 'relative', 'cursor': 'default',
                     }),
-                    *[html.Div(lbl, **{'data-tooltip': tip}, style={
-                        'width': w, 'text-align': 'center', 'font-weight': 'bold',
-                        'font-size': '8px', 'color': col,
-                        'display': 'flex', 'align-items': 'center', 'justify-content': 'center',
-                        'position': 'relative', 'cursor': 'default',
-                    }) for w, lbl, col, tip in [
-                        ('3%',  'CH',   '#1a3a5c', 'Grafici degli asset'),
-                        ('8%',  'P1',   '#e6194b', 'Portafoglio 1'),
-                        ('8%',  'P2',   '#3cb44b', 'Portafoglio 2'),
-                        ('8%',  'P3',   '#4363d8', 'Portafoglio 3'),
-                        ('4%',  'AKR',  '#1a3a5c', 'AKRatio — Extrarendimento sul benchmark per unità di rischio'),
-                        ('6%',  'SH',   '#1a3a5c', 'Sharpe Ratio'),
-                        ('6%',  'TV',   '#1a3a5c', 'Tracking Error Volatility'),
-                        ('8%',  'DD',   '#1a3a5c', 'Draw Down'),
-                        ('8%',  'VOL',  '#1a3a5c', 'Deviazione Standard'),
-                        ('8%',  'VA90', '#1a3a5c', 'Value at Risk 90%'),
-                        ('9%',  'VA95', '#1a3a5c', 'Value at Risk 95%'),
+                    *[html.Div([
+                        html.Span(lbl, style={'fontWeight':'bold','display':'inline-block','transform':'scale(0.6)','transformOrigin':'center','color':col,'lineHeight':'1'}),
+                        html.Button('☑', id=btn_id, n_clicks=0, title=tip,
+                            style={'fontSize':'6px','border':'none','background':'none',
+                                   'cursor':'pointer','color':col,'padding':'0','lineHeight':'1'}),
+                    ], style={
+                        'width': w, 'display': 'flex', 'flexDirection': 'column',
+                        'alignItems': 'center', 'justifyContent': 'center',
+                        'position': 'relative', 'gap': '0px',
+                    }) for w, lbl, col, tip, btn_id in [
+                        ('3%',  'CH',   '#1a3a5c', 'Deseleziona grafici',                          'deselect-all-tickers'),
+                        ('8%',  'P1',   '#e6194b', 'Azzera pesi Portafoglio 1',                    'reset-p1-tab1'),
+                        ('8%',  'P2',   '#3cb44b', 'Azzera pesi Portafoglio 2',                    'reset-p2-tab1'),
+                        ('8%',  'P3',   '#4363d8', 'Azzera pesi Portafoglio 3',                    'reset-p3-tab1'),
+                        ('4%',  'AKR',  '#1a3a5c', 'Deseleziona AKRatio',                          'deselect-all-ir'),
+                        ('6%',  'SH',   '#1a3a5c', 'Deseleziona Sharpe',                           'deselect-all-sharpe'),
+                        ('6%',  'TV',   '#1a3a5c', 'Deseleziona TEV',                              'deselect-all-tev'),
+                        ('8%',  'DD',   '#1a3a5c', 'Deseleziona DrawDown',                         'deselect-all-dd'),
+                        ('8%',  'VOL',  '#1a3a5c', 'Deseleziona Volatilità',                       'deselect-all-vol'),
+                        ('8%',  'VA90', '#1a3a5c', 'Deseleziona VaR 90%',                          'deselect-all-var90'),
+                        ('9%',  'VA95', '#1a3a5c', 'Deseleziona VaR 95%',                          'deselect-all-var95'),
                     ]],
                 ], style={
-                    'width': '35%', 'display': 'flex', 'align-items': 'center',
-                    'min-height': '32px', 'padding': '2px 0',
+                    'width': '35%', 'display': 'flex', 'alignItems': 'center',
+                    'minHeight': '18px', 'padding': '0',
                 }),
                 # Dx 65%: range temporale — allineato a destra
                 html.Div(
@@ -879,20 +1015,19 @@ app.layout = html.Div([
 
     # ── Barra comandi ─────────────────────────────────────────────────────────
     html.Div([
-        # 1. Aggiorna dati
-        dcc.Loading(type='circle', color='#007755', children=[
-            html.Button('⟳ Aggiorna', id='refresh-data-btn', n_clicks=0,
-                        title='Forza nuovo download da Yahoo Finance',
-                        style={'background-color': '#007755', 'color': 'white',
-                               'border': 'none', 'padding': '7px 16px',
-                               'border-radius': '4px', 'cursor': 'pointer',
-                               'font-weight': 'bold', 'font-size': '12px',
-                               'margin-right': '6px'}),
-        ]),
-        html.Span(id='data-last-updated',
-                  style={'font-size': '10px', 'color': '#6b7a99',
-                         'font-style': 'italic', 'margin-right': '12px',
-                         'align-self': 'center', 'white-space': 'nowrap'}),
+        # 1. Aggiorna dati — nascosto, i callback sono ancora attivi
+        html.Div([
+            dcc.Loading(type='circle', color='#007755', children=[
+                html.Button('⟳ Aggiorna', id='refresh-data-btn', n_clicks=0,
+                            title='Forza nuovo download da Yahoo Finance',
+                            style={'background-color': '#007755', 'color': 'white',
+                                   'border': 'none', 'padding': '7px 16px',
+                                   'border-radius': '4px', 'cursor': 'pointer',
+                                   'font-weight': 'bold', 'font-size': '12px',
+                                   'margin-right': '6px'}),
+            ]),
+            html.Span(id='data-last-updated', style={'display': 'none'}),
+        ], style={'display': 'none'}),
         # 2. Sessioni
         get_session_panel_layout(),
         # 3. Scarica template ticker
@@ -1571,66 +1706,7 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
             html.Span(f' / {n_total} asset', style={'color': '#555'}),
         ]
 
-    def _lbl1(w, txt, color='#1a3a5c'):
-        return html.Div(txt, style={'width': w, 'text-align': 'center', 'font-weight': 'bold',
-                                    'font-size': '8px', 'color': color, 'display': 'flex',
-                                    'align-items': 'center', 'justify-content': 'center'})
-
-    def _btn1(btn_id, w):
-        return html.Div(
-            html.Button(
-                html.I(className='fas fa-circle-xmark'),
-                id=btn_id, n_clicks=0,
-                style={
-                    'width': '18px', 'height': '18px',
-                    'padding': '0', 'cursor': 'pointer',
-                    'background': '#f8d7da', 'border': '1px solid #e8a0a8',
-                    'border-radius': '4px', 'color': '#a01830',
-                    'display': 'flex', 'align-items': 'center',
-                    'justify-content': 'center', 'font-size': '11px',
-                    'line-height': '1',
-                }),
-            style={'width': w, 'display': 'flex',
-                   'align-items': 'center', 'justify-content': 'center'})
-
-    def _emp1(w):
-        return html.Div('', style={'width': w})
-
-    header = html.Div([
-        html.Div('Asset', style={'width': '24%', 'font-weight': 'bold', 'font-size': '10px',
-                                  'padding-left': '5px', 'color': '#1a3a5c',
-                                  'display': 'flex', 'align-items': 'center'}),
-        _lbl1('3%',  'CH'),
-        _lbl1('8%',  'P1',  '#e6194b'),
-        _lbl1('8%',  'P2',  '#3cb44b'),
-        _lbl1('8%',  'P3',  '#4363d8'),
-        _lbl1('4%',  'AKR'),
-        _lbl1('6%',  'SH'),
-        _lbl1('6%',  'TV'),
-        _lbl1('8%',  'DD'),
-        _lbl1('8%',  'VOL'),
-        _lbl1('8%',  'VA90'),
-        _lbl1('9%',  'VA95'),
-    ], style={'display': 'flex', 'padding': '4px 0 2px', 'background': '#eaf4fb',
-              'border-top': '2px solid #2e6da4', 'border-bottom': '1px solid #aed6f1'})
-
-    labels_row = html.Div([
-        _emp1('24%'),
-        _btn1('deselect-all-tickers', '3%'),
-        _btn1('reset-p1-tab1',        '8%'),
-        _btn1('reset-p2-tab1',        '8%'),
-        _btn1('reset-p3-tab1',        '8%'),
-        _btn1('deselect-all-ir',      '4%'),
-        _btn1('deselect-all-sharpe',  '6%'),
-        _btn1('deselect-all-tev',     '6%'),
-        _btn1('deselect-all-dd',      '8%'),
-        _btn1('deselect-all-vol',     '8%'),
-        _btn1('deselect-all-var90',   '8%'),
-        _btn1('deselect-all-var95',   '9%'),
-    ], style={'display': 'flex', 'padding': '3px 0 5px', 'background': '#f5faff',
-              'border-bottom': '2px solid #2e6da4', 'margin-bottom': '4px'})
-
-    rows = [labels_row]
+    rows = []
 
     def _chk(chk_id, opt_val, sel_val, w):
         return html.Div(
@@ -1664,11 +1740,15 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
 
         row_content = html.Div([
             html.Div(
-                html.B(asset, style={'color': _label_color, 'word-break': 'break-word'}),
-                **{'data-tooltip': asset},
-                style={'width': '24%', 'min-height': '30px', 'display': 'flex',
-                       'align-items': 'center', 'padding-left': '5px',
-                       'font-size': '10px', 'cursor': 'default'},
+                html.Span(asset, style={
+                    'color': _label_color, 'fontWeight': 'bold',
+                    'overflow': 'hidden', 'whiteSpace': 'nowrap',
+                    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
+                }),
+                **{'data-tooltip': asset, 'data-tooltip-color': _label_color},
+                style={'width': '24%', 'height': '28px', 'display': 'flex',
+                       'alignItems': 'center', 'paddingLeft': '5px',
+                       'overflow': 'hidden', 'position': 'relative', 'cursor': 'default'},
             ),
             _chk({'type': 'graph-select-checkbox',  'index': asset}, asset,                       asset_val,  '3%'),
             html.Div(create_weight_input(1), style={'width': '8%'}),
@@ -1707,11 +1787,16 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
         var95_port_val  = [f'{portfolio_name}_VaR95']                  if f'{portfolio_name}_VaR95'                  in saved_selected else []
 
         portfolio_row = html.Div([
-            html.Div(html.B(portfolio_name, style={'color': '#0066cc'}),
-                     **{'data-tooltip': portfolio_name},
-                     style={'width': '24%', 'min-height': '30px', 'display': 'flex',
-                            'align-items': 'center', 'padding-left': '5px', 'font-size': '10px',
-                            'cursor': 'default'}),
+            html.Div(
+                html.Span(portfolio_name, style={
+                    'color': '#0066cc', 'fontWeight': 'bold',
+                    'overflow': 'hidden', 'whiteSpace': 'nowrap',
+                    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
+                }),
+                **{'data-tooltip': portfolio_name, 'data-tooltip-color': '#0066cc'},
+                style={'width': '24%', 'height': '28px', 'display': 'flex',
+                       'alignItems': 'center', 'paddingLeft': '5px',
+                       'overflow': 'hidden', 'position': 'relative', 'cursor': 'default'}),
             _pchk({'type': 'graph-select-checkbox',  'index': portfolio_name}, portfolio_name,                       port_val,        '3%'),
             html.Div('', style={'width': '8%'}),
             html.Div('', style={'width': '8%'}),
@@ -2537,6 +2622,34 @@ def _startup_load():
 _startup_load()
 
 
+def _startup_arima_if_missing():
+    """Se i dati di mercato sono già in buffer ma la cache ARIMA manca, la calcola in background
+    con un ritardo iniziale per lasciare al server il tempo di avviarsi completamente."""
+    with _DL_LOCK:
+        returns_df = _DL_BUFFER.get('close_returns')
+        has_arima  = _DL_BUFFER.get('arima') is not None
+    if returns_df is None or returns_df.empty or has_arima:
+        return
+    def _job():
+        import time, os
+        try:
+            os.nice(10)   # priorità bassa: non compete con i worker gunicorn
+        except Exception:
+            pass
+        time.sleep(20)    # aspetta che il server sia completamente avviato
+        try:
+            print("▶ Cache ARIMA assente — calcolo automatico in background…")
+            mu_series, cov_df = _compute_arima_cache(returns_df, window=250)
+            if mu_series is not None:
+                _save_arima_to_pkl(mu_series, cov_df)
+                print("✓ Cache ARIMA generata automaticamente all'avvio")
+        except Exception as e:
+            print(f"⚠ Calcolo ARIMA automatico fallito: {e}")
+    threading.Thread(target=_job, daemon=True).start()
+
+_startup_arima_if_missing()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Scheduler: aggiornamento automatico ogni giorno alle 18:30 (lun-ven)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2548,6 +2661,28 @@ def _scheduled_update():
         _do_download(tickers, descr, valuta, start)
     except Exception as e:
         print(f"⚠ Aggiornamento schedulato fallito: {e}")
+        return
+    # Calcola ARIMA+GARCH in background dopo il download
+    def _arima_job():
+        import time, os
+        try:
+            os.nice(10)
+        except Exception:
+            pass
+        time.sleep(10)   # lascia stabilizzare il buffer dopo il download
+        try:
+            with _DL_LOCK:
+                returns_df = _DL_BUFFER.get('close_returns')
+            if returns_df is None or returns_df.empty:
+                return
+            print("⏰ Avvio calcolo ARIMA+GARCH post-download…")
+            mu_series, cov_df = _compute_arima_cache(returns_df, window=250)
+            if mu_series is not None:
+                _save_arima_to_pkl(mu_series, cov_df)
+                print("✓ ARIMA+GARCH completato e salvato")
+        except Exception as e:
+            print(f"⚠ ARIMA post-download fallito: {e}")
+    threading.Thread(target=_arima_job, daemon=True).start()
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
