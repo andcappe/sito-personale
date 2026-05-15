@@ -16,7 +16,7 @@ _NAV_LINKS = [
 def make_navbar() -> html.Nav:
     ls = {
         "fontSize": "0.82rem", "fontWeight": "600",
-        "color": "#6b7a99", "letterSpacing": "0.04em",
+        "color": "#5a7099", "letterSpacing": "0.04em",
         "textTransform": "uppercase", "textDecoration": "none",
         "transition": "color 0.2s", "fontFamily": "Inter, sans-serif",
     }
@@ -30,11 +30,11 @@ def make_navbar() -> html.Nav:
             }),
             html.Span("Monomandatario Fineco Bank", style={
                 "fontFamily": "Inter, sans-serif",
-                "fontSize": "0.6rem", "fontWeight": "700",
-                "letterSpacing": "0.08em", "textTransform": "uppercase",
-                "color": "#cc0000",
-                "background": "rgba(204,0,0,0.07)",
-                "border": "1px solid rgba(204,0,0,0.35)",
+                "fontSize": "0.62rem", "fontWeight": "700",
+                "letterSpacing": "0.1em", "textTransform": "uppercase",
+                "color": "#f37021",
+                "background": "rgba(243,112,33,0.1)",
+                "border": "1px solid rgba(243,112,33,0.3)",
                 "padding": "3px 8px", "borderRadius": "4px",
             }),
         ], href=_BASE, target="_blank",
@@ -65,7 +65,7 @@ def make_navbar() -> html.Nav:
         "position": "fixed", "top": "0", "left": "0", "right": "0",
         "zIndex": "1000",
         "display": "flex", "alignItems": "center", "justifyContent": "space-between",
-        "padding": "0 3%", "height": "64px",
+        "padding": "0 5%", "height": "64px",
         "background": "rgba(255,255,255,0.97)",
         "backdropFilter": "blur(14px)",
         "borderBottom": "1px solid #ccd9ee",

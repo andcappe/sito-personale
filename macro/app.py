@@ -51,6 +51,7 @@ app.index_string = '''
 {%favicon%}
 {%css%}
 <style>
+  html { font-size: 16px; }
   [data-tooltip] { position: relative; }
   [data-tooltip]::after {
     content: attr(data-tooltip);
