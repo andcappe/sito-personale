@@ -982,28 +982,20 @@ app.layout = html.Div([
 
     # ── Intestazione pagina ───────────────────────────────────────────────────
     html.Div([
-        html.H1(
+        html.H1([
             'Analisi Rischi di Portafoglio',
-            style={
-                'margin': '0 0 6px 0',
-                'font-size': '1.6rem',
-                'font-weight': '700',
-                'color': '#1a3a6b',
-                'font-family': "'Playfair Display', serif",
-                'letter-spacing': '0.02em',
-            },
-        ),
-        html.P(
-            'Costruisci fino a 3 portafogli personalizzati, confrontali con un benchmark e analizza '
-            'AK Ratio, Sharpe, Tev, Drawdown, Volatilità, CVar90%, cVar95% rolling sugli ETF '
-            'selezionati o da te caricati nel sito.',
-            style={
-                'margin': '0',
-                'font-size': '0.88rem',
-                'color': '#4a5d7a',
-                'line-height': '1.5',
-            },
-        ),
+            html.Span(' - ', style={'color': '#9baabf'}),
+            html.Span('Analisi delle metriche dei rischi Finanziari', style={
+                'font-size': '1.1rem', 'font-weight': '400', 'color': '#4a5d7a',
+            }),
+        ], style={
+            'margin': '0',
+            'font-size': '1.6rem',
+            'font-weight': '700',
+            'color': '#1a3a6b',
+            'font-family': "'Playfair Display', serif",
+            'letter-spacing': '0.02em',
+        }),
     ], style={
         'padding': '14px 20px 12px',
         'border-bottom': '2px solid #e2e8f0',
