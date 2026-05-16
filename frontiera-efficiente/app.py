@@ -1327,7 +1327,7 @@ def calc_and_render(n, stock_data, prices_data,
                            'borderRadius':'8px','margin':'4px 0','flexShrink':'0'}
             _nu = no_update
             # Restituisce req_id + ':done' così on_arima_done scatta immediatamente
-            return (_nu, _nu, _nu, _nu, _nu,
+            return (_nu, _nu, _nu, _nu, _nu, _nu,
                     _nu, _nu, _nu, _nu, _nu,
                     True, req_id + ':done', _prog_style)
         else:
@@ -1349,7 +1349,7 @@ def calc_and_render(n, stock_data, prices_data,
                            'gap':'10px','padding':'8px 16px','background':'#eef4ff',
                            'borderRadius':'8px','margin':'4px 0','flexShrink':'0'}
             _nu = no_update
-            return (_nu, _nu, _nu, _nu, _nu,
+            return (_nu, _nu, _nu, _nu, _nu, _nu,
                     _nu, _nu, _nu, _nu, _nu,
                     False, req_id, _prog_style)
 

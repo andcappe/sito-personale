@@ -2718,8 +2718,14 @@ def _compute_arima_garch(returns_df, window=250):
     mu_d, sig_d, resid_d = {}, {}, {}
 
     for i, col in enumerate(cols):
-        s = returns_df[col].dropna().tail(window)
-        best_aic, best_mu, best_resid = np.inf, float(s.mean()), (s - s.mean()).values
+        # Conversione a rendimenti logaritmici: più stazionari e normali
+        s_arith = returns_df[col].dropna().tail(window)
+        s = np.log1p(s_arith)  # ln(1 + r_aritm) = rendimento logaritmico giornaliero
+
+        best_aic  = np.inf
+        best_mu   = float(s.mean())
+        best_resid = (s - s.mean()).values
+
         for p in range(3):
             for q in range(3):
                 if p == 0 and q == 0:
@@ -2731,19 +2737,16 @@ def _compute_arima_garch(returns_df, window=250):
                     if m.aic < best_aic:
                         best_aic   = m.aic
                         best_resid = m.resid.values
-                        par   = m.params
-                        ar_c  = [par[k] for k in par.index if k.startswith('ar.')]
-                        denom = 1.0 - sum(ar_c)
-                        if 'const' in par.index and abs(denom) > 0.15:
-                            mu_c = float(par['const'] / denom)
-                            best_mu = mu_c if abs(mu_c) <= 5 * abs(float(s.mean())) + 1e-6 else float(s.mean())
-                        else:
-                            best_mu = float(m.fittedvalues.mean())
+                        # Usa la previsione a 252 passi (come il cono di previsione ARIMA):
+                        # evita l'instabilità di const/(1-sum(AR)) per processi near unit root
+                        fc = m.get_forecast(steps=252).predicted_mean
+                        best_mu = float(fc.mean())
                 except Exception:
                     pass
-        mu_d[col]    = best_mu
+        mu_d[col]    = best_mu   # media logaritmica giornaliera incondizionata
         resid_d[col] = best_resid
 
+        sig_fallback = float(np.std(best_resid)) or float(s.std())
         if _has_arch and len(best_resid) > 20:
             try:
                 with warnings.catch_warnings():
@@ -2752,13 +2755,17 @@ def _compute_arima_garch(returns_df, window=250):
                     gf = gm.fit(disp='off')
                     pr = gf.params
                     o, a, b = pr['omega'], pr['alpha[1]'], pr['beta[1]']
-                    sig_d[col] = (float(np.sqrt(o / (1 - a - b))) / 100
-                                  if a + b < 1.0 else float(np.std(best_resid)))
+                    if a + b < 1.0:
+                        sig_garch = float(np.sqrt(o / (1 - a - b))) / 100
+                        # safeguard: rifiuta stime GARCH fuori range (< 1/10 o > 10x lo std storico)
+                        sig_d[col] = sig_garch if sig_fallback / 10 < sig_garch < sig_fallback * 10 else sig_fallback
+                    else:
+                        sig_d[col] = sig_fallback
             except Exception:
-                sig_d[col] = float(np.std(best_resid))
+                sig_d[col] = sig_fallback
         else:
-            sig_d[col] = float(np.std(best_resid))
-        print(f"  [{i+1}/{len(cols)}] {col}: mu={mu_d[col]:.5f} vol={sig_d[col]:.5f}")
+            sig_d[col] = sig_fallback
+        print(f"  [{i+1}/{len(cols)}] {col}: mu_log={mu_d[col]:.5f} vol_log={sig_d[col]:.5f}")
 
     if not mu_d:
         return None, None
@@ -2771,7 +2778,17 @@ def _compute_arima_garch(returns_df, window=250):
     D       = np.diag(vols)
     cov_d   = D @ corr @ D + 1e-8 * np.eye(len(cols))
 
-    mu_annual  = pd.Series({c: mu_d[c]  * 252        for c in cols})
+    # Correzione di Jensen: converte rendimento log atteso in rendimento aritmetico atteso
+    # E[R_aritm] = exp(mu_log * 252 + 0.5 * sigma_log^2 * 252) - 1
+    def _jensen(mu_log, sig_log, s_arith_fallback):
+        exp_arg = mu_log * 252 + 0.5 * sig_log**2 * 252
+        if not np.isfinite(exp_arg) or exp_arg > 3.0:  # cap a ~1900% — oltre è numericamente rotto
+            return float(s_arith_fallback.mean() * 252)
+        return float(np.exp(exp_arg) - 1)
+
+    mu_annual  = pd.Series(
+        {c: _jensen(mu_d[c], sig_d[c], returns_df[c].dropna().tail(window)) for c in cols}
+    )
     cov_annual = pd.DataFrame(cov_d * 252, index=cols, columns=cols)
     return mu_annual, cov_annual
 
