@@ -844,14 +844,16 @@ def get_portfolio_analysis_tab(options_tickers):
                         html.Span(lbl, style={
                             'fontWeight': 'bold', 'fontSize': '6px', 'color': col,
                             'lineHeight': '1', 'whiteSpace': 'nowrap',
-                            'overflow': 'hidden',
                         }),
                         html.Button('☑', id=btn_id, n_clicks=0, title=tip,
                             style={'fontSize': '6px', 'border': 'none', 'background': 'none',
-                                   'cursor': 'pointer', 'color': col, 'padding': '0',
-                                   'lineHeight': '1'}),
+                                   'cursor': 'pointer', 'color': col,
+                                   'padding': '0', 'margin': '0', 'lineHeight': '1',
+                                   'display': 'inline', 'minHeight': '0', 'height': 'auto',
+                                   'appearance': 'none', '-webkit-appearance': 'none'}),
                     ], style={
-                        'width': w, 'display': 'flex', 'flexDirection': 'column',
+                        'width': w, 'height': '14px',
+                        'display': 'flex', 'flexDirection': 'row',
                         'alignItems': 'center', 'justifyContent': 'center',
                         'overflow': 'hidden', 'gap': '1px',
                     }) for w, lbl, col, tip, btn_id in [
@@ -869,7 +871,7 @@ def get_portfolio_analysis_tab(options_tickers):
                     ]],
                 ], style={
                     'width': '35%', 'display': 'flex', 'alignItems': 'center',
-                    'minHeight': '18px', 'padding': '0', 'overflow': 'hidden',
+                    'height': '14px', 'padding': '0', 'overflow': 'hidden',
                 }),
                 # Dx 65%: range temporale — allineato a destra
                 html.Div(
