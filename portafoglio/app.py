@@ -9,11 +9,17 @@ import base64
 import time
 import threading
 import os
+import sys
 import uuid
 import pickle
 import requests
 from pathlib import Path
 from datetime import datetime
+
+# Assicura che la cartella superiore sia disponibile per l'import di navbar.py
+PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PARENT_DIR not in sys.path:
+    sys.path.insert(0, PARENT_DIR)
 
 import numpy as np
 import pandas as pd
@@ -287,8 +293,12 @@ def _get_df(json_str):
 DOWNLOAD_BATCH_SIZE = 10
 
 _DL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
-_DL_BUFFER: dict = {}
+_DL_BUFFER: dict = {}   # dati TARBIUTH — salvati su disco, permanenti
 _DL_LOCK   = threading.Lock()
+
+_CL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
+_CL_BUFFER: dict = {}   # dati cliente — solo in memoria, non toccano TARBIUTH
+_CL_LOCK   = threading.Lock()
 
 
 def _build_ticker_list():
@@ -298,7 +308,7 @@ def _build_ticker_list():
 
 
 def _do_download(tickers, descrizione, valuta, start_date):
-    """Scarica da Yahoo, salva market_data.pkl e aggiorna _DL_BUFFER."""
+    """Scarica da Yahoo per TARBIUTH: salva su market_data.pkl e aggiorna _DL_BUFFER."""
     global _DL_STATE, _DL_BUFFER
     total = len(tickers)
     with _DL_LOCK:
@@ -405,125 +415,101 @@ def _do_download(tickers, descrizione, valuta, start_date):
         _DL_STATE['current'] = total
 
 
-def _compute_arima_cache(returns_df, window=250):
-    """ARIMA(p,0,q) best-AIC + GARCH(1,1) per tutti gli asset. Restituisce (mu_series, cov_df).
+def _do_download_client(tickers, descrizione, valuta, start_date):
+    """Download per file cliente: dati solo in _CL_BUFFER, TARBIUTH e market_data.pkl intoccati."""
+    global _CL_STATE, _CL_BUFFER
+    total = len(tickers)
+    with _CL_LOCK:
+        _CL_STATE = {'status': 'running', 'current': 0, 'total': total, 'errors': []}
+        _CL_BUFFER.clear()
 
-    μ = media incondizionale ARIMA = const/(1-Σφᵢ) → aspettativa a lungo orizzonte.
-    σ = volatilità condizionale GARCH 1-step → regime di rischio corrente.
-    Σ = D_garch @ corr_resid @ D_garch (correlazioni sui residui ARIMA).
-    """
-    import warnings
+    _proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or None
+    _ua    = (os.environ.get('YF_USER_AGENT') or
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+              'AppleWebKit/537.36 (KHTML, like Gecko) '
+              'Chrome/124.0.0.0 Safari/537.36')
+    _dl_kwargs = dict(auto_adjust=True, progress=False)
+    if _proxy:
+        _dl_kwargs['proxy'] = _proxy
+
     try:
-        from statsmodels.tsa.arima.model import ARIMA as _ARIMA_CLS
-    except ImportError:
-        print("⚠ statsmodels non installato — ARIMA cache saltata")
-        return None, None
+        import yfinance.data as _yfd
+        if hasattr(_yfd, 'YfData'):
+            _yfd.YfData._headers = {'User-Agent': _ua}
+    except Exception:
+        pass
+
+    fx = None
     try:
-        from arch import arch_model as _arch_model
-        _has_arch = True
-    except ImportError:
-        _has_arch = False
-
-    cols = returns_df.columns.tolist()
-    mu_dict, vol_dict, resid_dict = {}, {}, {}
-    print(f"  ARIMA cache: {len(cols)} asset, finestra {window}gg")
-
-    for i, col in enumerate(cols):
-        s = returns_df[col].dropna().tail(window)
-        if len(s) < 30:
-            mu_dict[col]    = float(s.mean())
-            vol_dict[col]   = float(s.std())
-            resid_dict[col] = (s - s.mean()).values
-        else:
-            best_aic   = np.inf
-            best_resid = (s - s.mean()).values
-            best_model = None
-            for p in range(3):
-                for q in range(3):
-                    if p == 0 and q == 0:
-                        continue
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter('ignore')
-                            m = _ARIMA_CLS(s, order=(p, 0, q)).fit()
-                        if m.aic < best_aic:
-                            best_aic   = m.aic
-                            best_resid = m.resid.values
-                            best_model = m
-                    except Exception:
-                        pass
-
-            # μ incondizionale: const / (1 - Σ φᵢ)
-            # Guard: soglia 0.15 evita amplificazione quando Σφᵢ ≈ 0.85 (near-unit-root).
-            # Sanity cap: se risultato > 5× media storica → artefatto → fallback.
-            best_mu   = float(s.mean())
-            hist_mean = float(s.mean())
-            if best_model is not None:
-                try:
-                    par      = best_model.params
-                    ar_coefs = [par[k] for k in par.index if k.startswith('ar.')]
-                    denom    = 1.0 - sum(ar_coefs)
-                    if 'const' in par.index and abs(denom) > 0.15:
-                        mu_candidate = float(par['const'] / denom)
-                        if hist_mean != 0 and abs(mu_candidate) > 5 * abs(hist_mean) + 1e-5:
-                            best_mu = hist_mean
-                        else:
-                            best_mu = mu_candidate
-                    else:
-                        best_mu = float(best_model.fittedvalues.mean())
-                except Exception:
-                    best_mu = float(s.mean())
-
-            mu_dict[col]    = best_mu
-            resid_dict[col] = best_resid
-
-            if _has_arch and len(best_resid) > 20:
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter('ignore')
-                        gm = _arch_model(best_resid * 100, vol='Garch', p=1, q=1, rescale=False)
-                        gf = gm.fit(disp='off')
-                        fc = gf.forecast(horizon=1)
-                    vol_dict[col] = float(np.sqrt(fc.variance.values[-1, 0])) / 100
-                except Exception:
-                    vol_dict[col] = float(np.std(best_resid))
-            else:
-                vol_dict[col] = float(np.std(best_resid))
-        print(f"    [{i+1}/{len(cols)}] {col}: mu={mu_dict[col]:.5f} vol={vol_dict[col]:.5f}")
-
-    r_df  = returns_df[cols].tail(window)
-    corr  = np.nan_to_num(r_df.corr().values, nan=0.0)
-    np.fill_diagonal(corr, 1.0)
-    vols  = np.array([vol_dict[c] for c in cols])
-    D     = np.diag(vols)
-    cov_m = D @ corr @ D + 1e-8 * np.eye(len(cols))
-    cov_df    = pd.DataFrame(cov_m, index=cols, columns=cols)
-    mu_series = pd.Series(mu_dict)
-    return mu_series, cov_df
-
-
-def _save_arima_to_pkl(mu_series, cov_df):
-    """Aggiunge i risultati ARIMA al pkl esistente e al buffer."""
-    arima_ts = datetime.now().strftime('%d/%m/%Y %H:%M')
-    arima_data = {
-        'mu':              mu_series.to_dict(),
-        'cov':             cov_df.to_dict(),
-        'computed_at':     arima_ts,
-    }
-    try:
-        if os.path.exists(_MARKET_DATA_FILE):
-            with open(_MARKET_DATA_FILE, 'rb') as f:
-                pkl = pickle.load(f)
-            pkl['arima']             = arima_data
-            pkl['arima_computed_at'] = arima_ts
-            with open(_MARKET_DATA_FILE, 'wb') as f:
-                pickle.dump(pkl, f)
-            print(f"✓ ARIMA salvato nel pkl — {arima_ts}")
+        fx = yf.download(['EURUSD=X', 'EURGBP=X'], start=start_date,
+                         group_by='ticker', **_dl_kwargs)
     except Exception as e:
-        print(f"⚠ Salvataggio ARIMA su disco fallito: {e}")
-    with _DL_LOCK:
-        _DL_BUFFER['arima']             = arima_data
-        _DL_BUFFER['arima_computed_at'] = arima_ts
+        print(f"⚠ FX download cliente fallito: {e}")
+
+    def _fx(name):
+        if fx is None or fx.empty:
+            return None
+        try:
+            return fx[(name, 'Close')] if isinstance(fx.columns, pd.MultiIndex) else fx['Close']
+        except Exception:
+            return None
+
+    eurusd, eurgbp = _fx('EURUSD=X'), _fx('EURGBP=X')
+    all_prices = {}
+
+    for i in range(0, total, DOWNLOAD_BATCH_SIZE):
+        bt = tickers[i:i + DOWNLOAD_BATCH_SIZE]
+        bd = descrizione[i:i + DOWNLOAD_BATCH_SIZE]
+        bv = valuta[i:i + DOWNLOAD_BATCH_SIZE]
+        try:
+            raw = yf.download(bt, start=start_date, group_by='ticker', **_dl_kwargs)
+            if raw.empty:
+                raise ValueError("risposta vuota")
+            for j, t in enumerate(bt):
+                desc, curr = bd[j], bv[j]
+                try:
+                    px = (raw[(t, 'Close')].copy() if isinstance(raw.columns, pd.MultiIndex)
+                          else raw['Close'].copy())
+                    px = px.ffill()
+                    if curr == 'USD' and eurusd is not None:
+                        px = px / eurusd.reindex(px.index).ffill()
+                    elif curr == 'GBP' and eurgbp is not None:
+                        px = px / eurgbp.reindex(px.index).ffill()
+                    all_prices[desc] = px
+                except Exception as e2:
+                    with _CL_LOCK:
+                        _CL_STATE['errors'].append(f"{t}: {e2}")
+        except Exception as e:
+            with _CL_LOCK:
+                _CL_STATE['errors'].append(f"Batch {i}: {e}")
+        with _CL_LOCK:
+            _CL_STATE['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
+        time.sleep(0.3)
+
+    if not all_prices:
+        with _CL_LOCK:
+            _CL_STATE['status'] = 'error'
+        print("❌ Download cliente fallito: nessun dato")
+        return
+
+    original_prices = pd.DataFrame(all_prices)
+    original_prices.index = pd.to_datetime(original_prices.index)
+    original_prices = original_prices.ffill()
+    close_returns   = original_prices.pct_change(fill_method=None)
+    ticker_map      = {descrizione[i]: tickers[i] for i in range(len(tickers))}
+    saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
+
+    with _CL_LOCK:
+        _CL_BUFFER.update({
+            'date':            datetime.now().strftime('%Y-%m-%d'),
+            'saved_at':        saved_at,
+            'ticker_map':      ticker_map,
+            'original_prices': original_prices,
+            'close_returns':   close_returns,
+        })
+        _CL_STATE['status']  = 'done'
+        _CL_STATE['current'] = total
+    print(f"✓ Download cliente: {len(all_prices)} asset in _CL_BUFFER (TARBIUTH intoccato)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -757,7 +743,7 @@ def get_portfolio_analysis_tab(options_tickers):
         html.Div([
             # ── Riga controlli ────────────────────────────────────────────
             html.Div([
-                html.Span('Parametri',
+                html.Span('Parametri indicatori di rischio:',
                           style={'margin-right': '10px', 'white-space': 'nowrap',
                                  'font-size': '12px', 'font-weight': '700',
                                  'color': '#1a3a5c'}),
@@ -775,21 +761,21 @@ def get_portfolio_analysis_tab(options_tickers):
                         ),
                     ], style={'margin-right': '10px', 'display': 'flex', 'align-items': 'center'}),
                     html.Div([
-                        html.Label('AKR W:',
+                        html.Label('AK-SH-TV W:',
                                    style={'margin-right': '4px', 'white-space': 'nowrap',
                                           'font-size': '10px'}),
                         dcc.Input(id='ir-window-input', type='number', value=30, min=1,
                                   placeholder='30', style={'width': '45px', 'font-size': '10px'}),
                     ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '8px'}),
                     html.Div([
-                        html.Label('AKR MA:',
+                        html.Label('MA:',
                                    style={'margin-right': '4px', 'white-space': 'nowrap',
                                           'font-size': '10px'}),
                         dcc.Input(id='ak-ma-input', type='number', value=1, min=1,
                                   placeholder='1', style={'width': '40px', 'font-size': '10px'}),
                     ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '8px'}),
                     html.Div([
-                        html.Label('Vol W:',
+                        html.Label('VOL-cVAR W:',
                                    style={'margin-right': '4px', 'white-space': 'nowrap',
                                           'font-size': '10px'}),
                         dcc.Input(id='vol-window-input', type='number', value=30, min=1,
@@ -996,19 +982,19 @@ app.layout = html.Div([
 
     # ── Intestazione pagina ───────────────────────────────────────────────────
     html.Div([
-        html.H1('Analisi di Portafoglio', style={
+        html.H1([
+            'Analisi Rischio di Portafoglio',
+            html.Span(' - ', style={'color': '#9baabf'}),
+            html.Span('Analisi metriche del rischio', style={
+                'font-size': '1.1rem', 'font-weight': '400', 'color': '#4a5d7a',
+            }),
+        ], style={
             'margin': '0',
             'font-size': '1.6rem',
             'font-weight': '700',
             'color': '#1a3a6b',
             'font-family': "'Playfair Display', serif",
             'letter-spacing': '0.02em',
-        }),
-        html.P('Analisi quantitativa del portafoglio', style={
-            'margin': '2px 0 0 0',
-            'font-size': '0.78rem',
-            'color': '#6b7a99',
-            'font-family': 'Inter, sans-serif',
         }),
     ], style={
         'padding': '14px 20px 12px',
@@ -1078,6 +1064,7 @@ app.layout = html.Div([
     dcc.Store(id='global-assets-selected',  data=[]),
     dcc.Store(id='tab1-slider-store',       data=None),
     dcc.Store(id='custom-tickers-store',    data=None),
+    dcc.Store(id='upload-done-ts',          data=None),
     dcc.Download(id='download-data'),
     dcc.Download(id='download-template'),
 
@@ -1155,7 +1142,8 @@ app.layout = html.Div([
 
     # ── Contenuto Tab 1 ───────────────────────────────────────────────────────
     html.Div(id='tab1-content'),
-    ], style={'marginTop': '64px', 'padding': '0 1%'}),  # offset navbar fissa
+
+], style={'marginTop': '64px', 'padding': '0 1%'}),  # offset navbar fissa
 ])
 
 
@@ -1179,27 +1167,42 @@ app.layout = html.Div([
     Output('modal-pct-text',          'children',    allow_duplicate=True),
     Output('modal-status-text',       'children',    allow_duplicate=True),
     Output('modal-status-text',       'style',       allow_duplicate=True),
+    Output('upload-done-ts',          'data',        allow_duplicate=True),
     Input('upload-data', 'contents'),
     State('upload-data', 'filename'),
     prevent_initial_call='initial_duplicate',
 )
 def update_output(contents, filename):
+    import time as _time
     ctx = callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else 'initial_load'
 
-    # valori no_update per gli output modal/poll (usati nei rami che non avviano download)
     _noup = (no_update,) * 8
 
     if triggered_id == 'initial_load':
-        with _DL_LOCK:
-            buf = dict(_DL_BUFFER)
-        if buf.get('close_returns') is not None:
-            cr  = buf['close_returns']
-            op  = buf['original_prices']
-            tm  = buf.get('ticker_map', {})
+        # Ogni volta che la pagina viene (ri)caricata, svuota il buffer cliente
+        # così il refresh della pagina ripristina sempre TARBIUTH.
+        with _CL_LOCK:
+            _CL_BUFFER.clear()
+            _CL_STATE['status'] = 'idle'
+        import pickle as _pickle
+        cr, op, tm, saved_at = None, None, {}, ''
+        if _MARKET_DATA_FILE.exists():
+            try:
+                with open(_MARKET_DATA_FILE, 'rb') as _f:
+                    _d = _pickle.load(_f)
+                cr       = _d.get('close_returns')
+                op       = _d.get('original_prices')
+                tm       = _d.get('ticker_map', {})
+                saved_at = _d.get('saved_at', '')
+            except Exception:
+                pass
+        if cr is not None:
             options  = [{'label': col, 'value': col} for col in cr.columns]
-            saved_at = buf.get('saved_at', '')
             last_upd = f"Aggiornati: {saved_at}" if saved_at else ''
+            with _DL_LOCK:
+                _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
+                                   'ticker_map': tm, 'saved_at': saved_at})
             return (
                 html.Div(f'✓ {len(options)} asset — da file locale',
                          style={'color': '#007755', 'font-size': '11px'}),
@@ -1207,25 +1210,25 @@ def update_output(contents, filename):
                 cr.to_json(date_format='iso', orient='split'),
                 op.to_json(date_format='iso', orient='split'),
                 [], tm, last_upd, None,
-                *_noup,
+                *_noup, no_update,
             )
-        # Nessun file ancora: mostra solo nomi, download in corso in background
         options, ticker_map = load_ticker_names_only()
         return (
             html.Div('⏳ Download dati in corso…',
                      style={'color': '#e67e22', 'font-size': '11px'}),
             options, None, None, [], ticker_map, '', None,
-            *_noup,
+            *_noup, no_update,
         )
 
     elif triggered_id == 'upload-data' and contents is not None:
         try:
             _, content_string = contents.split(',')
-            decoded   = base64.b64decode(content_string)
+            decoded  = base64.b64decode(content_string)
+            done_ts  = _time.time()
+
             df        = pd.read_excel(io.BytesIO(decoded))
             col_names = df.columns.tolist()
 
-            # Detect format: price file = first col parseable as dates + rest numeric
             is_price_file = False
             try:
                 pd.to_datetime(df[col_names[0]], errors='raise')
@@ -1235,7 +1238,6 @@ def update_output(contents, filename):
                 pass
 
             if is_price_file:
-                # File con date + prezzi: carica direttamente, nessun download Yahoo necessario
                 df_prices = df.set_index(col_names[0])
                 df_prices.index = pd.to_datetime(df_prices.index)
                 df_prices = df_prices.select_dtypes(include='number').ffill().dropna(how='all')
@@ -1258,12 +1260,10 @@ def update_output(contents, filename):
                     close_returns.to_json(date_format='iso', orient='split'),
                     df_prices.to_json(date_format='iso', orient='split'),
                     [], ticker_map, f"Caricati: {saved_at}", None,
-                    *_noup,
+                    *_noup, done_ts,
                 )
 
             else:
-                # File lista ticker: col[0]=ticker, col[1]=descrizione, col[2]=valuta
-                # Salva il file con nome progressivo nel registro clienti
                 try:
                     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                     copy_path = SESSIONS_DIR / f'tickers_{ts}.xlsx'
@@ -1285,7 +1285,7 @@ def update_output(contents, filename):
                 start_date = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
                 print(f"▶ Upload file ticker: {len(tickers)} asset da scaricare da {start_date}")
                 threading.Thread(
-                    target=_do_download,
+                    target=_do_download_client,
                     args=(tickers, descrizione, valuta, start_date),
                     daemon=True,
                 ).start()
@@ -1296,15 +1296,32 @@ def update_output(contents, filename):
                     options, None, None, [], ticker_map, '', custom,
                     False, 0, True, _MODAL_SHOWN, _FILL_LOADING,
                     f'Avvio — {len(tickers)} asset…', '', _STATUS_GREY,
+                    done_ts,
                 )
 
         except Exception as e:
             return (
                 html.Div(f'Errore: {e}'), [], None, None, [], {}, '', None,
-                *_noup,
+                *_noup, no_update,
             )
 
     raise PreventUpdate
+
+
+# Clientside: appena upload-done-ts cambia (ogni upload completato),
+# azzera upload-data.contents nel browser → il prossimo upload dello
+# stesso file viene rilevato come nuovo (None → base64).
+app.clientside_callback(
+    """
+    function(ts) {
+        if (!ts) return window.dash_clientside.no_update;
+        return null;
+    }
+    """,
+    Output('upload-data', 'contents', allow_duplicate=True),
+    Input('upload-done-ts', 'data'),
+    prevent_initial_call=True,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1360,6 +1377,9 @@ def start_refresh(n_clicks, start_date_picker):
         return (no_update, no_update, False, _MODAL_SHOWN, err_fill,
                 'Errore', f'❌ {e}', _STATUS_RED)
 
+    with _CL_LOCK:
+        _CL_BUFFER.clear()
+        _CL_STATE['status'] = 'idle'
     threading.Thread(target=_do_download,
                      args=(tickers, descr, valuta, start_date), daemon=True).start()
     print(f"▶ Aggiornamento TARBIUTH: {len(tickers)} ticker da {start_date}")
@@ -1386,9 +1406,17 @@ def start_refresh(n_clicks, start_date_picker):
     prevent_initial_call=True,
 )
 def poll_refresh_progress(n):
+    # Legge dal buffer cliente se attivo, altrimenti da TARBIUTH
+    with _CL_LOCK:
+        cl_state  = dict(_CL_STATE)
+        cl_buffer = dict(_CL_BUFFER)
     with _DL_LOCK:
-        state  = dict(_DL_STATE)
-        buffer = dict(_DL_BUFFER)
+        dl_state  = dict(_DL_STATE)
+        dl_buffer = dict(_DL_BUFFER)
+
+    client_active = cl_state.get('status') in ('running', 'done') and cl_state.get('status') != 'idle'
+    state  = cl_state  if client_active else dl_state
+    buffer = cl_buffer if client_active else dl_buffer
 
     status  = state.get('status', 'idle')
     current = state.get('current', 0)
@@ -1491,10 +1519,14 @@ def salva_dati(n_clicks, original_prices_data):
     if not n_clicks or n_clicks == 0:
         raise PreventUpdate
 
-    # Legge prezzi direttamente dal buffer (bypassa la cache per evitare collisioni con i rendimenti)
-    with _DL_LOCK:
-        buf_data = dict(_DL_BUFFER)
-    df_prices = buf_data.get('original_prices')
+    # Legge dal buffer cliente se attivo, altrimenti da TARBIUTH
+    with _CL_LOCK:
+        cl_prices = _CL_BUFFER.get('original_prices')
+    if cl_prices is not None and not cl_prices.empty:
+        df_prices = cl_prices
+    else:
+        with _DL_LOCK:
+            df_prices = _DL_BUFFER.get('original_prices')
     if df_prices is None or df_prices.empty:
         if original_prices_data:
             df_prices = pd.read_json(io.StringIO(original_prices_data), orient='split')
@@ -2332,7 +2364,8 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
                     tc = _color_map.get(an, color_palette[color_index % len(color_palette)])
                     line_dict = dict(color=tc, dash='solid',
                                      width=4 if an.startswith('Port') else 2.5)
-                fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[sc], name=tn,
+                y_vals = df_plot[sc].rolling(_ak_ma, min_periods=1).mean() if _ak_ma > 1 else df_plot[sc]
+                fig.add_trace(go.Scatter(x=df_plot.index, y=y_vals, name=tn,
                                           line=line_dict, legend='legend3'), row=3, col=1)
 
     # Subplot 4: TEV
@@ -2349,7 +2382,8 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
                     tc = _color_map.get(an, color_palette[color_index % len(color_palette)])
                     line_dict = dict(color=tc, dash='dash',
                                      width=4 if an.startswith('Port') else 2.5)
-                fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[tc_nm], name=tn,
+                y_vals = df_plot[tc_nm].rolling(_ak_ma, min_periods=1).mean() if _ak_ma > 1 else df_plot[tc_nm]
+                fig.add_trace(go.Scatter(x=df_plot.index, y=y_vals, name=tn,
                                           line=line_dict, legend='legend4'), row=4, col=1)
 
     # Subplot 5: DrawDown
@@ -2422,6 +2456,34 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
                 fig.add_trace(go.Scatter(x=vs.index, y=vs, name=tn,
                                           line=line_dict, legend='legend7'), row=7, col=1)
 
+    # ── Tooltip personalizzato per ogni linea ────────────────────────────────
+    # Riquadro con bordo del colore della linea, sfondo bianco, testo nero.
+    # Riga 1: data + valore  |  Riga 2: nome serie per esteso.
+    for _tr in fig.data:
+        try:
+            _lc = _tr.line.color
+        except AttributeError:
+            continue
+        if not _lc or _lc == 'rgba(0,0,0,0)':
+            continue
+        _nm = _tr.name or ''
+        if not _nm:
+            continue
+        _fmt = '.1%' if any(k in _nm for k in ('Cum. Returns', 'DrawDown', 'VaR')) else '.4f'
+        _tr.update(
+            hovertemplate=(
+                f'%{{x|%d/%m/%Y}}   %{{y:{_fmt}}}<br>'
+                f'{_nm}'
+                '<extra></extra>'
+            ),
+            hoverlabel=dict(
+                bgcolor='white',
+                bordercolor=_lc,
+                font=dict(color='black', size=11),
+                namelength=0,
+            ),
+        )
+
     for row in range(1, 8):
         fig.update_xaxes(title_text='', row=row, col=1)
     fig.update_yaxes(title_text='Cumulative Returns', row=1, col=1)
@@ -2434,6 +2496,7 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
 
     fig.update_layout(
         uirevision='graph',
+        hovermode='closest',
         height=1900, showlegend=True,
         legend=dict(title=dict(text='<b>Asset</b>', font=dict(size=11)),
                     orientation='v', yanchor='top', y=1.0, xanchor='left', x=1.01,
@@ -2632,38 +2695,116 @@ def _startup_load():
 _startup_load()
 
 
-def _startup_arima_if_missing():
-    """Se i dati di mercato sono già in buffer ma la cache ARIMA manca, la calcola in background
-    con un ritardo iniziale per lasciare al server il tempo di avviarsi completamente."""
-    with _DL_LOCK:
-        returns_df = _DL_BUFFER.get('close_returns')
-        has_arima  = _DL_BUFFER.get('arima') is not None
-    if returns_df is None or returns_df.empty or has_arima:
-        return
-    def _job():
-        import time, os
-        try:
-            os.nice(10)   # priorità bassa: non compete con i worker gunicorn
-        except Exception:
-            pass
-        time.sleep(20)    # aspetta che il server sia completamente avviato
-        try:
-            print("▶ Cache ARIMA assente — calcolo automatico in background…")
-            mu_series, cov_df = _compute_arima_cache(returns_df, window=250)
-            if mu_series is not None:
-                _save_arima_to_pkl(mu_series, cov_df)
-                print("✓ Cache ARIMA generata automaticamente all'avvio")
-        except Exception as e:
-            print(f"⚠ Calcolo ARIMA automatico fallito: {e}")
-    threading.Thread(target=_job, daemon=True).start()
 
-_startup_arima_if_missing()
+# ─────────────────────────────────────────────────────────────────────────────
+# ARIMA+GARCH notturno: calcola mu/cov e li scrive in market_data.pkl['arima']
+# Il formato è quello letto da frontiera-efficiente/app.py → _read_arima_cache()
+# ─────────────────────────────────────────────────────────────────────────────
+def _compute_arima_garch(returns_df, window=250):
+    """ARIMA(p,0,q) best-AIC + GARCH(1,1). Restituisce (mu_series, cov_df) annualizzati."""
+    import warnings
+    try:
+        from statsmodels.tsa.arima.model import ARIMA as _ARIMA
+    except ImportError:
+        print("⚠ statsmodels non installato — ARIMA saltato")
+        return None, None
+    try:
+        from arch import arch_model as _arch
+        _has_arch = True
+    except ImportError:
+        _has_arch = False
+
+    cols = [c for c in returns_df.columns if returns_df[c].dropna().shape[0] >= 60]
+    mu_d, sig_d, resid_d = {}, {}, {}
+
+    for i, col in enumerate(cols):
+        s = returns_df[col].dropna().tail(window)
+        best_aic, best_mu, best_resid = np.inf, float(s.mean()), (s - s.mean()).values
+        for p in range(3):
+            for q in range(3):
+                if p == 0 and q == 0:
+                    continue
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        m = _ARIMA(s, order=(p, 0, q)).fit()
+                    if m.aic < best_aic:
+                        best_aic   = m.aic
+                        best_resid = m.resid.values
+                        par   = m.params
+                        ar_c  = [par[k] for k in par.index if k.startswith('ar.')]
+                        denom = 1.0 - sum(ar_c)
+                        if 'const' in par.index and abs(denom) > 0.15:
+                            mu_c = float(par['const'] / denom)
+                            best_mu = mu_c if abs(mu_c) <= 5 * abs(float(s.mean())) + 1e-6 else float(s.mean())
+                        else:
+                            best_mu = float(m.fittedvalues.mean())
+                except Exception:
+                    pass
+        mu_d[col]    = best_mu
+        resid_d[col] = best_resid
+
+        if _has_arch and len(best_resid) > 20:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    gm = _arch(best_resid * 100, vol='Garch', p=1, q=1, rescale=False)
+                    gf = gm.fit(disp='off')
+                    pr = gf.params
+                    o, a, b = pr['omega'], pr['alpha[1]'], pr['beta[1]']
+                    sig_d[col] = (float(np.sqrt(o / (1 - a - b))) / 100
+                                  if a + b < 1.0 else float(np.std(best_resid)))
+            except Exception:
+                sig_d[col] = float(np.std(best_resid))
+        else:
+            sig_d[col] = float(np.std(best_resid))
+        print(f"  [{i+1}/{len(cols)}] {col}: mu={mu_d[col]:.5f} vol={sig_d[col]:.5f}")
+
+    if not mu_d:
+        return None, None
+
+    min_len = min(len(resid_d[c]) for c in cols)
+    r_mat   = np.column_stack([resid_d[c][:min_len] for c in cols])
+    corr    = np.nan_to_num(np.corrcoef(r_mat.T), nan=0.0)
+    np.fill_diagonal(corr, 1.0)
+    vols    = np.array([sig_d[c] for c in cols])
+    D       = np.diag(vols)
+    cov_d   = D @ corr @ D + 1e-8 * np.eye(len(cols))
+
+    mu_annual  = pd.Series({c: mu_d[c]  * 252        for c in cols})
+    cov_annual = pd.DataFrame(cov_d * 252, index=cols, columns=cols)
+    return mu_annual, cov_annual
+
+
+def _save_arima_to_pkl(mu_series, cov_df):
+    """Scrive arima in market_data.pkl nel formato atteso da frontiera-efficiente."""
+    ts = datetime.now().strftime('%d/%m/%Y %H:%M')
+    arima_data = {
+        'mu':          mu_series.to_dict(),
+        'cov':         cov_df.to_dict(),
+        'computed_at': ts,
+    }
+    try:
+        if _MARKET_DATA_FILE.exists():
+            with open(_MARKET_DATA_FILE, 'rb') as f:
+                pkl = pickle.load(f)
+            pkl['arima']             = arima_data
+            pkl['arima_computed_at'] = ts
+            with open(_MARKET_DATA_FILE, 'wb') as f:
+                pickle.dump(pkl, f)
+        with _DL_LOCK:
+            _DL_BUFFER['arima']             = arima_data
+            _DL_BUFFER['arima_computed_at'] = ts
+        print(f"✓ ARIMA salvato in market_data.pkl — {ts}")
+    except Exception as e:
+        print(f"⚠ Salvataggio ARIMA fallito: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Scheduler: aggiornamento automatico ogni giorno alle 18:30 (lun-ven)
+# Scheduler: dati alle 18:30 (lun-ven), ARIMA+GARCH a mezzanotte (lun-sab)
 # ─────────────────────────────────────────────────────────────────────────────
 def _scheduled_update():
+    """Download TARBIUTH a mezzanotte."""
     try:
         start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
         tickers, descr, valuta = _build_ticker_list()
@@ -2671,36 +2812,36 @@ def _scheduled_update():
         _do_download(tickers, descr, valuta, start)
     except Exception as e:
         print(f"⚠ Aggiornamento schedulato fallito: {e}")
-        return
-    # Calcola ARIMA+GARCH in background dopo il download
-    def _arima_job():
-        import time, os
-        try:
-            os.nice(10)
-        except Exception:
-            pass
-        time.sleep(10)   # lascia stabilizzare il buffer dopo il download
-        try:
-            with _DL_LOCK:
-                returns_df = _DL_BUFFER.get('close_returns')
-            if returns_df is None or returns_df.empty:
-                return
-            print("⏰ Avvio calcolo ARIMA+GARCH post-download…")
-            mu_series, cov_df = _compute_arima_cache(returns_df, window=250)
-            if mu_series is not None:
-                _save_arima_to_pkl(mu_series, cov_df)
-                print("✓ ARIMA+GARCH completato e salvato")
-        except Exception as e:
-            print(f"⚠ ARIMA post-download fallito: {e}")
-    threading.Thread(target=_arima_job, daemon=True).start()
+
+
+def _scheduled_arima():
+    """Calcolo ARIMA+GARCH a mezzanotte sui dati già scaricati."""
+    try:
+        with _DL_LOCK:
+            ret = _DL_BUFFER.get('close_returns')
+        if ret is None or ret.empty:
+            print("⚠ ARIMA notturno: nessun dato disponibile")
+            return
+        print(f"🌙 Calcolo ARIMA+GARCH notturno — {len(ret.columns)} asset…")
+        mu, cov = _compute_arima_garch(ret, window=250)
+        if mu is not None:
+            _save_arima_to_pkl(mu, cov)
+            print("✓ ARIMA+GARCH notturno completato")
+        else:
+            print("⚠ ARIMA notturno: calcolo non riuscito")
+    except Exception as e:
+        print(f"⚠ ARIMA notturno fallito: {e}")
+
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     _scheduler = BackgroundScheduler(timezone='Europe/Rome')
-    _scheduler.add_job(_scheduled_update, 'cron', hour=18, minute=30,
-                       day_of_week='mon-fri', misfire_grace_time=3600)
+    _scheduler.add_job(_scheduled_update, 'cron', hour=0, minute=0,
+                       day_of_week='mon-sat', misfire_grace_time=3600)
+    _scheduler.add_job(_scheduled_arima,  'cron', hour=0, minute=30,
+                       day_of_week='mon-sat', misfire_grace_time=3600)
     _scheduler.start()
-    print("✓ Scheduler avviato — aggiornamento automatico ogni giorno alle 18:30")
+    print("✓ Scheduler avviato — dati mezzanotte, ARIMA 00:30 (lun-sab)")
 except ImportError:
     print("⚠ apscheduler non installato — aggiornamento automatico disabilitato")
     print("  pip install apscheduler")
