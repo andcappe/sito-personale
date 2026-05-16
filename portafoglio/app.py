@@ -835,19 +835,19 @@ def get_portfolio_analysis_tab(options_tickers):
                 # Sx 35%: etichette colonne con pulsanti ☑ integrati
                 html.Div([
                     html.Div('Asset', **{'data-tooltip': 'Nome dell\'asset'}, style={
-                        'width': '22%', 'fontWeight': 'bold', 'fontSize': '7px',
+                        'width': '22%', 'fontWeight': 'bold', 'fontSize': '6px',
                         'paddingLeft': '4px', 'color': '#1a3a5c',
                         'display': 'flex', 'alignItems': 'center',
                         'overflow': 'hidden',
                     }),
                     *[html.Div([
                         html.Span(lbl, style={
-                            'fontWeight': 'bold', 'fontSize': '7px', 'color': col,
+                            'fontWeight': 'bold', 'fontSize': '6px', 'color': col,
                             'lineHeight': '1', 'whiteSpace': 'nowrap',
-                            'overflow': 'hidden', 'textOverflow': 'clip',
+                            'overflow': 'hidden',
                         }),
                         html.Button('☑', id=btn_id, n_clicks=0, title=tip,
-                            style={'fontSize': '7px', 'border': 'none', 'background': 'none',
+                            style={'fontSize': '6px', 'border': 'none', 'background': 'none',
                                    'cursor': 'pointer', 'color': col, 'padding': '0',
                                    'lineHeight': '1'}),
                     ], style={
@@ -1718,9 +1718,11 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
             dcc.Checklist(id=chk_id,
                           options=[{'label': '', 'value': opt_val}],
                           value=sel_val,
-                          style={'flex-direction': 'row', 'font-size': '10px',
-                                 'width': '100%', 'justify-content': 'center'}),
-            style={'width': w, 'height': '30px', 'display': 'flex',
+                          inputStyle={'width': '10px', 'height': '10px',
+                                      'cursor': 'pointer', 'margin': '0'},
+                          style={'display': 'flex', 'justify-content': 'center',
+                                 'align-items': 'center', 'width': '100%'}),
+            style={'width': w, 'height': '22px', 'display': 'flex',
                    'align-items': 'center', 'justify-content': 'center'})
 
     for asset in asset_names:
@@ -1730,7 +1732,8 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
             return dcc.Input(
                 id={'type': 'weight-input', 'index': f'{port_key}-{a}'},
                 type='number', value=saved_val, min=0, max=100, step=0.1, placeholder='0',
-                style={'width': '90%', 'text-align': 'right', 'margin-bottom': '5px'}
+                style={'width': '90%', 'text-align': 'right', 'font-size': '9px',
+                       'height': '18px', 'padding': '1px 2px', 'box-sizing': 'border-box'}
             )
 
         asset_val   = [asset]                       if asset in saved_selected else []
@@ -1775,9 +1778,11 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
             dcc.Checklist(id=chk_id,
                           options=[{'label': '', 'value': opt_val}],
                           value=sel_val,
-                          style={'flex-direction': 'row', 'font-size': '10px',
-                                 'width': '100%', 'justify-content': 'center'}),
-            style={'width': w, 'height': '30px', 'display': 'flex',
+                          inputStyle={'width': '10px', 'height': '10px',
+                                      'cursor': 'pointer', 'margin': '0'},
+                          style={'display': 'flex', 'justify-content': 'center',
+                                 'align-items': 'center', 'width': '100%'}),
+            style={'width': w, 'height': '22px', 'display': 'flex',
                    'align-items': 'center', 'justify-content': 'center'})
 
     for portfolio_num in [1, 2, 3]:
