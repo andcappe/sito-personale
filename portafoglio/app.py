@@ -842,14 +842,14 @@ def get_portfolio_analysis_tab(options_tickers):
                     }),
                     *[html.Div([
                         html.Span(lbl, style={
-                            'fontWeight': 'bold', 'fontSize': '5px', 'color': col,
+                            'fontWeight': 'bold', 'fontSize': '7px', 'color': col,
                             'lineHeight': '1', 'whiteSpace': 'nowrap',
                         }),
                         html.Button('☑', id=btn_id, n_clicks=0, title=tip,
-                            style={'fontSize': '5px', 'border': 'none', 'background': 'none',
+                            style={'fontSize': '7px', 'border': 'none', 'background': 'none',
                                    'cursor': 'pointer', 'color': col,
                                    'padding': '0', 'margin': '0', 'lineHeight': '1'}),
-                    ], style={
+                    ], className='col-header-cell', style={
                         'width': w, 'display': 'flex', 'flexDirection': 'column',
                         'alignItems': 'center', 'justifyContent': 'center',
                         'overflow': 'hidden', 'gap': '0px',
@@ -1720,7 +1720,8 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
                           inputStyle={'width': '10px', 'height': '10px',
                                       'cursor': 'pointer', 'margin': '0'},
                           style={'display': 'flex', 'justify-content': 'center',
-                                 'align-items': 'center', 'width': '100%'}),
+                                 'align-items': 'center', 'width': '100%'},
+                          className='asset-checkbox'),
             style={'width': w, 'height': '22px', 'display': 'flex',
                    'align-items': 'center', 'justify-content': 'center'})
 
@@ -1758,9 +1759,9 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
                        'overflow': 'hidden', 'position': 'relative', 'cursor': 'default'},
             ),
             _chk({'type': 'graph-select-checkbox',  'index': asset}, asset,                       asset_val,  '3%'),
-            html.Div(create_weight_input(1), style={'width': '8%'}),
-            html.Div(create_weight_input(2), style={'width': '8%'}),
-            html.Div(create_weight_input(3), style={'width': '8%'}),
+            html.Div(create_weight_input(1), className='weight-input-cell', style={'width': '8%'}),
+            html.Div(create_weight_input(2), className='weight-input-cell', style={'width': '8%'}),
+            html.Div(create_weight_input(3), className='weight-input-cell', style={'width': '8%'}),
             _chk({'type': 'ir-select-checkbox',     'index': asset}, f'{asset}_InformationRatio', ir_val,     '5%'),
             _chk({'type': 'sharpe-select-checkbox', 'index': asset}, f'{asset}_Sharpe',           sharpe_val, '6%'),
             _chk({'type': 'tev-select-checkbox',    'index': asset}, f'{asset}_TEV',              tev_val,    '6%'),

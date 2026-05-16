@@ -1,0 +1,56 @@
+/* ── Intestazione colonne griglia asset ─────────────────────────────────────
+   Safari e iOS applicano un font minimo (~9px) ignorando valori più piccoli.
+   transform: scale() bypassa questo limite perché agisce sul rendering,
+   non sul font-size computato. */
+
+.col-header-cell {
+    overflow: hidden;
+}
+
+.col-header-cell span,
+.col-header-cell button {
+    font-size: 7px !important;
+    -webkit-text-size-adjust: none;
+    transform: scale(0.75);
+    -webkit-transform: scale(0.75);
+    transform-origin: center;
+    -webkit-transform-origin: center;
+    display: inline-block;
+    line-height: 1;
+}
+
+.col-header-cell button {
+    border: none !important;
+    background: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    min-height: 0 !important;
+    height: auto !important;
+}
+
+/* ── Checkbox asset/indicatori ──────────────────────────────────────────────
+   I checkbox nativi su iOS hanno una dimensione minima di sistema.
+   transform: scale() è l'unico modo affidabile per ridurli. */
+
+.asset-checkbox input[type="checkbox"] {
+    width: 10px !important;
+    height: 10px !important;
+    transform: scale(0.8);
+    -webkit-transform: scale(0.8);
+    cursor: pointer;
+    margin: 0 !important;
+}
+
+/* ── Input pesi portafoglio ─────────────────────────────────────────────────
+   iOS zoom automatico su input con font-size < 16px: lo disabilitiamo. */
+
+.weight-input-cell input[type="number"] {
+    font-size: 9px !important;
+    height: 18px !important;
+    padding: 1px 2px !important;
+    -webkit-text-size-adjust: none;
+    box-sizing: border-box;
+}
