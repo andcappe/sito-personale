@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 sessions/
+!sessions/market_data.pkl
 ~$*
 .DS_Store
 *.log
