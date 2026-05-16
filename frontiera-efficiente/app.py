@@ -21,6 +21,10 @@ from scipy.optimize import minimize
 from dash import Dash, html, dcc, Input, Output, State, callback_context, no_update, ALL
 from dash.exceptions import PreventUpdate
 
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from settings.browser_css import BROWSER_RESET_CSS, FONT
+
 # ─────────────────────────────────────────────────────────────────────────────
 # App
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,8 +41,7 @@ app.index_string = '''
 <!DOCTYPE html><html>
 <head>{%metas%}<title>Frontiera Efficiente — Andrea Cappelletti</title>{%favicon%}{%css%}
 <style>
-  html { font-size: 16px; }
-  body { margin:0; font-family:'Inter',sans-serif; background:#f5f8fe; }
+''' + BROWSER_RESET_CSS + '''
   @keyframes fe-spin { to { transform: rotate(360deg); } }
 </style>
 </head>
@@ -541,7 +544,7 @@ def _asset_name_div(asset, short_map):
     return html.Div(
         html.Span(asset, style={'overflow':'hidden','whiteSpace':'nowrap',
                                 'textOverflow':'ellipsis','maxWidth':'100%',
-                                'fontSize':'7px','color':color,'fontWeight':'600'}),
+                                'fontSize':FONT['sm'],'color':color,'fontWeight':'600'}),
         **{'data-tooltip': tooltip, 'data-tooltip-color': color},
         style={'width':'25%','height':'24px','display':'flex','alignItems':'center',
                'paddingLeft':'4px','overflow':'hidden','position':'relative','cursor':'default'}
@@ -549,8 +552,8 @@ def _asset_name_div(asset, short_map):
 
 def _w_cell(w, color):
     if w is None or w < 0.05:
-        return html.Span('—', style={'fontSize':'8px','color':'#bbb'})
-    return html.Span(f'{w:.1f}%', style={'fontSize':'8px','fontWeight':'700','color': color})
+        return html.Span('—', style={'fontSize':FONT['sm'],'color':'#bbb'})
+    return html.Span(f'{w:.1f}%', style={'fontSize':FONT['sm'],'fontWeight':'700','color': color})
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: grafico performance cumulativa
@@ -630,6 +633,91 @@ def _build_perf_chart(prices_data, chart_assets, frontier_weights, show_frontier
     except Exception:
         return empty
 
+def _build_drawdown_chart(prices_data, chart_assets, frontier_weights, show_frontiers, date_start, date_end):
+    empty = go.Figure().update_layout(
+        paper_bgcolor='white', plot_bgcolor='#f8faff',
+        annotations=[dict(text='Seleziona asset (📊) o calcola le frontiere',
+                          xref='paper', yref='paper', x=0.5, y=0.5,
+                          showarrow=False, font=dict(size=13, color='#6b7a99'))])
+    if not prices_data:
+        return empty
+    try:
+        prices_df = pd.read_json(io.StringIO(prices_data), orient='split')
+        prices_df.index = pd.to_datetime(prices_df.index)
+        if date_start: prices_df = prices_df.loc[date_start:]
+        if date_end:   prices_df = prices_df.loc[:date_end]
+        fig_dd = go.Figure()
+
+        def _drawdown(s):
+            cum = (1 + s.pct_change().fillna(0)).cumprod()
+            roll_max = cum.cummax()
+            return (cum / roll_max - 1) * 100
+
+        for i, asset in enumerate(chart_assets or []):
+            if asset not in prices_df.columns:
+                continue
+            s = prices_df[asset].dropna()
+            if len(s) <= 1:
+                continue
+            dd = _drawdown(s)
+            color = _PALETTE[i % len(_PALETTE)]
+            fig_dd.add_trace(go.Scatter(
+                x=dd.index, y=dd.values, mode='lines', name=asset,
+                line=dict(width=1.5, color=color), opacity=0.85,
+                fill='tozeroy', fillcolor=color.replace(')', ',0.08)').replace('rgb', 'rgba') if color.startswith('rgb') else color,
+                hoverlabel=dict(bgcolor='white', bordercolor=color,
+                                font=dict(color='black', size=11)),
+                hovertemplate=f'<b>{asset}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.2f}}%<extra></extra>',
+            ))
+
+        ret_df = prices_df.pct_change()
+        for fname, fcolor in _FC.items():
+            if not (show_frontiers or {}).get(fname, False):
+                continue
+            fw = frontier_weights.get(fname, {})
+            if not fw:
+                continue
+            port_cols = [c for c in fw if fw[c] > 0 and c in prices_df.columns]
+            if not port_cols:
+                continue
+            w_raw = np.array([fw[c] for c in port_cols], dtype=float)
+            w_raw /= w_raw.sum()
+            common_start = max(prices_df[c].first_valid_index() for c in port_cols)
+            sub_ret = ret_df.loc[common_start:, port_cols].dropna(how='any')
+            if len(sub_ret) < 2:
+                continue
+            port_ret = pd.Series(sub_ret.values @ w_raw, index=sub_ret.index)
+            cum_p = (1 + port_ret).cumprod()
+            roll_max = cum_p.cummax()
+            dd_p = (cum_p / roll_max - 1) * 100
+            fig_dd.add_trace(go.Scatter(
+                x=dd_p.index, y=dd_p.values, mode='lines',
+                name=f'Portafoglio {fname}',
+                line=dict(width=3, color=fcolor),
+                hoverlabel=dict(bgcolor='white', bordercolor=fcolor,
+                                font=dict(color='black', size=11)),
+                hovertemplate=f'<b>Portafoglio {fname}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.2f}}%<extra></extra>',
+            ))
+
+        if not fig_dd.data:
+            return empty
+        fig_dd.update_layout(
+            title=dict(text='Drawdown (%)', font=dict(size=13, color='#1a3a6b'), x=0.02),
+            xaxis=dict(gridcolor='#e8eef8', zeroline=False,
+                       tickformat='%Y', dtick='M12', tickangle=0, tickfont=dict(size=10)),
+            yaxis=dict(title='Drawdown (%)', gridcolor='#e8eef8',
+                       zeroline=True, zerolinecolor='#aaa'),
+            paper_bgcolor='white', plot_bgcolor='#f8faff',
+            font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
+            legend=dict(orientation='v', yanchor='top', y=1, xanchor='left', x=1.01,
+                        font=dict(size=10)),
+            margin=dict(l=50, r=150, t=40, b=50),
+            hovermode='closest',
+        )
+        return fig_dd
+    except Exception:
+        return empty
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Navbar
 # ─────────────────────────────────────────────────────────────────────────────
@@ -648,19 +736,19 @@ app.layout = html.Div([
         html.Div([
             html.Div([
                 html.Span(id='fe-last-updated',
-                          style={'fontSize':'10px','color':'#6b7a99','fontStyle':'italic',
+                          style={'fontSize':FONT['sm'],'color':'#6b7a99','fontStyle':'italic',
                                  'alignSelf':'center','whiteSpace':'nowrap'}),
                 html.Div([
-                    html.Div('da:',style={'fontSize':'10px','marginRight':'4px'}),
+                    html.Div('da:',style={'fontSize':FONT['sm'],'marginRight':'4px'}),
                     dcc.DatePickerSingle(id='fe-date-start',
                         date=(pd.Timestamp.today()-pd.DateOffset(years=10)).strftime('%Y-%m-%d'),
                         display_format='DD/MM/YYYY',
-                        style={'fontSize':'10px'}),
-                    html.Div('a:',style={'fontSize':'10px','margin':'0 4px'}),
+                        style={'fontSize':FONT['sm']}),
+                    html.Div('a:',style={'fontSize':FONT['sm'],'margin':'0 4px'}),
                     dcc.DatePickerSingle(id='fe-date-end',
                         date=pd.Timestamp.today().strftime('%Y-%m-%d'),
                         display_format='DD/MM/YYYY',
-                        style={'fontSize':'10px'}),
+                        style={'fontSize':FONT['sm']}),
                 ], style={'display':'flex','alignItems':'center'}),
                 html.Button('📋 Template', id='fe-btn-template', n_clicks=0,
                             title='Scarica il template Excel per i tuoi titoli',
@@ -680,7 +768,7 @@ app.layout = html.Div([
                                    'cursor':'pointer','background':'#f0f4fb',
                                    'border':'1px solid #c0d0e8','color':'#1a3a5c'}),
                 html.Div(id='fe-upload-status',
-                         style={'fontSize':'10px','color':'#555','alignSelf':'center'}),
+                         style={'fontSize':FONT['sm'],'color':'#555','alignSelf':'center'}),
             ], style={'display':'flex','alignItems':'center','gap':'8px','flexWrap':'wrap'}),
         ], style={'padding':'8px 10px','background':'#f0f4fb',
                   'borderBottom':'1px solid #ccd9ee','display':'flex',
@@ -690,66 +778,66 @@ app.layout = html.Div([
         html.Div([
             html.Div([
                 html.Div('Asset',
-                         style={'width':'25%','fontWeight':'bold','fontSize':'7px',
+                         style={'width':'25%','fontWeight':'bold','fontSize':FONT['xs'],
                                 'paddingLeft':'4px','color':'#1a3a5c'}),
                 html.Div([
-                    html.Span('📊', style={'fontSize':'9px'}),
+                    html.Span('📊', style={'fontSize':FONT['icon']}),
                     html.Button('☑', id='fe-selall-chart', n_clicks=0, title='Seleziona / Deseleziona tutto grafico',
-                                style={'fontSize':'9px','border':'none','background':'none','cursor':'pointer',
+                                style={'fontSize':FONT['icon'],'border':'none','background':'none','cursor':'pointer',
                                        'color':'#555','padding':'0 2px','lineHeight':'1'}),
                 ], style={'width':'7%','textAlign':'center','display':'flex','alignItems':'center',
                           'justifyContent':'center','gap':'2px','position':'relative'}),
                 html.Div([
-                    html.Span('P1', style={'fontWeight':'bold','fontSize':'8px','color':'#0066cc'}),
+                    html.Span('P1', style={'fontWeight':'bold','fontSize':FONT['xs'],'color':'#0066cc'}),
                     html.Button('☑', id='fe-selall-p1', n_clicks=0, title='Seleziona / Deseleziona tutto P1',
-                                style={'fontSize':'9px','border':'none','background':'none','cursor':'pointer',
+                                style={'fontSize':FONT['icon'],'border':'none','background':'none','cursor':'pointer',
                                        'color':'#0066cc','padding':'0 2px','lineHeight':'1'}),
                 ], style={'width':'8%','textAlign':'center','display':'flex','alignItems':'center',
                           'justifyContent':'center','gap':'2px','position':'relative'}),
                 html.Div([
-                    html.Span('P2', style={'fontWeight':'bold','fontSize':'8px','color':'#2ca02c'}),
+                    html.Span('P2', style={'fontWeight':'bold','fontSize':FONT['xs'],'color':'#2ca02c'}),
                     html.Button('☑', id='fe-selall-p2', n_clicks=0, title='Seleziona / Deseleziona tutto P2',
-                                style={'fontSize':'9px','border':'none','background':'none','cursor':'pointer',
+                                style={'fontSize':FONT['icon'],'border':'none','background':'none','cursor':'pointer',
                                        'color':'#2ca02c','padding':'0 2px','lineHeight':'1'}),
                 ], style={'width':'8%','textAlign':'center','display':'flex','alignItems':'center',
                           'justifyContent':'center','gap':'2px','position':'relative'}),
                 html.Div([
-                    html.Span('P3', style={'fontWeight':'bold','fontSize':'8px','color':'#e6550d'}),
+                    html.Span('P3', style={'fontWeight':'bold','fontSize':FONT['xs'],'color':'#e6550d'}),
                     html.Button('☑', id='fe-selall-p3', n_clicks=0, title='Seleziona / Deseleziona tutto P3',
-                                style={'fontSize':'9px','border':'none','background':'none','cursor':'pointer',
+                                style={'fontSize':FONT['icon'],'border':'none','background':'none','cursor':'pointer',
                                        'color':'#e6550d','padding':'0 2px','lineHeight':'1'}),
                 ], style={'width':'8%','textAlign':'center','display':'flex','alignItems':'center',
                           'justifyContent':'center','gap':'2px','position':'relative'}),
                 html.Div('F1 %', **{'data-tooltip':'Peso Max-Sharpe Frontiera 1'},
                          style={'width':'15%','textAlign':'center','fontWeight':'bold',
-                                'fontSize':'8px','color':'#0066cc','position':'relative','cursor':'default'}),
+                                'fontSize':FONT['xs'],'color':'#0066cc','position':'relative','cursor':'default'}),
                 html.Div('F2 %', **{'data-tooltip':'Peso Max-Sharpe Frontiera 2'},
                          style={'width':'15%','textAlign':'center','fontWeight':'bold',
-                                'fontSize':'8px','color':'#2ca02c','position':'relative','cursor':'default'}),
+                                'fontSize':FONT['xs'],'color':'#2ca02c','position':'relative','cursor':'default'}),
                 html.Div('F3 %', **{'data-tooltip':'Peso Max-Sharpe Frontiera 3'},
                          style={'width':'14%','textAlign':'center','fontWeight':'bold',
-                                'fontSize':'8px','color':'#e6550d','position':'relative','cursor':'default'}),
+                                'fontSize':FONT['xs'],'color':'#e6550d','position':'relative','cursor':'default'}),
             ], style={'width':'35%','display':'flex','alignItems':'center','minHeight':'28px'}),
             html.Div([
                 html.Div([
-                    html.Label('N. Port:', style={'fontSize':'10px','marginRight':'4px'}),
+                    html.Label('N. Port:', style={'fontSize':FONT['sm'],'marginRight':'4px'}),
                     dcc.Input(id='fe-n-portfolios', type='number', value=15, min=5, max=100,
-                              style={'width':'50px','fontSize':'10px'}),
+                              style={'width':'50px','fontSize':FONT['sm']}),
                 ], style={'display':'flex','alignItems':'center','marginRight':'8px'}),
                 html.Div([
-                    html.Label('Min %:', style={'fontSize':'10px','marginRight':'4px'}),
+                    html.Label('Min %:', style={'fontSize':FONT['sm'],'marginRight':'4px'}),
                     dcc.Input(id='fe-min-weight', type='number', value=0, min=0, max=100,
-                              style={'width':'45px','fontSize':'10px'}),
+                              style={'width':'45px','fontSize':FONT['sm']}),
                 ], style={'display':'flex','alignItems':'center','marginRight':'8px'}),
                 html.Div([
-                    html.Label('Max %:', style={'fontSize':'10px','marginRight':'4px'}),
+                    html.Label('Max %:', style={'fontSize':FONT['sm'],'marginRight':'4px'}),
                     dcc.Input(id='fe-max-weight', type='number', value=100, min=0, max=100,
-                              style={'width':'45px','fontSize':'10px'}),
+                              style={'width':'45px','fontSize':FONT['sm']}),
                 ], style={'display':'flex','alignItems':'center','marginRight':'8px'}),
                 html.Div([
-                    html.Label('Risk Free %:', style={'fontSize':'10px','marginRight':'4px'}),
+                    html.Label('Risk Free %:', style={'fontSize':FONT['sm'],'marginRight':'4px'}),
                     dcc.Input(id='fe-rf', type='number', value=2.0, min=0, max=20, step=0.1,
-                              style={'width':'50px','fontSize':'10px'}),
+                              style={'width':'50px','fontSize':FONT['sm']}),
                 ], style={'display':'flex','alignItems':'center','marginRight':'8px'}),
                 dcc.RadioItems(id='fe-risk-measure',
                     options=[
@@ -761,11 +849,11 @@ app.layout = html.Div([
                     ],
                     value='standard', inline=True,
                     inputStyle={'marginRight':'3px','cursor':'pointer'},
-                    labelStyle={'marginRight':'8px','fontSize':'10px','cursor':'pointer'}),
+                    labelStyle={'marginRight':'8px','fontSize':FONT['sm'],'cursor':'pointer'}),
                 html.Div([
-                    html.Label('Finestra gg:', style={'fontSize':'10px','marginRight':'4px'}),
+                    html.Label('Finestra gg:', style={'fontSize':FONT['sm'],'marginRight':'4px'}),
                     dcc.Input(id='fe-arima-window', type='number', value=250, min=20, max=1260,
-                              style={'width':'55px','fontSize':'10px'}),
+                              style={'width':'55px','fontSize':FONT['sm']}),
                 ], id='fe-arima-window-div',
                    style={'display':'none','alignItems':'center','marginRight':'8px'}),
                 html.Div(id='fe-arima-cache-status',
@@ -786,7 +874,7 @@ app.layout = html.Div([
         html.Div([
             # Sinistra: asset
             html.Div([
-                html.Div(id='fe-asset-count', style={'fontSize':'10px','color':'#555',
+                html.Div(id='fe-asset-count', style={'fontSize':FONT['sm'],'color':'#555',
                                                       'padding':'3px 5px'}),
                 html.Div(id='fe-grid', children=[
                     html.Div('Carica i dati e clicca Calcola Frontiera',
@@ -844,6 +932,9 @@ app.layout = html.Div([
                 ),
                 dcc.Graph(id='fe-perf-chart',
                           style={'height':'420px','marginTop':'6px'},
+                          config={'displayModeBar':True}),
+                dcc.Graph(id='fe-drawdown-chart',
+                          style={'height':'300px','marginTop':'6px'},
                           config={'displayModeBar':True}),
                 html.Div(id='fe-stats-panel',
                          style={'padding':'4px 10px','fontSize':'11px','color':'#1a3a5c'}),
@@ -1076,9 +1167,10 @@ def toggle_hint(loaded, calc):
     return hidden
 
 
-# ── Aggiorna performance chart al click di 📊, cambio date o cambio pesi ──────
+# ── Aggiorna performance e drawdown chart al click di 📊, cambio date o cambio pesi ──────
 @app.callback(
-    Output('fe-perf-chart',  'figure', allow_duplicate=True),
+    Output('fe-perf-chart',      'figure', allow_duplicate=True),
+    Output('fe-drawdown-chart',  'figure', allow_duplicate=True),
     Input({'type':'fe-chart','index':ALL},      'value'),
     Input({'type':'fe-chart-port','index':ALL}, 'value'),
     Input('fe-date-start',   'date'),
@@ -1101,7 +1193,10 @@ def update_perf_chart(chart_vals, port_chart_vals, date_start, date_end, f1j, f2
                 fw[fname] = json.loads(jdata)
             except Exception:
                 pass
-    return _build_perf_chart(prices_data, chart_assets, fw, show_frontiers, date_start, date_end)
+    return (
+        _build_perf_chart(prices_data, chart_assets, fw, show_frontiers, date_start, date_end),
+        _build_drawdown_chart(prices_data, chart_assets, fw, show_frontiers, date_start, date_end),
+    )
 
 
 # ── Calcola le 3 frontiere e ricostruisce la griglia ─────────────────────────
@@ -1110,6 +1205,7 @@ def update_perf_chart(chart_vals, port_chart_vals, date_start, date_end, f1j, f2
     Output('fe-asset-count',     'children'),
     Output('fe-frontier-chart',  'figure'),
     Output('fe-perf-chart',      'figure'),
+    Output('fe-drawdown-chart',  'figure'),
     Output('fe-stats-panel',     'children'),
     Output('fe-f1-weights',        'data'),
     Output('fe-f2-weights',        'data'),
@@ -1154,11 +1250,11 @@ def calc_and_render(n, stock_data, prices_data,
                    style={'color':'#888','fontStyle':'italic','fontSize':'11px','padding':'12px 8px'})
 
     if not n or not stock_data:
-        return [_PH], '', _EMPTY_FIG, _EMPTY_FIG, '', None, None, None, None, None, True, None, {'display':'none'}
+        return [_PH], '', _EMPTY_FIG, _EMPTY_FIG, _EMPTY_FIG, '', None, None, None, None, None, True, None, {'display':'none'}
 
     returns_df = _get_returns(stock_data)
     if returns_df is None or returns_df.empty:
-        return [_PH], '', _EMPTY_FIG, _EMPTY_FIG, '', None, None, None, None, None, True, None, {'display':'none'}
+        return [_PH], '', _EMPTY_FIG, _EMPTY_FIG, _EMPTY_FIG, '', None, None, None, None, None, True, None, {'display':'none'}
 
     if date_start: returns_df = returns_df.loc[date_start:]
     if date_end:   returns_df = returns_df.loc[:date_end]
@@ -1193,7 +1289,7 @@ def calc_and_render(n, stock_data, prices_data,
     }
 
     if not p1_sel and not p2_sel and not p3_sel:
-        return (no_update, no_update, _EMPTY_FIG, _EMPTY_FIG, '',
+        return (no_update, no_update, _EMPTY_FIG, _EMPTY_FIG, _EMPTY_FIG, '',
                 None, None, None, None, None, True, None, {'display':'none'})
 
     wmin_f = (wmin or 0) / 100
@@ -1371,9 +1467,10 @@ def calc_and_render(n, stock_data, prices_data,
         margin=dict(l=50, r=30, t=80, b=40), hovermode='closest',
     )
 
-    # ── Performance chart ────────────────────────────────────────────────────
+    # ── Performance e Drawdown chart ─────────────────────────────────────────
     show_frontiers = {fname: (fname in port_chart_checked) for fname in frontier_wgts}
-    fig2 = _build_perf_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
+    fig2   = _build_perf_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
+    fig_dd = _build_drawdown_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
 
     # ── Ricostruisci griglia con F1/F2/F3 weights ────────────────────────────
     p1_set    = set(p1_sel)
@@ -1519,7 +1616,7 @@ def calc_and_render(n, stock_data, prices_data,
     if arima_label:
         stats.append(html.Span(
             f'Metodo: ARIMA+GARCH finestra {arima_window or 250}gg',
-            style={'fontSize':'10px','color':'#6b7a99','fontStyle':'italic'}))
+            style={'fontSize':FONT['sm'],'color':'#6b7a99','fontStyle':'italic'}))
 
     f1j = json.dumps(frontier_wgts.get('F1', {}))
     f2j = json.dumps(frontier_wgts.get('F2', {}))
@@ -1538,7 +1635,7 @@ def calc_and_render(n, stock_data, prices_data,
         }
     rawdata_json = json.dumps(raw_data)
 
-    return (rows, count, fig, fig2,
+    return (rows, count, fig, fig2, fig_dd,
             html.Div(stats, style={'display':'flex','flexWrap':'wrap','gap':'4px'}),
             f1j, f2j, f3j, rawdata_json, json.dumps(sel_pt),
             True, None, {'display':'none'})
@@ -1658,6 +1755,7 @@ def arima_poll(n_int, cur_req_id):
     Output('fe-asset-count',        'children',   allow_duplicate=True),
     Output('fe-frontier-chart',     'figure',     allow_duplicate=True),
     Output('fe-perf-chart',         'figure',     allow_duplicate=True),
+    Output('fe-drawdown-chart',     'figure',     allow_duplicate=True),
     Output('fe-stats-panel',        'children',   allow_duplicate=True),
     Output('fe-f1-weights',         'data',       allow_duplicate=True),
     Output('fe-f2-weights',         'data',       allow_duplicate=True),
@@ -1888,7 +1986,8 @@ def on_arima_done(req_id, stock_data, prices_data,
     )
 
     show_frontiers = {fname: (fname in port_chart_checked) for fname in frontier_wgts}
-    fig2 = _build_perf_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
+    fig2   = _build_perf_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
+    fig_dd = _build_drawdown_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
 
     # Build grid rows
     chart_set = set(chart_assets)
@@ -2002,7 +2101,7 @@ def on_arima_done(req_id, stock_data, prices_data,
                 f"{ms['Return']*100:.1f}% rend · {ms['Volatility']*100:.1f}% rischio · Sharpe {ms['Sharpe']:.2f}   ",
             ], style={'marginRight':'8px','fontSize':'11px'}))
     stats.append(html.Span(arima_label.strip(' []'),
-                           style={'fontSize':'10px','color':'#6b7a99','fontStyle':'italic'}))
+                           style={'fontSize':FONT['sm'],'color':'#6b7a99','fontStyle':'italic'}))
 
     f1j = json.dumps(frontier_wgts.get('F1', {}))
     f2j = json.dumps(frontier_wgts.get('F2', {}))
@@ -2021,7 +2120,7 @@ def on_arima_done(req_id, stock_data, prices_data,
     _ARIMA_CACHE_INFO['available'] = True
     _ARIMA_CACHE_INFO['ts'] = datetime.now().strftime('%d/%m/%Y %H:%M')
 
-    return (rows, count, fig, fig2,
+    return (rows, count, fig, fig2, fig_dd,
             html.Div(stats, style={'display':'flex','flexWrap':'wrap','gap':'4px'}),
             f1j, f2j, f3j, json.dumps(raw_data), json.dumps(sel_pt),
             {'display':'none'})
