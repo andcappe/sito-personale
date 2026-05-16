@@ -842,20 +842,17 @@ def get_portfolio_analysis_tab(options_tickers):
                     }),
                     *[html.Div([
                         html.Span(lbl, style={
-                            'fontWeight': 'bold', 'fontSize': '6px', 'color': col,
+                            'fontWeight': 'bold', 'fontSize': '5px', 'color': col,
                             'lineHeight': '1', 'whiteSpace': 'nowrap',
                         }),
                         html.Button('☑', id=btn_id, n_clicks=0, title=tip,
-                            style={'fontSize': '6px', 'border': 'none', 'background': 'none',
+                            style={'fontSize': '5px', 'border': 'none', 'background': 'none',
                                    'cursor': 'pointer', 'color': col,
-                                   'padding': '0', 'margin': '0', 'lineHeight': '1',
-                                   'display': 'inline', 'minHeight': '0', 'height': 'auto',
-                                   'appearance': 'none', '-webkit-appearance': 'none'}),
+                                   'padding': '0', 'margin': '0', 'lineHeight': '1'}),
                     ], style={
-                        'width': w, 'height': '14px',
-                        'display': 'flex', 'flexDirection': 'row',
+                        'width': w, 'display': 'flex', 'flexDirection': 'column',
                         'alignItems': 'center', 'justifyContent': 'center',
-                        'overflow': 'hidden', 'gap': '1px',
+                        'overflow': 'hidden', 'gap': '0px',
                     }) for w, lbl, col, tip, btn_id in [
                         ('3%',  'CH',   '#1a3a5c', 'Deseleziona grafici',     'deselect-all-tickers'),
                         ('8%',  'P1',   '#e6194b', 'Azzera pesi P1',          'reset-p1-tab1'),
@@ -871,7 +868,7 @@ def get_portfolio_analysis_tab(options_tickers):
                     ]],
                 ], style={
                     'width': '35%', 'display': 'flex', 'alignItems': 'center',
-                    'height': '14px', 'padding': '0', 'overflow': 'hidden',
+                    'minHeight': '18px', 'padding': '0', 'overflow': 'hidden',
                 }),
                 # Dx 65%: range temporale — allineato a destra
                 html.Div(
