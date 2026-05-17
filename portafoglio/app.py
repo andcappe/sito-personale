@@ -307,6 +307,41 @@ def _build_ticker_list():
     return list(df[cols[0]]), list(df[cols[1]]), list(df[cols[2]])
 
 
+def _clean_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pulisce i prezzi scaricati da Yahoo Finance:
+    1. Punti isolati fuori scala: se |rendimento| > 50% e viene corretto il giorno dopo
+       → sostituisce il punto anomalo con interpolazione lineare.
+    2. Serie intera fuori scala: se la mediana di un asset è < 1% della mediana
+       degli altri asset → moltiplica ×100 (es. prezzi in pence invece di sterline).
+    """
+    df = df.copy()
+
+    # ── Passo 1: corregge punti isolati ─────────────────────────────────────
+    for col in df.columns:
+        s = df[col].copy()
+        ret = s.pct_change()
+        for i in range(1, len(s) - 1):
+            if abs(ret.iloc[i]) > 0.50:
+                # controlla se il giorno successivo corregge (inversione)
+                ret_next = (s.iloc[i + 1] - s.iloc[i - 1]) / s.iloc[i - 1] if s.iloc[i - 1] != 0 else 0
+                if abs(ret_next) < 0.50:
+                    # è un punto isolato → interpola
+                    s.iloc[i] = (s.iloc[i - 1] + s.iloc[i + 1]) / 2
+        df[col] = s
+
+    # ── Passo 2: corregge serie intera fuori scala ───────────────────────────
+    if df.shape[1] > 1:
+        medians = df.median()
+        global_median = medians.median()
+        for col in df.columns:
+            if global_median > 0 and medians[col] < global_median * 0.01:
+                df[col] = df[col] * 100
+                print(f"  ⚠ {col}: prezzi ×100 (scala corretta, mediana era {medians[col]:.4f})")
+
+    return df
+
+
 def _do_download(tickers, descrizione, valuta, start_date):
     """Scarica da Yahoo per TARBIUTH: salva su market_data.pkl e aggiorna _DL_BUFFER."""
     global _DL_STATE, _DL_BUFFER
@@ -391,6 +426,7 @@ def _do_download(tickers, descrizione, valuta, start_date):
     original_prices = pd.DataFrame(all_prices)
     original_prices.index = pd.to_datetime(original_prices.index)
     original_prices = original_prices.ffill()
+    original_prices = _clean_prices(original_prices)
     close_returns   = original_prices.pct_change(fill_method=None)
     ticker_map      = {descrizione[i]: tickers[i] for i in range(len(tickers))}
     saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
@@ -495,6 +531,7 @@ def _do_download_client(tickers, descrizione, valuta, start_date):
     original_prices = pd.DataFrame(all_prices)
     original_prices.index = pd.to_datetime(original_prices.index)
     original_prices = original_prices.ffill()
+    original_prices = _clean_prices(original_prices)
     close_returns   = original_prices.pct_change(fill_method=None)
     ticker_map      = {descrizione[i]: tickers[i] for i in range(len(tickers))}
     saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
@@ -1045,6 +1082,16 @@ app.layout = html.Div([
                            'background': '#f0f4fb', 'border': '1px solid #c0d0e8',
                            'color': '#1a3a5c', 'margin-right': '8px'}),
         html.Div(id='download-status', style={'font-size': '11px', 'margin-right': '8px'}),
+        html.Button('📂 Importa Frontiera', id='import-frontier-btn', n_clicks=0,
+                    title='Importa i portafogli F1→P1, F2→P2, F3→P3 calcolati nella Frontiera Efficiente',
+                    style={'font-size': '11px', 'padding': '5px 12px',
+                           'border-radius': '4px', 'cursor': 'pointer',
+                           'background': '#eafaf1', 'border': '1px solid #1a7a4a',
+                           'color': '#1a7a4a', 'font-weight': 'bold', 'margin-right': '8px'}),
+        html.Div(id='import-frontier-msg', style={'font-size': '11px', 'color': '#1a7a4a',
+                                                   'font-weight': '600', 'margin-right': '8px'}),
+        dcc.ConfirmDialog(id='import-frontier-confirm',
+                          message='Sei sicuro di voler sovrascrivere i pesi di P1, P2, P3 con quelli della Frontiera Efficiente?'),
         html.Button(id='delete-column-button', n_clicks=0, style={'display': 'none'}),
         html.Div(id='upload-status', style={'display': 'none'}),
     ], style={'display': 'flex', 'align-items': 'center',
@@ -1241,6 +1288,7 @@ def update_output(contents, filename):
                 df_prices = df.set_index(col_names[0])
                 df_prices.index = pd.to_datetime(df_prices.index)
                 df_prices = df_prices.select_dtypes(include='number').ffill().dropna(how='all')
+                df_prices = _clean_prices(df_prices)
                 close_returns = df_prices.pct_change(fill_method=None)
                 options    = [{'label': c, 'value': c} for c in df_prices.columns]
                 ticker_map = {c: c for c in df_prices.columns}
@@ -1551,6 +1599,76 @@ def salva_dati(n_clicks, original_prices_data):
         )
     except Exception as e:
         return no_update, html.Div(f'Errore: {e}', style={'color': 'red'}), _MODAL_HIDDEN
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: importa portafogli dalla Frontiera Efficiente
+# ─────────────────────────────────────────────────────────────────────────────
+_FE_PORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'sessions', 'fe_portfolio.json')
+
+@app.callback(
+    Output('import-frontier-confirm', 'displayed'),
+    Output('import-frontier-msg', 'children'),
+    Input('import-frontier-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def ask_import_frontier(n):
+    if not n:
+        raise PreventUpdate
+    if not os.path.exists(_FE_PORT_FILE):
+        return False, '⚠ Nessun portafoglio salvato dalla Frontiera'
+    try:
+        with open(_FE_PORT_FILE) as f:
+            data = json.load(f)
+        saved_at = data.get('saved_at', '')
+        ports = list(data.get('portfolios', {}).keys())
+        return True, f'Trovato: {", ".join(ports)} del {saved_at}'
+    except Exception as e:
+        return False, f'⚠ Errore lettura: {e}'
+
+
+@app.callback(
+    Output('weights-store-P1', 'data', allow_duplicate=True),
+    Output('weights-store-P2', 'data', allow_duplicate=True),
+    Output('weights-store-P3', 'data', allow_duplicate=True),
+    Output({'type': 'weight-input', 'index': ALL}, 'value', allow_duplicate=True),
+    Output('import-frontier-msg', 'children', allow_duplicate=True),
+    Input('import-frontier-confirm', 'submit_n_clicks'),
+    State({'type': 'weight-input', 'index': ALL}, 'id'),
+    State({'type': 'weight-input', 'index': ALL}, 'value'),
+    prevent_initial_call=True,
+)
+def do_import_frontier(submit, all_ids, all_vals):
+    if not submit:
+        raise PreventUpdate
+    try:
+        with open(_FE_PORT_FILE) as f:
+            data = json.load(f)
+        ports = data.get('portfolios', {})
+        w1 = ports.get('F1', {})
+        w2 = ports.get('F2', {})
+        w3 = ports.get('F3', {})
+
+        new_vals = []
+        for inp_id, cur_val in zip(all_ids, all_vals):
+            idx = inp_id['index']  # es. 'P1-Az. ACWI'
+            if idx.startswith('P1-'):
+                asset = idx[3:]
+                new_vals.append(w1.get(asset, 0) if w1 else cur_val)
+            elif idx.startswith('P2-'):
+                asset = idx[3:]
+                new_vals.append(w2.get(asset, 0) if w2 else cur_val)
+            elif idx.startswith('P3-'):
+                asset = idx[3:]
+                new_vals.append(w3.get(asset, 0) if w3 else cur_val)
+            else:
+                new_vals.append(cur_val)
+
+        imported = [k for k in ['F1','F2','F3'] if k in ports]
+        return w1 or no_update, w2 or no_update, w3 or no_update, new_vals, f'✓ Importato: {", ".join(imported)}'
+    except Exception as e:
+        return no_update, no_update, no_update, all_vals, f'⚠ Errore: {e}'
 
 
 # ─────────────────────────────────────────────────────────────────────────────

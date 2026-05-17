@@ -864,6 +864,13 @@ app.layout = html.Div([
                                    'padding':'6px 14px','borderRadius':'4px','cursor':'pointer',
                                    'fontWeight':'bold','fontSize':'11px',
                                    'boxShadow':'0 2px 6px rgba(0,102,204,0.35)'}),
+                html.Button('💾 Salva in Portafoglio', id='fe-save-to-port-btn', n_clicks=0,
+                            title='Salva F1→P1, F2→P2, F3→P3 nella dashboard Analisi Portafoglio',
+                            style={'background':'#1a7a4a','color':'white','border':'none',
+                                   'padding':'6px 12px','borderRadius':'4px','cursor':'pointer',
+                                   'fontWeight':'bold','fontSize':'11px',
+                                   'boxShadow':'0 2px 6px rgba(26,122,74,0.35)'}),
+                html.Div(id='fe-save-port-msg', style={'fontSize':'11px','color':'#1a7a4a','fontWeight':'600'}),
             ], style={'width':'65%','display':'flex','alignItems':'center',
                       'flexWrap':'wrap','gap':'4px'}),
         ], style={'display':'flex','background':'#e8f0fb',
@@ -2124,6 +2131,40 @@ def on_arima_done(req_id, stock_data, prices_data,
             html.Div(stats, style={'display':'flex','flexWrap':'wrap','gap':'4px'}),
             f1j, f2j, f3j, json.dumps(raw_data), json.dumps(sel_pt),
             {'display':'none'})
+
+
+# ── Salva portafogli F1/F2/F3 per importazione in Analisi Portafoglio ────────
+_FE_PORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              '..', 'portafoglio', 'sessions', 'fe_portfolio.json')
+
+@app.callback(
+    Output('fe-save-port-msg', 'children'),
+    Input('fe-save-to-port-btn', 'n_clicks'),
+    State('fe-f1-weights', 'data'),
+    State('fe-f2-weights', 'data'),
+    State('fe-f3-weights', 'data'),
+    prevent_initial_call=True,
+)
+def save_to_portafoglio(n, f1j, f2j, f3j):
+    if not n:
+        raise PreventUpdate
+    portfolios = {}
+    for fname, jdata in [('F1', f1j), ('F2', f2j), ('F3', f3j)]:
+        if jdata:
+            try:
+                portfolios[fname] = json.loads(jdata) if isinstance(jdata, str) else jdata
+            except Exception:
+                pass
+    if not portfolios:
+        return '⚠ Calcola prima la frontiera'
+    try:
+        data = {'portfolios': portfolios, 'saved_at': datetime.now().strftime('%d/%m/%Y %H:%M')}
+        with open(_FE_PORT_FILE, 'w') as f:
+            json.dump(data, f)
+        labels = ', '.join(portfolios.keys())
+        return f'✓ Salvato ({labels}) — {data["saved_at"]}'
+    except Exception as e:
+        return f'⚠ Errore: {e}'
 
 
 # ── Select-all / deselect-all for P1, P2, P3 ────────────────────────────────
