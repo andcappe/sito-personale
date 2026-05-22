@@ -307,38 +307,34 @@ def _build_ticker_list():
     return list(df[cols[0]]), list(df[cols[1]]), list(df[cols[2]])
 
 
+
 def _clean_prices(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Pulisce i prezzi scaricati da Yahoo Finance:
-    1. Punti isolati fuori scala: se |rendimento| > 50% e viene corretto il giorno dopo
-       → sostituisce il punto anomalo con interpolazione lineare.
-    2. Serie intera fuori scala: se la mediana di un asset è < 1% della mediana
-       degli altri asset → moltiplica ×100 (es. prezzi in pence invece di sterline).
+    Corregge valori fuori scala ×100 o ÷100 (es. Yahoo Finance che alterna GBp↔GBP/EUR).
+    Per ogni asset:
+    - valori < 2% della mediana → troppo bassi (÷100) → ×100
+    - valori > 50× la mediana  → troppo alti  (×100)  → ÷100
+    Soglie molto conservative: non tocca nulla che non sia inequivocabilmente sbagliato.
     """
     df = df.copy()
-
-    # ── Passo 1: corregge punti isolati ─────────────────────────────────────
     for col in df.columns:
-        s = df[col].copy()
-        ret = s.pct_change()
-        for i in range(1, len(s) - 1):
-            if abs(ret.iloc[i]) > 0.50:
-                # controlla se il giorno successivo corregge (inversione)
-                ret_next = (s.iloc[i + 1] - s.iloc[i - 1]) / s.iloc[i - 1] if s.iloc[i - 1] != 0 else 0
-                if abs(ret_next) < 0.50:
-                    # è un punto isolato → interpola
-                    s.iloc[i] = (s.iloc[i - 1] + s.iloc[i + 1]) / 2
-        df[col] = s
-
-    # ── Passo 2: corregge serie intera fuori scala ───────────────────────────
-    if df.shape[1] > 1:
-        medians = df.median()
-        global_median = medians.median()
-        for col in df.columns:
-            if global_median > 0 and medians[col] < global_median * 0.01:
-                df[col] = df[col] * 100
-                print(f"  ⚠ {col}: prezzi ×100 (scala corretta, mediana era {medians[col]:.4f})")
-
+        s = df[col].dropna()
+        if len(s) < 10:
+            continue
+        med = s.median()
+        if med <= 0:
+            continue
+        # valori troppo bassi (÷100)
+        low_mask = (df[col] > 0) & (df[col] < med * 0.02)
+        if low_mask.any():
+            df.loc[low_mask, col] = df.loc[low_mask, col] * 100
+            print(f"  ⚠ {col}: {low_mask.sum()} valori ×100 (erano < 2% mediana)")
+        # valori troppo alti (×100) — ricalcola mediana dopo eventuale correzione
+        med2 = df[col].dropna().median()
+        high_mask = (df[col] > 0) & (df[col] > med2 * 50)
+        if high_mask.any():
+            df.loc[high_mask, col] = df.loc[high_mask, col] / 100
+            print(f"  ⚠ {col}: {high_mask.sum()} valori ÷100 (erano > 50× mediana)")
     return df
 
 
