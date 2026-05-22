@@ -105,6 +105,24 @@ _PROFILO_HTML = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__f
 _FOTO_PNG = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                           'assets', 'foto.png'))
 
+# Cartella condivisa Files/ (un livello sopra rispetto a portafoglio/)
+_FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
+
+def _list_files():
+    """Restituisce lista di opzioni dcc.Dropdown dai .xlsx in Files/."""
+    if not _FILES_DIR.exists():
+        return [{'label': 'TARBIUTH', 'value': 'TARBIUTH.xlsx'}]
+    files = sorted(_FILES_DIR.glob('*.xlsx'), key=lambda f: f.name.lower())
+    return [{'label': f.stem, 'value': f.name} for f in files] or \
+           [{'label': 'TARBIUTH', 'value': 'TARBIUTH.xlsx'}]
+
+def _xlsx_path(filename='TARBIUTH.xlsx'):
+    """Percorso assoluto del file xlsx nella cartella Files/."""
+    fp = _FILES_DIR / filename
+    if fp.exists():
+        return str(fp)
+    return _XLSX  # fallback al file locale
+
 # Rotta Flask per servire la pagina profilo
 @app.server.route('/health')
 def health_check():
@@ -293,16 +311,18 @@ def _get_df(json_str):
 DOWNLOAD_BATCH_SIZE = 10
 
 _DL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
-_DL_BUFFER: dict = {}   # dati TARBIUTH — salvati su disco, permanenti
+_DL_BUFFER: dict = {}   # dati file attivo — salvati su disco, permanenti
 _DL_LOCK   = threading.Lock()
 
 _CL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
-_CL_BUFFER: dict = {}   # dati cliente — solo in memoria, non toccano TARBIUTH
+_CL_BUFFER: dict = {}   # dati cliente — solo in memoria
 _CL_LOCK   = threading.Lock()
 
+_active_file_store: dict = {'filename': 'TARBIUTH.xlsx'}  # file attivo corrente
 
-def _build_ticker_list():
-    df   = pd.read_excel(_XLSX)
+
+def _build_ticker_list(filename='TARBIUTH.xlsx'):
+    df   = pd.read_excel(_xlsx_path(filename))
     cols = df.columns.tolist()
     return list(df[cols[0]]), list(df[cols[1]]), list(df[cols[2]])
 
@@ -338,8 +358,8 @@ def _clean_prices(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _do_download(tickers, descrizione, valuta, start_date):
-    """Scarica da Yahoo per TARBIUTH: salva su market_data.pkl e aggiorna _DL_BUFFER."""
+def _do_download(tickers, descrizione, valuta, start_date, cache_file=None):
+    """Scarica da Yahoo Finance e salva nella cache; cache_file=None usa market_data.pkl."""
     global _DL_STATE, _DL_BUFFER
     total = len(tickers)
     with _DL_LOCK:
@@ -434,10 +454,11 @@ def _do_download(tickers, descrizione, valuta, start_date):
         'original_prices': original_prices,
         'close_returns':   close_returns,
     }
+    target_pkl = cache_file or _MARKET_DATA_FILE
     try:
-        with open(_MARKET_DATA_FILE, 'wb') as f:
+        with open(target_pkl, 'wb') as f:
             pickle.dump(data, f)
-        print(f"✓ market_data.pkl salvato — {len(all_prices)} asset — {saved_at}")
+        print(f"✓ {target_pkl.name} salvato — {len(all_prices)} asset — {saved_at}")
     except Exception as e:
         print(f"⚠ Salvataggio su disco fallito: {e}")
 
@@ -548,17 +569,17 @@ def _do_download_client(tickers, descrizione, valuta, start_date):
 # ─────────────────────────────────────────────────────────────────────────────
 # Carica solo nomi (avvio rapido)
 # ─────────────────────────────────────────────────────────────────────────────
-def load_ticker_names_only():
+def load_ticker_names_only(filename='TARBIUTH.xlsx'):
     try:
-        df        = pd.read_excel(_XLSX)
+        df        = pd.read_excel(_xlsx_path(filename))
         col_names = df.columns.tolist()
-        if len(col_names) < 3:
+        if len(col_names) < 2:
             return [], {}
         tickers     = list(df[col_names[0]])
-        descrizione = list(df[col_names[1]])
+        descrizione = list(df[col_names[1]]) if len(col_names) > 1 else [str(t) for t in tickers]
         ticker_map  = {descrizione[i]: tickers[i] for i in range(len(tickers))}
         options     = [{'label': d, 'value': d} for d in descrizione]
-        print(f"✓ Nomi caricati: {len(options)} asset")
+        print(f"✓ Nomi caricati: {len(options)} asset da {filename}")
         return options, ticker_map
     except Exception as e:
         print(f"Errore lettura nomi: {e}")
@@ -573,6 +594,13 @@ SESSIONS_DIR.mkdir(exist_ok=True)
 _INDEX_FILE          = SESSIONS_DIR / 'index.json'
 _MARKET_DATA_FILE    = SESSIONS_DIR / 'market_data.pkl'
 _ACTIVE_TICKERS_FILE = SESSIONS_DIR / 'active_tickers.xlsx'
+
+def _file_cache_path(filename='TARBIUTH.xlsx'):
+    """Percorso del pkl di cache per un dato file (TARBIUTH usa market_data.pkl per compat)."""
+    stem = Path(filename).stem
+    if stem == 'TARBIUTH':
+        return _MARKET_DATA_FILE
+    return SESSIONS_DIR / f'market_data_{stem}.pkl'
 
 CLIENT_SESSION_STORES = [
     "weights-store-P1",
@@ -1053,7 +1081,16 @@ app.layout = html.Div([
         ], style={'display': 'none'}),
         # 2. Sessioni
         get_session_panel_layout(),
-        # 3. Scarica template ticker
+        # 3. Selettore file dataset
+        dcc.Dropdown(
+            id='file-selector',
+            options=_list_files(),
+            value='TARBIUTH.xlsx',
+            clearable=False,
+            style={'width': '160px', 'fontSize': '11px', 'display': 'inline-block'},
+            optionHeight=28,
+        ),
+        # 4. Scarica template ticker
         html.Button('📋 Template', id='btn-download-template', n_clicks=0,
                     title='Scarica il file Excel template da compilare con i tuoi titoli',
                     style={'font-size': '11px', 'padding': '5px 12px',
@@ -1096,6 +1133,7 @@ app.layout = html.Div([
 
     # ── Stores ───────────────────────────────────────────────────────────────
     dcc.Interval(id='refresh-poll-interval', interval=1000, n_intervals=0, disabled=True),
+    dcc.Store(id='active-xlsx-file',        data='TARBIUTH.xlsx'),
     dcc.Store(id='asset-checklist',         data=[]),
     dcc.Store(id='stock-data',              data=None),
     dcc.Store(id='original-prices-data',    data=None),
@@ -1380,6 +1418,73 @@ def render_tab1(options_tickers):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Callback: cambio file dataset
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('active-xlsx-file',          'data'),
+    Output('stock-data',                'data',  allow_duplicate=True),
+    Output('original-prices-data',      'data',  allow_duplicate=True),
+    Output('asset-checklist',           'data',  allow_duplicate=True),
+    Output('ticker-map-store',          'data',  allow_duplicate=True),
+    Output('data-last-updated',         'children', allow_duplicate=True),
+    Output('upload-status',             'children', allow_duplicate=True),
+    Input('file-selector',              'value'),
+    prevent_initial_call=True,
+)
+def on_file_selected(filename):
+    if not filename:
+        raise PreventUpdate
+    _active_file_store['filename'] = filename
+    with _CL_LOCK:
+        _CL_BUFFER.clear()
+        _CL_STATE['status'] = 'idle'
+
+    cache = _file_cache_path(filename)
+    if cache.exists():
+        try:
+            with open(cache, 'rb') as f:
+                data = pickle.load(f)
+            cr       = data.get('close_returns')
+            op       = data.get('original_prices')
+            tm       = data.get('ticker_map', {})
+            saved_at = data.get('saved_at', '')
+            if cr is not None:
+                with _DL_LOCK:
+                    _DL_BUFFER.clear()
+                    _DL_BUFFER.update(data)
+                options = [{'label': c, 'value': c} for c in cr.columns]
+                return (filename,
+                        cr.to_json(date_format='iso', orient='split'),
+                        op.to_json(date_format='iso', orient='split'),
+                        options, tm,
+                        f'Aggiornati: {saved_at}',
+                        html.Div(f'✓ {len(options)} asset — {Path(filename).stem}',
+                                 style={'color': '#007755', 'font-size': '11px'}))
+        except Exception:
+            pass
+
+    # Cache non trovata → scarica da Yahoo Finance
+    try:
+        tickers, descr, valuta = _build_ticker_list(filename)
+    except Exception as e:
+        raise PreventUpdate
+    options  = [{'label': d, 'value': d} for d in descr]
+    tm       = {descr[i]: tickers[i] for i in range(len(tickers))}
+    start    = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+    with _DL_LOCK:
+        _DL_BUFFER.clear()
+        _DL_STATE.update({'status': 'running', 'current': 0, 'total': len(tickers), 'errors': []})
+    threading.Thread(target=_do_download,
+                     args=(tickers, descr, valuta, start),
+                     kwargs={'cache_file': cache}, daemon=True).start()
+    print(f"▶ Download {filename}: {len(tickers)} ticker")
+    return (filename, None, None, options, tm,
+            f'Download {Path(filename).stem}…',
+            html.Div(f'⏳ Download {Path(filename).stem} — {len(tickers)} asset…',
+                     style={'color': '#e67e22', 'font-size': '11px'}))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Callback: avvia aggiornamento manuale
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
@@ -1414,8 +1519,8 @@ def start_refresh(n_clicks, start_date_picker):
     ).strftime('%Y-%m-%d')
 
     try:
-        # Aggiorna sempre con TARBIUTH (ripristina il dataset di default)
-        tickers, descr, valuta = _build_ticker_list()
+        active_file = _active_file_store.get('filename', 'TARBIUTH.xlsx')
+        tickers, descr, valuta = _build_ticker_list(active_file)
     except Exception as e:
         err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
         return (no_update, no_update, False, _MODAL_SHOWN, err_fill,
@@ -1424,11 +1529,13 @@ def start_refresh(n_clicks, start_date_picker):
     with _CL_LOCK:
         _CL_BUFFER.clear()
         _CL_STATE['status'] = 'idle'
+    cache = _file_cache_path(active_file)
     threading.Thread(target=_do_download,
-                     args=(tickers, descr, valuta, start_date), daemon=True).start()
-    print(f"▶ Aggiornamento TARBIUTH: {len(tickers)} ticker da {start_date}")
+                     args=(tickers, descr, valuta, start_date),
+                     kwargs={'cache_file': cache}, daemon=True).start()
+    print(f"▶ Aggiornamento {active_file}: {len(tickers)} ticker da {start_date}")
     return (False, 0, True, _MODAL_SHOWN, _FILL_LOADING,
-            f'Ripristino TARBIUTH — {len(tickers)} asset…', '', _STATUS_GREY)
+            f'Aggiornamento {Path(active_file).stem} — {len(tickers)} asset…', '', _STATUS_GREY)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

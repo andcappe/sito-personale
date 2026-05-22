@@ -471,6 +471,26 @@ _PORT_PKL = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     '..', 'portafoglio', 'sessions', 'market_data.pkl',
 ))
+_PORT_SESSIONS = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', 'portafoglio', 'sessions',
+))
+
+_FE_FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
+
+def _fe_list_files():
+    if not _FE_FILES_DIR.exists():
+        return [{'label': 'TARBIUTH', 'value': 'TARBIUTH.xlsx'}]
+    files = sorted(_FE_FILES_DIR.glob('*.xlsx'), key=lambda f: f.name.lower())
+    return [{'label': f.stem, 'value': f.name} for f in files] or \
+           [{'label': 'TARBIUTH', 'value': 'TARBIUTH.xlsx'}]
+
+def _fe_port_cache_path(filename='TARBIUTH.xlsx'):
+    """Percorso del pkl di portafoglio corrispondente a filename."""
+    stem = Path(filename).stem
+    if stem == 'TARBIUTH':
+        return _PORT_PKL
+    return os.path.join(_PORT_SESSIONS, f'market_data_{stem}.pkl')
 
 _FE_USER_PKL = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'sessions', 'user_data.pkl',
@@ -928,6 +948,14 @@ app.layout = html.Div([
                         display_format='DD/MM/YYYY',
                         style={'fontSize':FONT['sm']}),
                 ], style={'display':'flex','alignItems':'center'}),
+                dcc.Dropdown(
+                    id='fe-file-selector',
+                    options=_fe_list_files(),
+                    value='TARBIUTH.xlsx',
+                    clearable=False,
+                    style={'width':'160px','fontSize':'11px','display':'inline-block'},
+                    optionHeight=28,
+                ),
                 html.Button('📋 Template', id='fe-btn-template', n_clicks=0,
                             title='Scarica il template Excel per i tuoi titoli',
                             style={'fontSize':'11px','padding':'5px 12px','borderRadius':'4px',
@@ -1155,6 +1183,7 @@ app.layout = html.Div([
     dcc.Store(id='fe-arima-reqid',     data=None),
     dcc.Interval(id='fe-arima-poll',   interval=600, n_intervals=0, disabled=True),
     dcc.Store(id='fe-upload-reqid',    data=None),
+    dcc.Store(id='fe-active-file',     data='TARBIUTH.xlsx'),
     dcc.Interval(id='fe-upload-poll',  interval=400, n_intervals=0, disabled=True),
     dcc.Download(id='fe-dl-template'),
     dcc.Download(id='fe-dl-prices'),
@@ -1292,6 +1321,79 @@ def build_grid_on_load(loaded, stock_data):
     if returns_df is None or returns_df.empty:
         raise PreventUpdate
     return _build_grid_rows(returns_df)
+
+
+@app.callback(
+    Output('fe-active-file',     'data',             allow_duplicate=True),
+    Output('fe-stock-data',      'data',             allow_duplicate=True),
+    Output('fe-prices-data',     'data',             allow_duplicate=True),
+    Output('fe-last-updated',    'children',         allow_duplicate=True),
+    Output('fe-upload-status',   'children',         allow_duplicate=True),
+    Output('fe-data-source',     'data',             allow_duplicate=True),
+    Output('fe-grid',            'children',         allow_duplicate=True),
+    Output('fe-asset-count',     'children',         allow_duplicate=True),
+    Input('fe-file-selector',    'value'),
+    prevent_initial_call=True,
+)
+def fe_on_file_selected(filename):
+    if not filename:
+        raise PreventUpdate
+    cache_path = _fe_port_cache_path(filename)
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as f:
+                data = pickle.load(f)
+            prices  = data.get('original_prices')
+            returns = data.get('close_returns')
+            saved_at = data.get('saved_at', '')
+            if prices is not None and returns is not None:
+                try:
+                    grid_rows, grid_count = _build_grid_rows(returns)
+                except Exception:
+                    grid_rows, grid_count = no_update, no_update
+                return (filename,
+                        returns.to_json(orient='split', date_format='iso'),
+                        prices.to_json(orient='split', date_format='iso'),
+                        f'Caricati: {saved_at}',
+                        f'✓ {len(prices.columns)} asset — {Path(filename).stem}',
+                        'default',
+                        grid_rows, grid_count)
+        except Exception:
+            pass
+
+    # Cache non disponibile → scarica via thread (stesso meccanismo del drag & drop)
+    try:
+        from pathlib import Path as _Path
+        fp = _FE_FILES_DIR / filename
+        if not fp.exists():
+            raise PreventUpdate
+        df   = pd.read_excel(str(fp))
+        cols = df.columns.tolist()
+        tickers      = df[cols[0]].dropna().astype(str).str.strip().tolist()
+        descriptions = {str(df.iloc[i, 0]).strip(): str(df.iloc[i, 1]).strip()
+                        for i in range(len(df)) if len(cols) > 1} if len(cols) > 1 else {}
+        currencies   = {str(df.iloc[i, 0]).strip(): str(df.iloc[i, 2]).strip().upper()
+                        for i in range(len(df)) if len(cols) > 2} if len(cols) > 2 else {}
+        if not tickers:
+            raise PreventUpdate
+        import uuid as _uuid
+        req_id   = str(_uuid.uuid4())[:8]
+        saved_at = datetime.now().strftime('%d/%m/%Y %H:%M')
+        with _UPLOAD_LOCK:
+            _UPLOAD_STATE.update({'req_id': req_id, 'running': True, 'done': False,
+                                  'pct': 0, 'total': len(tickers), 'error': None,
+                                  'prices': None, 'returns': None, 'saved_at': saved_at})
+        threading.Thread(target=_download_tickers_thread,
+                         args=(req_id, tickers, saved_at, descriptions, currencies),
+                         daemon=True).start()
+        return (filename, no_update, no_update,
+                f'Download {Path(filename).stem}…',
+                f'⏳ Download {Path(filename).stem} — {len(tickers)} asset…',
+                'user', no_update, no_update)
+    except PreventUpdate:
+        raise
+    except Exception:
+        raise PreventUpdate
 
 
 @app.callback(
