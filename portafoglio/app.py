@@ -99,7 +99,7 @@ app.index_string = '''
 '''
 
 # Percorsi file
-_XLSX        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'TARBIUTH.xlsx')
+_XLSX        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ETF.xlsx')
 _PROFILO_HTML = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                               'profilo.html'))
 _FOTO_PNG = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -111,12 +111,12 @@ _FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
 def _list_files():
     """Restituisce lista di opzioni dcc.Dropdown dai .xlsx in Files/."""
     if not _FILES_DIR.exists():
-        return [{'label': 'TARBIUTH', 'value': 'TARBIUTH.xlsx'}]
+        return [{'label': 'ETF', 'value': 'ETF.xlsx'}]
     files = sorted(_FILES_DIR.glob('*.xlsx'), key=lambda f: f.name.lower())
     return [{'label': f.stem, 'value': f.name} for f in files] or \
-           [{'label': 'TARBIUTH', 'value': 'TARBIUTH.xlsx'}]
+           [{'label': 'ETF', 'value': 'ETF.xlsx'}]
 
-def _xlsx_path(filename='TARBIUTH.xlsx'):
+def _xlsx_path(filename='ETF.xlsx'):
     """Percorso assoluto del file xlsx nella cartella Files/."""
     fp = _FILES_DIR / filename
     if fp.exists():
@@ -318,10 +318,10 @@ _CL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
 _CL_BUFFER: dict = {}   # dati cliente — solo in memoria
 _CL_LOCK   = threading.Lock()
 
-_active_file_store: dict = {'filename': 'TARBIUTH.xlsx'}  # file attivo corrente
+_active_file_store: dict = {'filename': 'ETF.xlsx'}  # file attivo corrente
 
 
-def _build_ticker_list(filename='TARBIUTH.xlsx'):
+def _build_ticker_list(filename='ETF.xlsx'):
     df   = pd.read_excel(_xlsx_path(filename))
     cols = df.columns.tolist()
     return list(df[cols[0]]), list(df[cols[1]]), list(df[cols[2]])
@@ -469,7 +469,7 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None):
 
 
 def _do_download_client(tickers, descrizione, valuta, start_date):
-    """Download per file cliente: dati solo in _CL_BUFFER, TARBIUTH e market_data.pkl intoccati."""
+    """Download per file cliente: dati solo in _CL_BUFFER, ETF e market_data.pkl intoccati."""
     global _CL_STATE, _CL_BUFFER
     total = len(tickers)
     with _CL_LOCK:
@@ -563,13 +563,13 @@ def _do_download_client(tickers, descrizione, valuta, start_date):
         })
         _CL_STATE['status']  = 'done'
         _CL_STATE['current'] = total
-    print(f"✓ Download cliente: {len(all_prices)} asset in _CL_BUFFER (TARBIUTH intoccato)")
+    print(f"✓ Download cliente: {len(all_prices)} asset in _CL_BUFFER (ETF intoccato)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Carica solo nomi (avvio rapido)
 # ─────────────────────────────────────────────────────────────────────────────
-def load_ticker_names_only(filename='TARBIUTH.xlsx'):
+def load_ticker_names_only(filename='ETF.xlsx'):
     try:
         df        = pd.read_excel(_xlsx_path(filename))
         col_names = df.columns.tolist()
@@ -595,10 +595,10 @@ _INDEX_FILE          = SESSIONS_DIR / 'index.json'
 _MARKET_DATA_FILE    = SESSIONS_DIR / 'market_data.pkl'
 _ACTIVE_TICKERS_FILE = SESSIONS_DIR / 'active_tickers.xlsx'
 
-def _file_cache_path(filename='TARBIUTH.xlsx'):
-    """Percorso del pkl di cache per un dato file (TARBIUTH usa market_data.pkl per compat)."""
+def _file_cache_path(filename='ETF.xlsx'):
+    """Percorso del pkl di cache per un dato file (ETF usa market_data.pkl per compat)."""
     stem = Path(filename).stem
-    if stem == 'TARBIUTH':
+    if stem == 'ETF':
         return _MARKET_DATA_FILE
     return SESSIONS_DIR / f'market_data_{stem}.pkl'
 
@@ -1085,7 +1085,7 @@ app.layout = html.Div([
         dcc.Dropdown(
             id='file-selector',
             options=_list_files(),
-            value='TARBIUTH.xlsx',
+            value='ETF.xlsx',
             clearable=False,
             style={'width': '160px', 'fontSize': '11px', 'display': 'inline-block'},
             optionHeight=28,
@@ -1133,7 +1133,7 @@ app.layout = html.Div([
 
     # ── Stores ───────────────────────────────────────────────────────────────
     dcc.Interval(id='refresh-poll-interval', interval=1000, n_intervals=0, disabled=True),
-    dcc.Store(id='active-xlsx-file',        data='TARBIUTH.xlsx'),
+    dcc.Store(id='active-xlsx-file',        data='ETF.xlsx'),
     dcc.Store(id='asset-checklist',         data=[]),
     dcc.Store(id='stock-data',              data=None),
     dcc.Store(id='original-prices-data',    data=None),
@@ -1262,7 +1262,7 @@ def update_output(contents, filename):
 
     if triggered_id == 'initial_load':
         # Ogni volta che la pagina viene (ri)caricata, svuota il buffer cliente
-        # così il refresh della pagina ripristina sempre TARBIUTH.
+        # così il refresh della pagina ripristina sempre ETF.
         with _CL_LOCK:
             _CL_BUFFER.clear()
             _CL_STATE['status'] = 'idle'
@@ -1519,7 +1519,7 @@ def start_refresh(n_clicks, start_date_picker):
     ).strftime('%Y-%m-%d')
 
     try:
-        active_file = _active_file_store.get('filename', 'TARBIUTH.xlsx')
+        active_file = _active_file_store.get('filename', 'ETF.xlsx')
         tickers, descr, valuta = _build_ticker_list(active_file)
     except Exception as e:
         err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
@@ -1557,7 +1557,7 @@ def start_refresh(n_clicks, start_date_picker):
     prevent_initial_call=True,
 )
 def poll_refresh_progress(n):
-    # Legge dal buffer cliente se attivo, altrimenti da TARBIUTH
+    # Legge dal buffer cliente se attivo, altrimenti da ETF
     with _CL_LOCK:
         cl_state  = dict(_CL_STATE)
         cl_buffer = dict(_CL_BUFFER)
@@ -1670,7 +1670,7 @@ def salva_dati(n_clicks, original_prices_data):
     if not n_clicks or n_clicks == 0:
         raise PreventUpdate
 
-    # Legge dal buffer cliente se attivo, altrimenti da TARBIUTH
+    # Legge dal buffer cliente se attivo, altrimenti da ETF
     with _CL_LOCK:
         cl_prices = _CL_BUFFER.get('original_prices')
     if cl_prices is not None and not cl_prices.empty:
@@ -3042,7 +3042,7 @@ def _save_arima_to_pkl(mu_series, cov_df):
 # Scheduler: dati alle 18:30 (lun-ven), ARIMA+GARCH a mezzanotte (lun-sab)
 # ─────────────────────────────────────────────────────────────────────────────
 def _scheduled_update():
-    """Download TARBIUTH a mezzanotte."""
+    """Download ETF a mezzanotte."""
     try:
         start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
         tickers, descr, valuta = _build_ticker_list()

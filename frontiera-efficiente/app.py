@@ -480,15 +480,15 @@ _FE_FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files
 
 def _fe_list_files():
     if not _FE_FILES_DIR.exists():
-        return [{'label': 'TARBIUTH', 'value': 'TARBIUTH.xlsx'}]
+        return [{'label': 'ETF', 'value': 'ETF.xlsx'}]
     files = sorted(_FE_FILES_DIR.glob('*.xlsx'), key=lambda f: f.name.lower())
     return [{'label': f.stem, 'value': f.name} for f in files] or \
-           [{'label': 'TARBIUTH', 'value': 'TARBIUTH.xlsx'}]
+           [{'label': 'ETF', 'value': 'ETF.xlsx'}]
 
-def _fe_port_cache_path(filename='TARBIUTH.xlsx'):
+def _fe_port_cache_path(filename='ETF.xlsx'):
     """Percorso del pkl di portafoglio corrispondente a filename."""
     stem = Path(filename).stem
-    if stem == 'TARBIUTH':
+    if stem == 'ETF':
         return _PORT_PKL
     return os.path.join(_PORT_SESSIONS, f'market_data_{stem}.pkl')
 
@@ -951,7 +951,7 @@ app.layout = html.Div([
                 dcc.Dropdown(
                     id='fe-file-selector',
                     options=_fe_list_files(),
-                    value='TARBIUTH.xlsx',
+                    value='ETF.xlsx',
                     clearable=False,
                     style={'width':'160px','fontSize':'11px','display':'inline-block'},
                     optionHeight=28,
@@ -1183,7 +1183,7 @@ app.layout = html.Div([
     dcc.Store(id='fe-arima-reqid',     data=None),
     dcc.Interval(id='fe-arima-poll',   interval=600, n_intervals=0, disabled=True),
     dcc.Store(id='fe-upload-reqid',    data=None),
-    dcc.Store(id='fe-active-file',     data='TARBIUTH.xlsx'),
+    dcc.Store(id='fe-active-file',     data='ETF.xlsx'),
     dcc.Interval(id='fe-upload-poll',  interval=400, n_intervals=0, disabled=True),
     dcc.Download(id='fe-dl-template'),
     dcc.Download(id='fe-dl-prices'),
