@@ -1388,10 +1388,11 @@ def update_output(contents, filename):
 
     if triggered_id == 'initial_load':
         # Ogni volta che la pagina viene (ri)caricata, svuota il buffer cliente
-        # così il refresh della pagina ripristina sempre ETF.
+        # e ripristina il file attivo a ETF (default).
         with _CL_LOCK:
             _CL_BUFFER.clear()
             _CL_STATE['status'] = 'idle'
+        _active_file_store['filename'] = 'ETF.xlsx'
         import pickle as _pickle
         cr, op, tm, saved_at = None, None, {}, ''
         if _MARKET_DATA_FILE.exists():
@@ -1661,42 +1662,46 @@ def add_ticker_row(n, ticker, desc, valuta, rows):
 # Callback: salva xlsx e avvia download in background
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
-    Output('file-editor-status',  'children',    allow_duplicate=True),
-    Output('file-editor-overlay', 'style',       allow_duplicate=True),
-    Output('file-selector',       'options',     allow_duplicate=True),
-    Input('save-file-editor-btn', 'n_clicks'),
-    State('file-editor-table',    'data'),
-    State('file-selector',        'value'),
+    Output('file-editor-status',       'children',    allow_duplicate=True),
+    Output('file-editor-overlay',      'style',       allow_duplicate=True),
+    Output('file-selector',            'options',     allow_duplicate=True),
+    Output('refresh-poll-interval',    'disabled',    allow_duplicate=True),
+    Output('refresh-poll-interval',    'n_intervals', allow_duplicate=True),
+    Output('refresh-data-btn',         'disabled',    allow_duplicate=True),
+    Input('save-file-editor-btn',      'n_clicks'),
+    State('file-editor-table',         'data'),
+    State('file-selector',             'value'),
     prevent_initial_call=True,
 )
 def save_file_editor(n, rows, filename):
     if not rows:
-        return '⚠ La lista è vuota, nessun file salvato.', no_update, no_update
+        return '⚠ La lista è vuota, nessun file salvato.', no_update, no_update, no_update, no_update, no_update
     filename = filename or 'ETF.xlsx'
     ok = _save_xlsx_rows(filename, rows)
     if not ok:
-        return '⚠ Errore nel salvataggio del file.', no_update, no_update
-    # Avvia download in background per il file modificato
+        return '⚠ Errore nel salvataggio del file.', no_update, no_update, no_update, no_update, no_update
+    # Imposta il file editato come attivo e avvia download
+    _active_file_store['filename'] = filename
     start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
     try:
         tickers, descr, valuta_list = _build_ticker_list(filename)
-        cache     = _file_cache_path(filename)
-        is_active = (filename == _active_file_store.get('filename', 'ETF.xlsx'))
-        if is_active:
-            with _DL_LOCK:
-                _DL_BUFFER.clear()
-                _DL_STATE.update({'status': 'running', 'current': 0,
-                                  'total': len(tickers), 'errors': []})
+        cache = _file_cache_path(filename)
+        with _DL_LOCK:
+            _DL_BUFFER.clear()
+            _DL_STATE.update({'status': 'running', 'current': 0,
+                              'total': len(tickers), 'errors': []})
         threading.Thread(
             target=_do_download,
             args=(tickers, descr, valuta_list, start),
-            kwargs={'cache_file': cache, 'update_buffer': is_active},
+            kwargs={'cache_file': cache, 'update_buffer': True},
             daemon=True,
         ).start()
         print(f"▶ Aggiornamento post-salvataggio {filename}: {len(tickers)} ticker")
     except Exception as e:
         print(f"⚠ Avvio download dopo salvataggio fallito: {e}")
-    return no_update, _EDITOR_HIDDEN, _list_files()
+        return '⚠ Download non avviato.', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update
+    # Chiude modal e abilita il poll per aggiornare la griglia automaticamente
+    return no_update, _EDITOR_HIDDEN, _list_files(), False, 0, True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
