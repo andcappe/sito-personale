@@ -358,7 +358,7 @@ def _clean_prices(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _do_download(tickers, descrizione, valuta, start_date, cache_file=None):
+def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True):
     """Scarica da Yahoo Finance e salva nella cache; cache_file=None usa market_data.pkl."""
     global _DL_STATE, _DL_BUFFER
     total = len(tickers)
@@ -463,7 +463,8 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None):
         print(f"⚠ Salvataggio su disco fallito: {e}")
 
     with _DL_LOCK:
-        _DL_BUFFER.update(data)
+        if update_buffer:
+            _DL_BUFFER.update(data)
         _DL_STATE['status']  = 'done'
         _DL_STATE['current'] = total
 
@@ -3042,14 +3043,23 @@ def _save_arima_to_pkl(mu_series, cov_df):
 # Scheduler: dati alle 18:30 (lun-ven), ARIMA+GARCH a mezzanotte (lun-sab)
 # ─────────────────────────────────────────────────────────────────────────────
 def _scheduled_update():
-    """Download ETF a mezzanotte."""
-    try:
-        start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
-        tickers, descr, valuta = _build_ticker_list()
-        print(f"⏰ Aggiornamento schedulato: {len(tickers)} ticker")
-        _do_download(tickers, descr, valuta, start)
-    except Exception as e:
-        print(f"⚠ Aggiornamento schedulato fallito: {e}")
+    """Aggiornamento notturno: scarica dati per tutti i file in Files/."""
+    start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+    active_file = _active_file_store.get('filename', 'ETF.xlsx')
+    xlsx_files = sorted(_FILES_DIR.glob('*.xlsx')) if _FILES_DIR.exists() else []
+    if not xlsx_files:
+        xlsx_files = [Path(_XLSX)]
+    for xlsx_path in xlsx_files:
+        filename = xlsx_path.name
+        try:
+            tickers, descr, valuta = _build_ticker_list(filename)
+            cache = _file_cache_path(filename)
+            is_active = (filename == active_file)
+            print(f"⏰ Aggiornamento {filename}: {len(tickers)} ticker")
+            _do_download(tickers, descr, valuta, start,
+                         cache_file=cache, update_buffer=is_active)
+        except Exception as e:
+            print(f"⚠ Aggiornamento {filename} fallito: {e}")
 
 
 def _scheduled_arima():
