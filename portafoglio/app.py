@@ -27,7 +27,7 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from dash import Dash, html, dcc, Input, Output, State, ALL, callback_context, no_update
+from dash import Dash, html, dcc, dash_table, Input, Output, State, ALL, callback_context, no_update
 from dash.exceptions import PreventUpdate
 from flask import send_file as flask_send_file
 
@@ -603,6 +603,49 @@ def _file_cache_path(filename='ETF.xlsx'):
         return _MARKET_DATA_FILE
     return SESSIONS_DIR / f'market_data_{stem}.pkl'
 
+
+def _load_xlsx_rows(filename):
+    """Carica un file xlsx da Files/ come lista di dict per DataTable."""
+    try:
+        df = pd.read_excel(_xlsx_path(filename))
+        cols = df.columns.tolist()
+        rows = []
+        for _, row in df.iterrows():
+            rows.append({
+                'ticker':      str(row[cols[0]]),
+                'descrizione': str(row[cols[1]]) if len(cols) > 1 else str(row[cols[0]]),
+                'valuta':      str(row[cols[2]]) if len(cols) > 2 else 'EUR',
+            })
+        return rows
+    except Exception as e:
+        print(f"⚠ _load_xlsx_rows({filename}): {e}")
+        return []
+
+
+def _save_xlsx_rows(filename, rows):
+    """Scrive i dati del DataTable nel file Files/{filename} preservando i nomi colonna."""
+    try:
+        try:
+            existing = pd.read_excel(_xlsx_path(filename))
+            cols = existing.columns.tolist()
+        except Exception:
+            cols = ['Ticker', 'Descrizione', 'Valuta']
+        c0 = cols[0] if cols else 'Ticker'
+        c1 = cols[1] if len(cols) > 1 else 'Descrizione'
+        c2 = cols[2] if len(cols) > 2 else 'Valuta'
+        df = pd.DataFrame({
+            c0: [r.get('ticker', '') for r in rows],
+            c1: [r.get('descrizione', '') for r in rows],
+            c2: [r.get('valuta', 'EUR') for r in rows],
+        })
+        target = _FILES_DIR / filename
+        df.to_excel(str(target), index=False)
+        return True
+    except Exception as e:
+        print(f"⚠ _save_xlsx_rows({filename}): {e}")
+        return False
+
+
 CLIENT_SESSION_STORES = [
     "weights-store-P1",
     "weights-store-P2",
@@ -1017,6 +1060,13 @@ _MODAL_HIDDEN = {
 }
 _MODAL_SHOWN = {**_MODAL_HIDDEN, 'display': 'flex'}
 
+_EDITOR_HIDDEN = {'display': 'none'}
+_EDITOR_SHOWN  = {
+    'display': 'flex', 'position': 'fixed', 'top': '0', 'left': '0',
+    'width': '100%', 'height': '100%', 'background': 'rgba(0,0,0,0.5)',
+    'zIndex': '3000', 'justifyContent': 'center', 'alignItems': 'center',
+}
+
 _FILL_LOADING = {
     'height': '100%', 'width': '0%',
     'background': 'linear-gradient(90deg,#007755,#00aa77)',
@@ -1091,6 +1141,12 @@ app.layout = html.Div([
             style={'width': '160px', 'fontSize': '11px', 'display': 'inline-block'},
             optionHeight=28,
         ),
+        html.Button('✏️ Gestisci', id='gestisci-btn', n_clicks=0,
+                    title='Aggiungi o rimuovi asset dalla lista selezionata',
+                    style={'fontSize': '11px', 'padding': '5px 12px', 'borderRadius': '4px',
+                           'cursor': 'pointer', 'background': '#fff3e0',
+                           'border': '1px solid #ffb74d', 'color': '#e65100',
+                           'marginRight': '4px'}),
         # 4. Scarica template ticker
         html.Button('📋 Template', id='btn-download-template', n_clicks=0,
                     title='Scarica il file Excel template da compilare con i tuoi titoli',
@@ -1131,6 +1187,75 @@ app.layout = html.Div([
     ], style={'display': 'flex', 'align-items': 'center',
               'font-size': '10px', 'position': 'relative',
               'padding': '6px 0', 'flex-wrap': 'wrap', 'gap': '2px'}),
+
+    # ── Modal Gestione Lista ──────────────────────────────────────────────────
+    html.Div(id='file-editor-overlay', style=_EDITOR_HIDDEN, children=[
+        html.Div(style={
+            'background': 'white', 'borderRadius': '8px', 'padding': '20px',
+            'width': '700px', 'maxHeight': '82vh', 'overflowY': 'auto',
+            'boxShadow': '0 4px 24px rgba(0,0,0,0.35)',
+        }, children=[
+            html.Div([
+                html.H4(id='file-editor-title',
+                        style={'margin': 0, 'fontSize': '14px', 'fontWeight': '700'}),
+                html.Button('✕', id='file-editor-close', n_clicks=0,
+                            style={'background': 'none', 'border': 'none', 'fontSize': '20px',
+                                   'cursor': 'pointer', 'color': '#666', 'lineHeight': 1}),
+            ], style={'display': 'flex', 'justifyContent': 'space-between',
+                      'alignItems': 'center', 'marginBottom': '14px'}),
+            dash_table.DataTable(
+                id='file-editor-table',
+                columns=[
+                    {'name': 'Ticker',      'id': 'ticker',      'editable': True},
+                    {'name': 'Descrizione', 'id': 'descrizione', 'editable': True},
+                    {'name': 'Valuta',      'id': 'valuta',      'editable': True},
+                ],
+                data=[],
+                row_deletable=True,
+                style_table={'maxHeight': '280px', 'overflowY': 'auto'},
+                style_header={'backgroundColor': '#f5f7fa', 'fontWeight': '700',
+                              'fontSize': '12px', 'padding': '6px 8px'},
+                style_cell={'fontSize': '12px', 'padding': '5px 8px', 'textAlign': 'left',
+                            'border': '1px solid #e0e4ec'},
+                style_data_conditional=[{'if': {'row_index': 'odd'},
+                                         'backgroundColor': '#fafbfd'}],
+            ),
+            html.Div([
+                dcc.Input(id='new-ticker-input', placeholder='Ticker (es. AAPL)',
+                          debounce=False,
+                          style={'width': '120px', 'fontSize': '12px', 'padding': '5px 8px',
+                                 'border': '1px solid #ccc', 'borderRadius': '4px'}),
+                dcc.Input(id='new-desc-input', placeholder='Descrizione',
+                          debounce=False,
+                          style={'width': '210px', 'fontSize': '12px', 'padding': '5px 8px',
+                                 'border': '1px solid #ccc', 'borderRadius': '4px'}),
+                dcc.Dropdown(
+                    id='new-valuta-dropdown',
+                    options=[{'label': 'EUR', 'value': 'EUR'},
+                             {'label': 'USD', 'value': 'USD'},
+                             {'label': 'GBP', 'value': 'GBP'}],
+                    value='EUR', clearable=False,
+                    style={'width': '85px', 'fontSize': '12px', 'display': 'inline-block'},
+                ),
+                html.Button('➕ Aggiungi', id='add-ticker-btn', n_clicks=0,
+                            style={'fontSize': '12px', 'padding': '5px 14px',
+                                   'background': '#e8f5e9', 'border': '1px solid #a5d6a7',
+                                   'color': '#1b5e20', 'borderRadius': '4px',
+                                   'cursor': 'pointer', 'fontWeight': '600'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px',
+                      'marginTop': '12px', 'flexWrap': 'wrap'}),
+            html.Div([
+                html.Div(id='file-editor-status',
+                         style={'fontSize': '12px', 'color': '#555', 'flex': 1}),
+                html.Button('💾 Salva e Aggiorna', id='save-file-editor-btn', n_clicks=0,
+                            style={'fontSize': '12px', 'padding': '7px 18px',
+                                   'background': '#1a3a5c', 'color': 'white',
+                                   'border': 'none', 'borderRadius': '4px',
+                                   'cursor': 'pointer', 'fontWeight': '600'}),
+            ], style={'display': 'flex', 'justifyContent': 'space-between',
+                      'alignItems': 'center', 'marginTop': '14px'}),
+        ]),
+    ]),
 
     # ── Stores ───────────────────────────────────────────────────────────────
     dcc.Interval(id='refresh-poll-interval', interval=1000, n_intervals=0, disabled=True),
@@ -1483,6 +1608,95 @@ def on_file_selected(filename):
             f'Download {Path(filename).stem}…',
             html.Div(f'⏳ Download {Path(filename).stem} — {len(tickers)} asset…',
                      style={'color': '#e67e22', 'font-size': '11px'}))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: apri/chiudi modal editor lista asset
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('file-editor-overlay', 'style'),
+    Output('file-editor-table',   'data'),
+    Output('file-editor-title',   'children'),
+    Output('file-editor-status',  'children', allow_duplicate=True),
+    Input('gestisci-btn',         'n_clicks'),
+    Input('file-editor-close',    'n_clicks'),
+    State('file-selector',        'value'),
+    prevent_initial_call=True,
+)
+def toggle_file_editor(open_n, close_n, filename):
+    triggered = callback_context.triggered_id
+    if triggered == 'gestisci-btn' and open_n:
+        rows = _load_xlsx_rows(filename or 'ETF.xlsx')
+        stem = Path(filename or 'ETF.xlsx').stem
+        return _EDITOR_SHOWN, rows, f'Gestisci lista: {stem}', ''
+    return _EDITOR_HIDDEN, no_update, no_update, no_update
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: aggiungi riga al DataTable editor
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('file-editor-table', 'data',         allow_duplicate=True),
+    Output('new-ticker-input',  'value'),
+    Output('new-desc-input',    'value'),
+    Input('add-ticker-btn',     'n_clicks'),
+    State('new-ticker-input',   'value'),
+    State('new-desc-input',     'value'),
+    State('new-valuta-dropdown','value'),
+    State('file-editor-table',  'data'),
+    prevent_initial_call=True,
+)
+def add_ticker_row(n, ticker, desc, valuta, rows):
+    if not ticker or not ticker.strip():
+        raise PreventUpdate
+    new_row = {
+        'ticker':      ticker.strip().upper(),
+        'descrizione': (desc.strip() if desc and desc.strip() else ticker.strip().upper()),
+        'valuta':      valuta or 'EUR',
+    }
+    return (rows or []) + [new_row], '', ''
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: salva xlsx e avvia download in background
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('file-editor-status',  'children',    allow_duplicate=True),
+    Output('file-editor-overlay', 'style',       allow_duplicate=True),
+    Output('file-selector',       'options',     allow_duplicate=True),
+    Input('save-file-editor-btn', 'n_clicks'),
+    State('file-editor-table',    'data'),
+    State('file-selector',        'value'),
+    prevent_initial_call=True,
+)
+def save_file_editor(n, rows, filename):
+    if not rows:
+        return '⚠ La lista è vuota, nessun file salvato.', no_update, no_update
+    filename = filename or 'ETF.xlsx'
+    ok = _save_xlsx_rows(filename, rows)
+    if not ok:
+        return '⚠ Errore nel salvataggio del file.', no_update, no_update
+    # Avvia download in background per il file modificato
+    start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+    try:
+        tickers, descr, valuta_list = _build_ticker_list(filename)
+        cache     = _file_cache_path(filename)
+        is_active = (filename == _active_file_store.get('filename', 'ETF.xlsx'))
+        if is_active:
+            with _DL_LOCK:
+                _DL_BUFFER.clear()
+                _DL_STATE.update({'status': 'running', 'current': 0,
+                                  'total': len(tickers), 'errors': []})
+        threading.Thread(
+            target=_do_download,
+            args=(tickers, descr, valuta_list, start),
+            kwargs={'cache_file': cache, 'update_buffer': is_active},
+            daemon=True,
+        ).start()
+        print(f"▶ Aggiornamento post-salvataggio {filename}: {len(tickers)} ticker")
+    except Exception as e:
+        print(f"⚠ Avvio download dopo salvataggio fallito: {e}")
+    return no_update, _EDITOR_HIDDEN, _list_files()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
