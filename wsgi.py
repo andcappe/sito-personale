@@ -181,7 +181,7 @@ __STYLE__
       <label for="password">Password</label>
       <input id="password" name="password" type="password"
              autocomplete="current-password" placeholder="••••••••">
-      <div class="forgot"><a href="/forgot-password">Password dimenticata?</a></div>
+      <div class="forgot"><a href="/forgot-password" id="forgot-link" onclick="var e=document.getElementById('email').value;if(e)this.href='/forgot-password?email='+encodeURIComponent(e)">Password dimenticata?</a></div>
       <button class="btn" type="submit">Accedi</button>
     </form>
     __OAUTH__
@@ -595,7 +595,7 @@ def _register_auth(flask_server, add_login_routes: bool = False):
         @flask_server.route('/forgot-password', methods=['GET', 'POST'])
         def _forgot_password():
             msg = ''
-            email_val = ''
+            email_val = request.args.get('email', '').strip().lower()
             if request.method == 'POST':
                 email_val = request.form.get('email', '').strip().lower()
                 token = create_reset_token(email_val)
