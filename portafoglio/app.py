@@ -3166,15 +3166,7 @@ def _startup_load():
                 is_etf = (filename == 'ETF.xlsx')
                 _do_download(tickers, descr, valuta, start,
                              cache_file=cache_pkl, update_buffer=is_etf)
-                # Calcola ARIMA subito dopo il download
-                if Path(cache_pkl).exists():
-                    with open(cache_pkl, 'rb') as f:
-                        cached = pickle.load(f)
-                    ret = cached.get('close_returns')
-                    if ret is not None and not ret.empty:
-                        mu, cov = _compute_arima_garch(ret, window=250)
-                        if mu is not None:
-                            _save_arima_to_pkl(mu, cov, target_pkl=cache_pkl)
+                print(f"✓ Download completato: {filename}")
             except Exception as e:
                 print(f"⚠ Download iniziale {filename} fallito: {e}")
 
