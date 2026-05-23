@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 ROOT       = os.path.dirname(os.path.abspath(__file__))
 USERS_FILE = os.path.join(ROOT, 'users.json')
 
-# Token di reset in memoria (scadono in 1h; persi al riavvio, ma va bene)
-_reset_tokens: dict = {}
+# Token in memoria (scadono in 1h; persi al riavvio, ma va bene)
+_reset_tokens:  dict = {}
+_verify_tokens: dict = {}
 
 
 def _hash(key: str, password: str) -> str:
@@ -67,7 +68,7 @@ def register_user(email: str, password: str) -> tuple:
     users[email] = {
         'password_hash': _hash(email, password),
         'role':          'user',
-        'status':        'active',
+        'status':        'pending',
         'created_at':    datetime.now().isoformat(),
         'plan':          'free',
     }
@@ -141,6 +142,40 @@ def add_user(key: str, password: str, role: str = 'user') -> None:
         'plan':          existing.get('plan', 'free'),
     }
     _save_users(users)
+
+
+# ─── Verifica email ────────────────────────────────────────────────────────────
+
+def create_verify_token(email: str) -> str:
+    """Genera token di verifica email per un nuovo utente."""
+    email = email.strip().lower()
+    for t, v in list(_verify_tokens.items()):
+        if v['email'] == email:
+            del _verify_tokens[t]
+    token = secrets.token_urlsafe(32)
+    _verify_tokens[token] = {
+        'email':      email,
+        'expires_at': datetime.now() + timedelta(hours=24),
+    }
+    return token
+
+
+def consume_verify_token(token: str) -> str | None:
+    """Attiva l'account se il token è valido. Ritorna l'email o None."""
+    entry = _verify_tokens.get(token)
+    if not entry:
+        return None
+    if datetime.now() > entry['expires_at']:
+        del _verify_tokens[token]
+        return None
+    email = entry['email']
+    users = _load_users()
+    if email not in users:
+        return None
+    users[email]['status'] = 'active'
+    _save_users(users)
+    _verify_tokens.pop(token, None)
+    return email
 
 
 # ─── Reset password ────────────────────────────────────────────────────────────

@@ -42,7 +42,8 @@ frontiera_srv   = _load("_app_frontiera",   "frontiera-efficiente")
 # ─── Autenticazione ───────────────────────────────────────────────────────────
 from auth import (check_credentials, register_user, register_oauth_user,
                   get_user, list_users, update_user, delete_user,
-                  create_reset_token, verify_reset_token, consume_reset_token)
+                  create_reset_token, verify_reset_token, consume_reset_token,
+                  create_verify_token, consume_verify_token)
 
 SECRET_KEY = os.environ.get('SECRET_KEY', 'cambia-questa-chiave-in-produzione')
 
@@ -69,8 +70,9 @@ _PUBLIC_EXACT = {
     '/auth/google', '/auth/google/callback',
     '/auth/facebook', '/auth/facebook/callback',
 }
-# Prefisso dinamico per reset password (token variabile)
-_PUBLIC_RESET_PREFIX = '/reset-password/'
+# Prefissi dinamici pubblici (token variabile)
+_PUBLIC_RESET_PREFIX  = '/reset-password/'
+_PUBLIC_VERIFY_PREFIX = '/verify-email/'
 # Prefissi che non richiedono autenticazione
 _PUBLIC_PREFIXES = (
     '/_dash', '/assets/', '/_reload',
@@ -385,6 +387,7 @@ _ADMIN_HTML_HEAD = """\
 def _is_public(path: str) -> bool:
     return (path in _PUBLIC_EXACT
             or path.startswith(_PUBLIC_RESET_PREFIX)
+            or path.startswith(_PUBLIC_VERIFY_PREFIX)
             or any(path.startswith(p) for p in _PUBLIC_PREFIXES))
 
 
@@ -412,6 +415,48 @@ def _send_reset_email(to_email: str, token: str) -> bool:
   <p style="font-size:13px;color:#888">
     Il link scade tra <strong>1 ora</strong>.<br>
     Se non hai richiesto il reset, ignora questa email.
+  </p>
+</body></html>"""
+    msg.attach(MIMEText(body, 'html'))
+    try:
+        if MAIL_SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(MAIL_SMTP_HOST, 465) as srv:
+                srv.login(smtp_user, MAIL_PASSWORD)
+                srv.sendmail(MAIL_FROM, to_email, msg.as_string())
+        else:
+            with smtplib.SMTP(MAIL_SMTP_HOST, MAIL_SMTP_PORT) as srv:
+                srv.ehlo()
+                srv.starttls()
+                srv.login(smtp_user, MAIL_PASSWORD)
+                srv.sendmail(MAIL_FROM, to_email, msg.as_string())
+        return True
+    except Exception as e:
+        print(f"[MAIL ERROR] {e}", flush=True)
+        return False
+
+
+def _send_verify_email(to_email: str, token: str) -> bool:
+    if not MAIL_FROM or not MAIL_PASSWORD:
+        return False
+    smtp_user = MAIL_SMTP_USER or MAIL_FROM
+    verify_url = f"{APP_URL}/verify-email/{token}"
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = 'Conferma la tua email – A·C Dashboard'
+    msg['From']    = MAIL_FROM
+    msg['To']      = to_email
+    body = f"""\
+<html><body style="font-family:Arial,sans-serif;color:#222;max-width:480px;margin:0 auto">
+  <h2 style="color:#1a3a5c">A·C Dashboard – Conferma email</h2>
+  <p>Grazie per esserti registrato. Clicca il pulsante per attivare il tuo account:</p>
+  <p style="margin:24px 0">
+    <a href="{verify_url}" style="background:#1a3a5c;color:#fff;padding:12px 24px;
+       border-radius:6px;text-decoration:none;font-weight:700">
+      Conferma email
+    </a>
+  </p>
+  <p style="font-size:13px;color:#888">
+    Il link scade tra <strong>24 ore</strong>.<br>
+    Se non ti sei registrato, ignora questa email.
   </p>
 </body></html>"""
     msg.attach(MIMEText(body, 'html'))
@@ -465,10 +510,16 @@ def _register_auth(flask_server, add_login_routes: bool = False):
                     user = get_user(u)
                     if user and user.get('status') == 'suspended':
                         return redirect('/suspended')
-                    session['username'] = u
-                    next_url = request.args.get('next', '/portafoglio/')
-                    return redirect(next_url)
-                msg = '<div class="error">Email o password non corretti.</div>'
+                    if user and user.get('status') == 'pending':
+                        token = create_verify_token(u)
+                        _send_verify_email(u, token)
+                        msg = '<div class="error">Devi confermare la tua email prima di accedere. Ti abbiamo inviato un nuovo link di conferma.</div>'
+                    else:
+                        session['username'] = u
+                        next_url = request.args.get('next', '/portafoglio/')
+                        return redirect(next_url)
+                else:
+                    msg = '<div class="error">Email o password non corretti.</div>'
             # Blocco OAuth dinamico (solo se credenziali configurate)
             oauth_html = '<div class="divider">oppure</div>'
             if GOOGLE_CLIENT_ID:
@@ -516,14 +567,26 @@ def _register_auth(flask_server, add_login_routes: bool = False):
                 else:
                     ok, message = register_user(email_val, password)
                     if ok:
+                        token = create_verify_token(email_val.strip().lower())
+                        _send_verify_email(email_val.strip().lower(), token)
                         return (_REGISTER_HTML
-                                .replace('__MSG__', '<div class="success">Registrazione completata! Puoi ora <a href="/login">accedere</a>.</div>')
+                                .replace('__MSG__', '<div class="success">Registrazione completata! Controlla la tua email per confermare l\'account.</div>')
                                 .replace('__EMAIL__', ''))
                     else:
                         msg = f'<div class="error">{message}</div>'
             return (_REGISTER_HTML
                     .replace('__MSG__', msg)
                     .replace('__EMAIL__', email_val))
+
+        @flask_server.route('/verify-email/<token>')
+        def _verify_email(token):
+            email = consume_verify_token(token)
+            if email:
+                session['username'] = email
+                return redirect('/portafoglio/?verified=1')
+            return (_FORGOT_HTML
+                    .replace('__MSG__', '<div class="error">Link non valido o scaduto. <a href="/register">Registrati di nuovo</a>.</div>')
+                    .replace('__EMAIL__', ''))
 
         @flask_server.route('/suspended')
         def _suspended():
