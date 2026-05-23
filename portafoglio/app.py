@@ -108,11 +108,14 @@ _FOTO_PNG = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file_
 # Cartella condivisa Files/ (un livello sopra rispetto a portafoglio/)
 _FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
 
+_FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES']
+
 def _list_files():
     """Restituisce lista di opzioni dcc.Dropdown dai .xlsx in Files/."""
     if not _FILES_DIR.exists():
         return [{'label': 'ETF', 'value': 'ETF.xlsx'}]
-    files = sorted(_FILES_DIR.glob('*.xlsx'), key=lambda f: f.name.lower())
+    files = list(_FILES_DIR.glob('*.xlsx'))
+    files.sort(key=lambda f: _FILE_ORDER.index(f.stem.upper()) if f.stem.upper() in _FILE_ORDER else 99)
     return [{'label': f.stem, 'value': f.name} for f in files] or \
            [{'label': 'ETF', 'value': 'ETF.xlsx'}]
 

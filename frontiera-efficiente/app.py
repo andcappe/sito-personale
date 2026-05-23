@@ -478,10 +478,13 @@ _PORT_SESSIONS = os.path.normpath(os.path.join(
 
 _FE_FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
 
+_FE_FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES']
+
 def _fe_list_files():
     if not _FE_FILES_DIR.exists():
         return [{'label': 'ETF', 'value': 'ETF.xlsx'}]
-    files = sorted(_FE_FILES_DIR.glob('*.xlsx'), key=lambda f: f.name.lower())
+    files = list(_FE_FILES_DIR.glob('*.xlsx'))
+    files.sort(key=lambda f: _FE_FILE_ORDER.index(f.stem.upper()) if f.stem.upper() in _FE_FILE_ORDER else 99)
     return [{'label': f.stem, 'value': f.name} for f in files] or \
            [{'label': 'ETF', 'value': 'ETF.xlsx'}]
 
