@@ -596,41 +596,32 @@ def _register_auth(flask_server, add_login_routes: bool = False):
 
         @flask_server.route('/setup', methods=['GET', 'POST'])
         def _setup():
-            if list_users():
-                return redirect('/')
             msg = ''
             if request.method == 'POST':
-                email    = request.form.get('email', '').strip().lower()
-                password = request.form.get('password', '')
-                confirm  = request.form.get('confirm', '')
-                if not email or not password:
-                    msg = '<div class="error">Tutti i campi sono obbligatori.</div>'
-                elif password != confirm:
-                    msg = '<div class="error">Le password non coincidono.</div>'
-                elif len(password) < 8:
-                    msg = '<div class="error">Password minimo 8 caratteri.</div>'
+                email      = request.form.get('email', '').strip().lower()
+                secret     = request.form.get('secret', '')
+                if secret != ADMIN_PASSWORD:
+                    msg = '<div class="error">Codice segreto non valido.</div>'
+                elif not email:
+                    msg = '<div class="error">Inserisci un\'email.</div>'
                 else:
-                    from auth import add_user
-                    add_user(email, password, role='admin')
-                    from auth import update_user as _upd
-                    _upd(email, status='active', plan='admin')
+                    _add_user(email, ADMIN_PASSWORD, role='admin')
+                    _upd_user(email, status='active', plan='admin')
                     session['username'] = email
                     return redirect('/admin')
             return f'''<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
-<title>Setup iniziale</title><style>{_BASE_STYLE}</style></head>
+<title>Setup Admin</title><style>{_BASE_STYLE}</style></head>
 <body><div class="card">
-<div class="logo"><h1>A·C Dashboard</h1><p>Setup primo amministratore</p></div>
+<div class="logo"><h1>A·C Dashboard</h1><p>Promozione account admin</p></div>
 {msg}
 <form method="post">
-  <label>Email admin</label>
+  <label>Email account da promuovere</label>
   <input name="email" type="email" placeholder="tua@email.com" autofocus>
-  <label>Password</label>
-  <input name="password" type="password" placeholder="min. 8 caratteri">
-  <label>Conferma password</label>
-  <input name="confirm" type="password" placeholder="••••••••">
-  <button class="btn" type="submit">Crea account admin</button>
+  <label>Codice segreto</label>
+  <input name="secret" type="password" placeholder="ADMIN_PASSWORD da DigitalOcean">
+  <button class="btn" type="submit">Promuovi ad admin</button>
 </form>
-<p class="footer">Questa pagina si disabilita automaticamente dopo la creazione del primo utente.</p>
+<p class="footer">Accessibile solo a chi conosce il codice segreto.</p>
 </div></body></html>'''
 
         @flask_server.route('/forgot-password', methods=['GET', 'POST'])
