@@ -3262,28 +3262,30 @@ def _compute_arima_garch(returns_df, window=250):
     return mu_annual, cov_annual
 
 
-def _save_arima_to_pkl(mu_series, cov_df):
-    """Scrive arima in market_data.pkl nel formato atteso da frontiera-efficiente."""
+def _save_arima_to_pkl(mu_series, cov_df, target_pkl=None):
+    """Scrive arima nel pkl del file specificato (default: market_data.pkl = ETF)."""
     ts = datetime.now().strftime('%d/%m/%Y %H:%M')
     arima_data = {
         'mu':          mu_series.to_dict(),
         'cov':         cov_df.to_dict(),
         'computed_at': ts,
     }
+    pkl_path = Path(target_pkl) if target_pkl else _MARKET_DATA_FILE
     try:
-        if _MARKET_DATA_FILE.exists():
-            with open(_MARKET_DATA_FILE, 'rb') as f:
+        if pkl_path.exists():
+            with open(pkl_path, 'rb') as f:
                 pkl = pickle.load(f)
             pkl['arima']             = arima_data
             pkl['arima_computed_at'] = ts
-            with open(_MARKET_DATA_FILE, 'wb') as f:
+            with open(pkl_path, 'wb') as f:
                 pickle.dump(pkl, f)
-        with _DL_LOCK:
-            _DL_BUFFER['arima']             = arima_data
-            _DL_BUFFER['arima_computed_at'] = ts
-        print(f"✓ ARIMA salvato in market_data.pkl — {ts}")
+        if target_pkl is None or pkl_path == _MARKET_DATA_FILE:
+            with _DL_LOCK:
+                _DL_BUFFER['arima']             = arima_data
+                _DL_BUFFER['arima_computed_at'] = ts
+        print(f"✓ ARIMA salvato in {pkl_path.name} — {ts}")
     except Exception as e:
-        print(f"⚠ Salvataggio ARIMA fallito: {e}")
+        print(f"⚠ Salvataggio ARIMA fallito ({pkl_path.name}): {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3310,22 +3312,30 @@ def _scheduled_update():
 
 
 def _scheduled_arima():
-    """Calcolo ARIMA+GARCH a mezzanotte sui dati già scaricati."""
-    try:
-        with _DL_LOCK:
-            ret = _DL_BUFFER.get('close_returns')
-        if ret is None or ret.empty:
-            print("⚠ ARIMA notturno: nessun dato disponibile")
-            return
-        print(f"🌙 Calcolo ARIMA+GARCH notturno — {len(ret.columns)} asset…")
-        mu, cov = _compute_arima_garch(ret, window=250)
-        if mu is not None:
-            _save_arima_to_pkl(mu, cov)
-            print("✓ ARIMA+GARCH notturno completato")
-        else:
-            print("⚠ ARIMA notturno: calcolo non riuscito")
-    except Exception as e:
-        print(f"⚠ ARIMA notturno fallito: {e}")
+    """Calcolo ARIMA+GARCH a mezzanotte su tutti i file in Files/."""
+    xlsx_files = sorted(_FILES_DIR.glob('*.xlsx')) if _FILES_DIR.exists() else [Path(_XLSX)]
+    for xlsx_path in xlsx_files:
+        filename = xlsx_path.name
+        cache_pkl = _file_cache_path(filename)
+        try:
+            if not Path(cache_pkl).exists():
+                print(f"⚠ ARIMA {filename}: cache non trovata, skip")
+                continue
+            with open(cache_pkl, 'rb') as f:
+                cached = pickle.load(f)
+            ret = cached.get('close_returns')
+            if ret is None or (hasattr(ret, 'empty') and ret.empty):
+                print(f"⚠ ARIMA {filename}: nessun dato disponibile")
+                continue
+            print(f"🌙 ARIMA+GARCH {filename} — {len(ret.columns)} asset…")
+            mu, cov = _compute_arima_garch(ret, window=250)
+            if mu is not None:
+                _save_arima_to_pkl(mu, cov, target_pkl=cache_pkl)
+                print(f"✓ ARIMA+GARCH completato: {filename}")
+            else:
+                print(f"⚠ ARIMA {filename}: calcolo non riuscito")
+        except Exception as e:
+            print(f"⚠ ARIMA notturno {filename} fallito: {e}")
 
 
 try:
