@@ -763,7 +763,7 @@ def _register_auth(flask_server, add_login_routes: bool = False):
                 status  = usr['status']
                 plan    = usr['plan']
                 role    = usr['role']
-                email   = usr['email'] or '—'
+                email   = uname
                 created = usr['created_at']
 
                 badge_cls = {
