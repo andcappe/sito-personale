@@ -58,6 +58,8 @@ GOOGLE_CLIENT_ID     = os.environ.get('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
 FACEBOOK_APP_ID      = os.environ.get('FACEBOOK_APP_ID', '')
 FACEBOOK_APP_SECRET  = os.environ.get('FACEBOOK_APP_SECRET', '')
+ADMIN_EMAIL          = os.environ.get('ADMIN_EMAIL', 'admin@dashboard.local')
+ADMIN_PASSWORD       = os.environ.get('ADMIN_PASSWORD', 'admin123')
 
 for _srv in (portafoglio_srv, macro_srv, frontiera_srv):
     _srv.secret_key = SECRET_KEY
@@ -892,6 +894,13 @@ def _register_auth(flask_server, add_login_routes: bool = False):
 _register_auth(portafoglio_srv, add_login_routes=True)
 _register_auth(macro_srv)
 _register_auth(frontiera_srv)
+
+# ─── Bootstrap admin di default ───────────────────────────────────────────────
+from auth import add_user as _add_user, list_users as _list_users, update_user as _upd_user
+if not _list_users():
+    _add_user(ADMIN_EMAIL, ADMIN_PASSWORD, role='admin')
+    _upd_user(ADMIN_EMAIL, status='active', plan='admin')
+    print(f"[SETUP] Creato admin di default: {ADMIN_EMAIL}", flush=True)
 
 # ─── Routing WSGI ─────────────────────────────────────────────────────────────
 from werkzeug.exceptions import NotFound
