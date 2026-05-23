@@ -785,12 +785,20 @@ def _register_auth(flask_server, add_login_routes: bool = False):
                     new_status = request.form.get('status', '')
                     new_plan   = request.form.get('plan', '')
                     new_role   = request.form.get('role', '')
+                    new_pw     = request.form.get('new_password', '').strip()
                     kwargs = {}
                     if new_status: kwargs['status'] = new_status
                     if new_plan:   kwargs['plan']   = new_plan
                     if new_role:   kwargs['role']   = new_role
-                    update_user(target, **kwargs)
-                    msg_html = f'<div class="msg msg-ok">Utente <b>{target}</b> aggiornato.</div>'
+                    if new_pw:
+                        if len(new_pw) < 8:
+                            msg_html = '<div class="msg msg-err">Password minimo 8 caratteri.</div>'
+                        else:
+                            import hashlib as _hl
+                            kwargs['password_hash'] = _hl.sha256(f"{target}:{new_pw}".encode()).hexdigest()
+                    if not msg_html:
+                        update_user(target, **kwargs)
+                        msg_html = f'<div class="msg msg-ok">Utente <b>{target}</b> aggiornato.</div>'
 
             users = list_users()
             total     = len(users)
@@ -836,6 +844,8 @@ def _register_auth(flask_server, add_login_routes: bool = False):
                       {_sel('status', ['active','pending','suspended'], status)}
                       {_sel('plan',   ['free','premium','admin'], plan)}
                       {_sel('role',   ['user','admin'], role)}
+                      <input type="password" name="new_password" placeholder="Nuova password (opz.)"
+                             style="width:140px;padding:3px 6px;font-size:0.78rem;border:1px solid #ccd9ee;border-radius:4px">
                       <button class="btn-sm btn-save" type="submit" {protect}>Salva</button>
                     </form>
                     <form method="post" style="display:inline"
