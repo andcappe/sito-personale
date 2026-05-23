@@ -3131,10 +3131,12 @@ def load_session_cb(session_id):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Startup: carica market_data.pkl se esiste, altrimenti scarica in background
+# Startup: carica tutti i pkl esistenti, scarica in background quelli mancanti
 # ─────────────────────────────────────────────────────────────────────────────
 def _startup_load():
     global _DL_STATE, _DL_BUFFER
+
+    # Carica ETF (file attivo di default) nel buffer principale
     if _MARKET_DATA_FILE.exists():
         try:
             with open(_MARKET_DATA_FILE, 'rb') as f:
@@ -3144,22 +3146,39 @@ def _startup_load():
                 _DL_STATE['status']  = 'done'
                 _DL_STATE['current'] = 1
                 _DL_STATE['total']   = 1
-            print(f"✓ Dati caricati da disco — {data.get('saved_at', '?')}")
-            return
+            print(f"✓ Dati ETF caricati da disco — {data.get('saved_at', '?')}")
         except Exception as e:
             print(f"⚠ Lettura market_data.pkl fallita: {e}")
 
-    # Nessun file: download immediato in background
-    def _bg():
-        try:
-            start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
-            tickers, descr, valuta = _build_ticker_list()
-            _do_download(tickers, descr, valuta, start)
-        except Exception as e:
-            print(f"⚠ Download iniziale fallito: {e}")
+    # Scarica in background tutti i file xlsx per cui manca il pkl
+    def _bg_all():
+        start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+        xlsx_files = sorted(_FILES_DIR.glob('*.xlsx')) if _FILES_DIR.exists() else [Path(_XLSX)]
+        for xlsx_path in xlsx_files:
+            filename  = xlsx_path.name
+            cache_pkl = _file_cache_path(filename)
+            if Path(cache_pkl).exists():
+                print(f"✓ Cache {filename} già presente — skip download")
+                continue
+            try:
+                print(f"▶ Download iniziale {filename}…")
+                tickers, descr, valuta = _build_ticker_list(filename)
+                is_etf = (filename == 'ETF.xlsx')
+                _do_download(tickers, descr, valuta, start,
+                             cache_file=cache_pkl, update_buffer=is_etf)
+                # Calcola ARIMA subito dopo il download
+                if Path(cache_pkl).exists():
+                    with open(cache_pkl, 'rb') as f:
+                        cached = pickle.load(f)
+                    ret = cached.get('close_returns')
+                    if ret is not None and not ret.empty:
+                        mu, cov = _compute_arima_garch(ret, window=250)
+                        if mu is not None:
+                            _save_arima_to_pkl(mu, cov, target_pkl=cache_pkl)
+            except Exception as e:
+                print(f"⚠ Download iniziale {filename} fallito: {e}")
 
-    print("▶ market_data.pkl non trovato — download in background…")
-    threading.Thread(target=_bg, daemon=True).start()
+    threading.Thread(target=_bg_all, daemon=True).start()
 
 _startup_load()
 
