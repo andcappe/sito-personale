@@ -906,11 +906,11 @@ _register_auth(macro_srv)
 _register_auth(frontiera_srv)
 
 # ─── Bootstrap admin di default ───────────────────────────────────────────────
-from auth import add_user as _add_user, list_users as _list_users, update_user as _upd_user
-if not _list_users():
+from auth import add_user as _add_user, update_user as _upd_user
+if ADMIN_EMAIL and ADMIN_PASSWORD:
     _add_user(ADMIN_EMAIL, ADMIN_PASSWORD, role='admin')
     _upd_user(ADMIN_EMAIL, status='active', plan='admin')
-    print(f"[SETUP] Creato admin di default: {ADMIN_EMAIL}", flush=True)
+    print(f"[SETUP] Admin sincronizzato: {ADMIN_EMAIL}", flush=True)
 
 # ─── Routing WSGI ─────────────────────────────────────────────────────────────
 from werkzeug.exceptions import NotFound
