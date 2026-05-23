@@ -3154,8 +3154,10 @@ def _startup_load():
         except Exception as e:
             print(f"⚠ Lettura market_data.pkl fallita: {e}")
 
-    # Scarica in background tutti i file xlsx per cui manca il pkl
+    # Scarica in background i file xlsx per cui manca il pkl — con pausa tra uno e l'altro
     def _bg_all():
+        import time as _time
+        _time.sleep(10)  # attendi che il server sia completamente avviato
         start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
         xlsx_files = sorted(_FILES_DIR.glob('*.xlsx')) if _FILES_DIR.exists() else [Path(_XLSX)]
         for xlsx_path in xlsx_files:
@@ -3171,6 +3173,7 @@ def _startup_load():
                 _do_download(tickers, descr, valuta, start,
                              cache_file=cache_pkl, update_buffer=is_etf)
                 print(f"✓ Download completato: {filename}")
+                _time.sleep(5)  # pausa tra un file e l'altro
             except Exception as e:
                 print(f"⚠ Download iniziale {filename} fallito: {e}")
 
