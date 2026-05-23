@@ -921,7 +921,7 @@ def _build_drawdown_chart(prices_data, chart_assets, frontier_weights, show_fron
 # ─────────────────────────────────────────────────────────────────────────────
 def _navbar():
     from navbar import make_navbar
-    return make_navbar()
+    return make_navbar(current='frontiera')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout
@@ -1167,7 +1167,7 @@ app.layout = html.Div([
             }),
         ], style={'display':'flex','alignItems':'flex-start'}),
 
-    ], style={'marginTop':'64px'}),
+    ], style={'marginTop':'106px'}),
 
     # ── Stores ───────────────────────────────────────────────────────────────
     dcc.Store(id='_fe-page-load',    data=1),

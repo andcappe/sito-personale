@@ -1112,7 +1112,7 @@ _STATUS_RED   = {**_STATUS_GREY, 'color': '#c0392b', 'fontWeight': '600'}
 # ─────────────────────────────────────────────────────────────────────────────
 def _navbar():
     from navbar import make_navbar
-    return make_navbar()
+    return make_navbar(current='portafoglio')
 app.layout = html.Div([
     # ── Navbar ───────────────────────────────────────────────────────────────
     _navbar(),
@@ -1378,7 +1378,7 @@ app.layout = html.Div([
     # ── Contenuto Tab 1 ───────────────────────────────────────────────────────
     html.Div(id='tab1-content'),
 
-], style={'marginTop': '64px', 'padding': '0 1%'}),  # offset navbar fissa
+], style={'marginTop': '106px', 'padding': '0 1%'}),
 ])
 
 

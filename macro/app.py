@@ -775,7 +775,7 @@ def _slider_params(df: pd.DataFrame, step_years: int = 5):
 
 def _navbar():
     from navbar import make_navbar
-    return make_navbar()
+    return make_navbar(current='macro')
 def _sidebar():
     return html.Div([
         html.Div(html.B("Serie attive", style={"font-size": "11px"}),
