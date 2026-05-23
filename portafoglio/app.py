@@ -1697,6 +1697,7 @@ def add_ticker_row(n, ticker, desc, valuta, rows):
     Output('refresh-poll-interval',    'disabled',    allow_duplicate=True),
     Output('refresh-poll-interval',    'n_intervals', allow_duplicate=True),
     Output('refresh-data-btn',         'disabled',    allow_duplicate=True),
+    Output('asset-checklist',          'data',        allow_duplicate=True),
     Input('save-file-editor-btn',      'n_clicks'),
     State('file-editor-table',         'data'),
     State('file-selector',             'value'),
@@ -1704,11 +1705,14 @@ def add_ticker_row(n, ticker, desc, valuta, rows):
 )
 def save_file_editor(n, rows, filename):
     if not rows:
-        return '⚠ La lista è vuota, nessun file salvato.', no_update, no_update, no_update, no_update, no_update
+        return '⚠ La lista è vuota, nessun file salvato.', no_update, no_update, no_update, no_update, no_update, no_update
     filename = filename or 'ETF.xlsx'
+    _cl_clear(_get_username())
     ok = _save_xlsx_rows(filename, rows)
     if not ok:
-        return '⚠ Errore nel salvataggio del file.', no_update, no_update, no_update, no_update, no_update
+        return '⚠ Errore nel salvataggio del file.', no_update, no_update, no_update, no_update, no_update, no_update
+    # Aggiorna subito la lista asset con i ticker salvati
+    new_options = [{'label': r.get('descrizione') or r.get('ticker',''), 'value': r.get('descrizione') or r.get('ticker','')} for r in rows if r.get('ticker')]
     # Imposta il file editato come attivo e avvia download
     _active_file_store['filename'] = filename
     start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
@@ -1728,9 +1732,9 @@ def save_file_editor(n, rows, filename):
         print(f"▶ Aggiornamento post-salvataggio {filename}: {len(tickers)} ticker")
     except Exception as e:
         print(f"⚠ Avvio download dopo salvataggio fallito: {e}")
-        return '⚠ Download non avviato.', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update
-    # Chiude modal e abilita il poll per aggiornare la griglia automaticamente
-    return no_update, _EDITOR_HIDDEN, _list_files(), False, 0, True
+        return '⚠ Download non avviato.', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update, new_options
+    # Chiude modal, aggiorna lista subito e abilita il poll per i dati aggiornati
+    return no_update, _EDITOR_HIDDEN, _list_files(), False, 0, True, new_options
 
 
 # ─────────────────────────────────────────────────────────────────────────────
