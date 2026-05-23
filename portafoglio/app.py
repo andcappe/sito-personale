@@ -314,11 +314,40 @@ _DL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
 _DL_BUFFER: dict = {}   # dati file attivo — salvati su disco, permanenti
 _DL_LOCK   = threading.Lock()
 
-_CL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
-_CL_BUFFER: dict = {}   # dati cliente — solo in memoria
+_CL_BUFFERS: dict = {}   # {username: {dati cliente}} — per-utente, solo in memoria
+_CL_STATES:  dict = {}   # {username: stato download cliente}
 _CL_LOCK   = threading.Lock()
 
 _active_file_store: dict = {'filename': 'ETF.xlsx'}  # file attivo corrente
+
+
+def _get_username() -> str:
+    """Username dalla sessione Flask; 'anon' come fallback."""
+    try:
+        from flask import session as _fs
+        return _fs.get('username') or 'anon'
+    except Exception:
+        return 'anon'
+
+
+def _cl_buf(username: str) -> dict:
+    with _CL_LOCK:
+        if username not in _CL_BUFFERS:
+            _CL_BUFFERS[username] = {}
+        return _CL_BUFFERS[username]
+
+
+def _cl_state(username: str) -> dict:
+    with _CL_LOCK:
+        if username not in _CL_STATES:
+            _CL_STATES[username] = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
+        return _CL_STATES[username]
+
+
+def _cl_clear(username: str):
+    with _CL_LOCK:
+        _CL_BUFFERS[username] = {}
+        _CL_STATES[username]  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
 
 
 def _build_ticker_list(filename='ETF.xlsx'):
@@ -469,13 +498,12 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
         _DL_STATE['current'] = total
 
 
-def _do_download_client(tickers, descrizione, valuta, start_date):
-    """Download per file cliente: dati solo in _CL_BUFFER, ETF e market_data.pkl intoccati."""
-    global _CL_STATE, _CL_BUFFER
+def _do_download_client(tickers, descrizione, valuta, start_date, username='anon'):
+    """Download per file cliente: dati isolati in _CL_BUFFERS[username]."""
     total = len(tickers)
     with _CL_LOCK:
-        _CL_STATE = {'status': 'running', 'current': 0, 'total': total, 'errors': []}
-        _CL_BUFFER.clear()
+        _CL_STATES[username]  = {'status': 'running', 'current': 0, 'total': total, 'errors': []}
+        _CL_BUFFERS[username] = {}
 
     _proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or None
     _ua    = (os.environ.get('YF_USER_AGENT') or
@@ -532,18 +560,18 @@ def _do_download_client(tickers, descrizione, valuta, start_date):
                     all_prices[desc] = px
                 except Exception as e2:
                     with _CL_LOCK:
-                        _CL_STATE['errors'].append(f"{t}: {e2}")
+                        _CL_STATES[username]['errors'].append(f"{t}: {e2}")
         except Exception as e:
             with _CL_LOCK:
-                _CL_STATE['errors'].append(f"Batch {i}: {e}")
+                _CL_STATES[username]['errors'].append(f"Batch {i}: {e}")
         with _CL_LOCK:
-            _CL_STATE['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
+            _CL_STATES[username]['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
         time.sleep(0.3)
 
     if not all_prices:
         with _CL_LOCK:
-            _CL_STATE['status'] = 'error'
-        print("❌ Download cliente fallito: nessun dato")
+            _CL_STATES[username]['status'] = 'error'
+        print(f"❌ Download cliente [{username}] fallito: nessun dato")
         return
 
     original_prices = pd.DataFrame(all_prices)
@@ -555,16 +583,16 @@ def _do_download_client(tickers, descrizione, valuta, start_date):
     saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
 
     with _CL_LOCK:
-        _CL_BUFFER.update({
+        _CL_BUFFERS[username].update({
             'date':            datetime.now().strftime('%Y-%m-%d'),
             'saved_at':        saved_at,
             'ticker_map':      ticker_map,
             'original_prices': original_prices,
             'close_returns':   close_returns,
         })
-        _CL_STATE['status']  = 'done'
-        _CL_STATE['current'] = total
-    print(f"✓ Download cliente: {len(all_prices)} asset in _CL_BUFFER (ETF intoccato)")
+        _CL_STATES[username]['status']  = 'done'
+        _CL_STATES[username]['current'] = total
+    print(f"✓ Download cliente [{username}]: {len(all_prices)} asset isolati")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1389,9 +1417,7 @@ def update_output(contents, filename):
     if triggered_id == 'initial_load':
         # Ogni volta che la pagina viene (ri)caricata, svuota il buffer cliente
         # e ripristina il file attivo a ETF (default).
-        with _CL_LOCK:
-            _CL_BUFFER.clear()
-            _CL_STATE['status'] = 'idle'
+        _cl_clear(_get_username())
         _active_file_store['filename'] = 'ETF.xlsx'
         import pickle as _pickle
         cr, op, tm, saved_at = None, None, {}, ''
@@ -1492,10 +1518,12 @@ def update_output(contents, filename):
                 custom      = {'tickers': tickers, 'descr': descrizione, 'valuta': valuta}
 
                 start_date = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
-                print(f"▶ Upload file ticker: {len(tickers)} asset da scaricare da {start_date}")
+                _username  = _get_username()
+                print(f"▶ Upload file ticker [{_username}]: {len(tickers)} asset da scaricare da {start_date}")
                 threading.Thread(
                     target=_do_download_client,
                     args=(tickers, descrizione, valuta, start_date),
+                    kwargs={'username': _username},
                     daemon=True,
                 ).start()
 
@@ -1562,9 +1590,7 @@ def on_file_selected(filename):
     if not filename:
         raise PreventUpdate
     _active_file_store['filename'] = filename
-    with _CL_LOCK:
-        _CL_BUFFER.clear()
-        _CL_STATE['status'] = 'idle'
+    _cl_clear(_get_username())
 
     cache = _file_cache_path(filename)
     if cache.exists():
@@ -1746,9 +1772,7 @@ def start_refresh(n_clicks, start_date_picker):
         return (no_update, no_update, False, _MODAL_SHOWN, err_fill,
                 'Errore', f'❌ {e}', _STATUS_RED)
 
-    with _CL_LOCK:
-        _CL_BUFFER.clear()
-        _CL_STATE['status'] = 'idle'
+    _cl_clear(_get_username())
     cache = _file_cache_path(active_file)
     threading.Thread(target=_do_download,
                      args=(tickers, descr, valuta, start_date),
@@ -1777,10 +1801,11 @@ def start_refresh(n_clicks, start_date_picker):
     prevent_initial_call=True,
 )
 def poll_refresh_progress(n):
-    # Legge dal buffer cliente se attivo, altrimenti da ETF
+    # Legge dal buffer cliente (per-utente) se attivo, altrimenti da ETF
+    _u = _get_username()
     with _CL_LOCK:
-        cl_state  = dict(_CL_STATE)
-        cl_buffer = dict(_CL_BUFFER)
+        cl_state  = dict(_cl_state(_u))
+        cl_buffer = dict(_cl_buf(_u))
     with _DL_LOCK:
         dl_state  = dict(_DL_STATE)
         dl_buffer = dict(_DL_BUFFER)
@@ -1890,9 +1915,9 @@ def salva_dati(n_clicks, original_prices_data):
     if not n_clicks or n_clicks == 0:
         raise PreventUpdate
 
-    # Legge dal buffer cliente se attivo, altrimenti da ETF
+    # Legge dal buffer cliente (per-utente) se attivo, altrimenti da ETF
     with _CL_LOCK:
-        cl_prices = _CL_BUFFER.get('original_prices')
+        cl_prices = _cl_buf(_get_username()).get('original_prices')
     if cl_prices is not None and not cl_prices.empty:
         df_prices = cl_prices
     else:
