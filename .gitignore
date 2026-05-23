@@ -3,7 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 sessions/
-!sessions/market_data.pkl
+!sessions/market_data*.pkl
+portafoglio/sessions/
+!portafoglio/sessions/market_data*.pkl
 ~$*
 .DS_Store
 *.log
