@@ -611,6 +611,24 @@ def _read_shared_data():
     return None, None, None
 
 
+def _read_arima_from_pkl(pkl_path):
+    """Legge mu/cov ARIMA da un pkl specifico. Restituisce (mu, cov, ts) o (None, None, None)."""
+    try:
+        if os.path.exists(pkl_path):
+            with open(pkl_path, 'rb') as f:
+                data = pickle.load(f)
+            arima = data.get('arima')
+            if arima and isinstance(arima, dict):
+                mu_raw  = arima.get('mu')
+                cov_raw = arima.get('cov')
+                ts      = arima.get('computed_at', '')
+                if mu_raw and cov_raw:
+                    return pd.Series(mu_raw), pd.DataFrame(cov_raw), ts
+    except Exception:
+        pass
+    return None, None, None
+
+
 def _read_arima_cache():
     """Legge mu/cov ARIMA pre-calcolati dal buffer live o dal pkl.
     Preferisce il dato più recente tra buffer e pkl (confronto timestamp).
@@ -1766,13 +1784,14 @@ def update_perf_chart(chart_vals, port_chart_vals, date_start, date_end, f1j, f2
     State('fe-selected-pt',       'data'),
     State('fe-arima-window',      'value'),
     State('fe-data-source',       'data'),
+    State('fe-active-file',       'data'),
     prevent_initial_call=True,
 )
 def calc_and_render(n, stock_data, prices_data,
                     p1_vals, p2_vals, p3_vals, p_ids, chart_vals,
                     n_port, wmin, wmax, rf, risk,
                     date_start, date_end, port_chart_vals, port_chart_ids, sel_pt_cur,
-                    arima_window, data_source):
+                    arima_window, data_source, active_file):
     _EMPTY_FIG = go.Figure().update_layout(
         paper_bgcolor='white', plot_bgcolor='#f8faff', font_color='#1a3a5c',
         annotations=[dict(text='Carica dati e clicca Calcola Frontiera',
@@ -1811,7 +1830,7 @@ def calc_and_render(n, stock_data, prices_data,
             return all_assets if default_all else []
         return sel if len(sel) >= 2 else []
 
-    p1_sel = _p_assets(p1_vals, p_ids, default_all=False)
+    p1_sel = _p_assets(p1_vals, p_ids, default_all=True)
     p2_sel = _p_assets(p2_vals, p_ids, default_all=False)
     p3_sel = _p_assets(p3_vals, p_ids, default_all=False)
 
@@ -1853,7 +1872,10 @@ def calc_and_render(n, stock_data, prices_data,
             else:
                 mu_cached, cov_cached, arima_ts = None, None, None
         else:
-            mu_cached, cov_cached, arima_ts = _read_arima_cache()
+            cache_path = _fe_port_cache_path(active_file or 'ETF.xlsx')
+            mu_cached, cov_cached, arima_ts = _read_arima_from_pkl(cache_path)
+            if mu_cached is None:
+                mu_cached, cov_cached, arima_ts = _read_arima_cache()
         print(f"[calc_and_render] ARIMA cache ({_src}): {'trovata' if mu_cached is not None else 'VUOTA'}")
         if mu_cached is not None:
             # Cache disponibile → inietta nel _ARIMA_STATE e scatta on_arima_done subito
@@ -2363,7 +2385,7 @@ def on_arima_done(req_id, stock_data, prices_data,
             return all_assets if default_all else []
         return sel if len(sel) >= 2 else []
 
-    p1_sel = _p_assets(p1_vals, p_ids, default_all=False)
+    p1_sel = _p_assets(p1_vals, p_ids, default_all=True)
     p2_sel = _p_assets(p2_vals, p_ids, default_all=False)
     p3_sel = _p_assets(p3_vals, p_ids, default_all=False)
 
