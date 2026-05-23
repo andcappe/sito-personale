@@ -1887,14 +1887,12 @@ def calc_and_render(n, stock_data, prices_data,
                     'pct': len(all_assets), 'total': len(all_assets),
                     'error': None, 'mu': mu_cached, 'cov': cov_cached,
                 })
-            _prog_style = {'display':'flex','alignItems':'center','justifyContent':'center',
-                           'gap':'10px','padding':'8px 16px','background':'#eef4ff',
-                           'borderRadius':'8px','margin':'4px 0','flexShrink':'0'}
             _nu = no_update
             # Restituisce req_id + ':done' così on_arima_done scatta immediatamente
+            # Clessidra nascosta: la cache è già disponibile, non serve mostrare il progresso
             return (_nu, _nu, _nu, _nu, _nu, _nu,
                     _nu, _nu, _nu, _nu, _nu,
-                    True, req_id + ':done', _prog_style)
+                    True, req_id + ':done', {'display':'none'})
         else:
             # Nessuna cache → calcolo in background
             import uuid as _uuid
