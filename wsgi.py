@@ -539,12 +539,17 @@ def _register_auth(flask_server, add_login_routes: bool = False):
                 if not MAIL_FROM or not MAIL_PASSWORD:
                     msg = '<div class="error">Email non configurata sul server. Contatta l\'amministratore.</div>'
                 else:
-                    sent = _send_reset_email(email_val, token) if token else False
-                    if sent:
+                    if token:
+                        sent = _send_reset_email(email_val, token)
+                        if not sent:
+                            msg = '<div class="error">Errore nell\'invio email. Riprova tra poco o contatta l\'amministratore.</div>'
+                        else:
+                            msg = '<div class="success">Se l\'email è registrata riceverai un link entro pochi minuti.</div>'
+                            email_val = ''
+                    else:
+                        # Email non trovata — mostra successo per non rivelare se l'utente esiste
                         msg = '<div class="success">Se l\'email è registrata riceverai un link entro pochi minuti.</div>'
                         email_val = ''
-                    else:
-                        msg = '<div class="error">Errore nell\'invio email. Riprova tra poco o contatta l\'amministratore.</div>'
             return (_FORGOT_HTML
                     .replace('__MSG__', msg)
                     .replace('__EMAIL__', email_val))
