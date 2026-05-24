@@ -354,6 +354,12 @@ def _cl_clear(username: str):
         _CL_STATES[username]  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
 
 
+def _user_cache_path(username: str, filename: str = None) -> Path:
+    fn   = filename or _active_file_store.get('filename', 'ETF.xlsx')
+    stem = Path(fn).stem
+    return SESSIONS_DIR / f'market_data_{stem}_user_{username}.pkl'
+
+
 def _build_ticker_list(filename='ETF.xlsx'):
     df   = pd.read_excel(_xlsx_path(filename))
     cols = df.columns.tolist()
@@ -709,6 +715,138 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
         _CL_STATES[username]['status']  = 'done'
         _CL_STATES[username]['current'] = total
     print(f"✓ Download cliente [{username}]: {len(all_prices)} asset isolati")
+
+
+def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, username, filename, all_descr=None):
+    """Scarica nuovi ticker da Gestisci, merge con i dati correnti (_DL_BUFFER), salva pkl utente.
+    all_descr: lista completa delle descrizioni desiderate — filtra il merged result a questi soli."""
+    import shutil as _shutil
+    total    = len(new_tickers)
+    user_pkl = SESSIONS_DIR / f'market_data_{Path(filename).stem}_user_{username}.pkl'
+
+    with _DL_LOCK:
+        _DL_STATE.update({'status': 'running', 'current': 0, 'total': total, 'errors': []})
+
+    # Non copiare il pkl esistente: partiamo sempre da zero per non includere ticker non voluti.
+    # Se l'utente non ha un pkl, non creiamone uno adesso — lo creiamo dopo il merge.
+
+    _proxy     = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or None
+    _ua        = (os.environ.get('YF_USER_AGENT') or
+                  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                  'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+    _dl_kwargs = dict(auto_adjust=True, progress=False)
+    if _proxy:
+        _dl_kwargs['proxy'] = _proxy
+    try:
+        import yfinance.data as _yfd
+        if hasattr(_yfd, 'YfData'):
+            _yfd.YfData._headers = {'User-Agent': _ua}
+    except Exception:
+        pass
+
+    fx = None
+    try:
+        fx = yf.download(['EURUSD=X', 'EURGBP=X'], start=start_date,
+                         group_by='ticker', **_dl_kwargs)
+    except Exception as e:
+        print(f"⚠ FX gestisci fallito: {e}")
+
+    def _fx(name):
+        if fx is None or fx.empty:
+            return None
+        try:
+            return fx[(name, 'Close')] if isinstance(fx.columns, pd.MultiIndex) else fx['Close']
+        except Exception:
+            return None
+
+    eurusd, eurgbp = _fx('EURUSD=X'), _fx('EURGBP=X')
+    all_prices = {}
+
+    for i in range(0, total, DOWNLOAD_BATCH_SIZE):
+        bt = new_tickers[i:i + DOWNLOAD_BATCH_SIZE]
+        bd = new_descr[i:i + DOWNLOAD_BATCH_SIZE]
+        bv = new_valuta[i:i + DOWNLOAD_BATCH_SIZE]
+        try:
+            raw = yf.download(bt, start=start_date, group_by='ticker', **_dl_kwargs)
+            if raw.empty:
+                raise ValueError("risposta vuota")
+            for j, t in enumerate(bt):
+                desc, curr = bd[j], bv[j]
+                try:
+                    px = (raw[(t, 'Close')].copy() if isinstance(raw.columns, pd.MultiIndex)
+                          else raw['Close'].copy())
+                    px = px.ffill()
+                    if curr == 'USD' and eurusd is not None:
+                        px = px / eurusd.reindex(px.index).ffill()
+                    elif curr == 'GBP' and eurgbp is not None:
+                        px = px / eurgbp.reindex(px.index).ffill()
+                    all_prices[desc] = px
+                except Exception as e2:
+                    with _DL_LOCK:
+                        _DL_STATE['errors'].append(f"{t}: {e2}")
+        except Exception as e:
+            with _DL_LOCK:
+                _DL_STATE['errors'].append(f"Batch {i}: {e}")
+        with _DL_LOCK:
+            _DL_STATE['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
+        time.sleep(0.3)
+
+    if not all_prices:
+        with _DL_LOCK:
+            _DL_STATE['status'] = 'error'
+        print(f"❌ Gestisci [{username}]: nessun dato scaricato")
+        return
+
+    new_prices = pd.DataFrame(all_prices)
+    new_prices.index = pd.to_datetime(new_prices.index)
+    new_prices = new_prices.ffill()
+    new_prices = _clean_prices(new_prices)
+
+    new_tm     = {new_descr[i]: new_tickers[i] for i in range(len(new_tickers))}
+    merged_op  = new_prices.copy()
+    merged_tm  = dict(new_tm)
+
+    # Merge con il pkl utente (fonte specifica per questo utente/file)
+    if user_pkl.exists():
+        try:
+            with open(user_pkl, 'rb') as f:
+                ex = pickle.load(f)
+            ex_op = ex.get('original_prices')
+            ex_tm = dict(ex.get('ticker_map', {}))
+            if ex_op is not None and not ex_op.empty:
+                for col in new_prices.columns:
+                    ex_op = ex_op.copy()
+                    ex_op[col] = new_prices[col].reindex(ex_op.index).ffill()
+                merged_op = ex_op
+                ex_tm.update(new_tm)
+                merged_tm = ex_tm
+                print(f"✓ Merge gestisci (pkl utente) — {len(merged_op.columns)} asset pre-filtro")
+        except Exception as e:
+            print(f"⚠ Merge gestisci pkl fallito: {e}")
+
+    # Filtra: tieni solo le descrizioni che l'utente vuole (all_descr)
+    if all_descr is not None:
+        want = set(all_descr)
+        keep = [c for c in merged_op.columns if c in want]
+        merged_op = merged_op[keep]
+        merged_tm = {k: v for k, v in merged_tm.items() if k in want}
+        print(f"✓ Filtro gestisci — {len(merged_op.columns)} asset finali")
+
+    merged_cr   = merged_op.pct_change(fill_method=None)
+    saved_at    = datetime.now().strftime('%d/%m/%Y %H:%M')
+    merged_data = {
+        'date':            datetime.now().strftime('%Y-%m-%d'),
+        'saved_at':        saved_at,
+        'ticker_map':      merged_tm,
+        'original_prices': merged_op,
+        'close_returns':   merged_cr,
+    }
+    _atomic_pkl_write(user_pkl, merged_data)
+    with _DL_LOCK:
+        _DL_BUFFER.update(merged_data)
+        _DL_STATE['status']  = 'done'
+        _DL_STATE['current'] = total
+    print(f"✓ Gestisci [{username}]: {user_pkl.name} — {len(merged_op.columns)} asset")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1778,8 +1916,37 @@ def on_file_selected(filename):
 def toggle_file_editor(open_n, close_n, filename):
     triggered = callback_context.triggered_id
     if triggered == 'gestisci-btn' and open_n:
-        rows = _load_xlsx_rows(filename or 'ETF.xlsx')
-        stem = Path(filename or 'ETF.xlsx').stem
+        fn   = filename or 'ETF.xlsx'
+        _u   = _get_username()
+        rows = None
+
+        # 1. Buffer cliente: file caricato via drag-and-drop nella sessione corrente (priorità max)
+        with _CL_LOCK:
+            cl_status = _CL_STATES.get(_u, {}).get('status', 'idle')
+            cl_tm     = dict(_CL_BUFFERS.get(_u, {}).get('ticker_map', {}))
+        if cl_status == 'done' and cl_tm:
+            rows = [{'ticker': v, 'descrizione': k, 'valuta': 'EUR'}
+                    for k, v in cl_tm.items()]
+
+        # 2. Pkl personale salvato via Gestisci per il file selezionato
+        if not rows:
+            user_pkl = _user_cache_path(_u, fn)
+            if user_pkl.exists():
+                try:
+                    with open(user_pkl, 'rb') as f:
+                        data = pickle.load(f)
+                    tm2 = data.get('ticker_map', {})
+                    if tm2:
+                        rows = [{'ticker': v, 'descrizione': k, 'valuta': 'EUR'}
+                                for k, v in tm2.items()]
+                except Exception:
+                    pass
+
+        # 3. Xlsx del file selezionato (fallback diretto)
+        if not rows:
+            rows = _load_xlsx_rows(fn)
+
+        stem = Path(fn).stem
         return _EDITOR_SHOWN, rows, f'Gestisci lista: {stem}', ''
     return _EDITOR_HIDDEN, no_update, no_update, no_update
 
@@ -1829,53 +1996,103 @@ def save_file_editor(n, rows, filename):
     if not rows:
         return '⚠ La lista è vuota, nessun file salvato.', no_update, no_update, no_update, no_update, no_update, no_update
     filename = filename or 'ETF.xlsx'
-    _cl_clear(_get_username())
-
+    _u       = _get_username()
     _active_file_store['filename'] = filename
+
     try:
         tickers     = [r['ticker']                         for r in rows if str(r.get('ticker', '')).strip()]
         descr       = [r.get('descrizione') or r['ticker'] for r in rows if str(r.get('ticker', '')).strip()]
         valuta_list = [r.get('valuta', 'EUR')              for r in rows if str(r.get('ticker', '')).strip()]
-        cache = _file_cache_path(filename)
 
-        # Identifica i ticker nuovi (non presenti nel pkl di default)
-        if cache.exists():
+        user_pkl = _user_cache_path(_u, filename)
+        new_tm   = {descr[i]: tickers[i] for i in range(len(tickers))}
+        want     = set(descr)
+
+        # ── Determina la sorgente dati già scaricati ──────────────────────────
+        # Priorità: buffer cliente (file caricato via drag-and-drop) >
+        #           pkl utente (Gestisci precedente) > cache di default
+        src_data = None
+        with _CL_LOCK:
+            cl_status = _CL_STATES.get(_u, {}).get('status', 'idle')
+            cl_buf    = dict(_CL_BUFFERS.get(_u, {}))
+
+        if cl_status == 'done' and cl_buf.get('original_prices') is not None:
+            src_data = cl_buf
+            # Salva subito il file personale come pkl utente così i prossimi
+            # accessi lo trovano anche dopo che CL_BUFFERS sarà resettato
+            _atomic_pkl_write(user_pkl, cl_buf)
+
+        if src_data is None and user_pkl.exists():
             try:
-                with open(cache, 'rb') as f:
-                    ex = pickle.load(f)
-                ex_cols = set(ex.get('original_prices', pd.DataFrame()).columns)
-                new_idx = [i for i, d in enumerate(descr) if d not in ex_cols]
-                if not new_idx:
-                    # Nessun ticker nuovo: chiudi editor, lista asset invariata
-                    return ('✓ File salvato — nessun nuovo asset da scaricare.',
-                            _EDITOR_HIDDEN, _list_files(),
-                            no_update, no_update, no_update, no_update)
-                dl_tickers = [tickers[i] for i in new_idx]
-                dl_descr   = [descr[i]   for i in new_idx]
-                dl_valuta  = [valuta_list[i] for i in new_idx]
-            except Exception as e:
-                print(f"⚠ Lettura pkl esistente fallita, tratto come nuovo: {e}")
-                dl_tickers, dl_descr, dl_valuta = tickers, descr, valuta_list
-        else:
-            dl_tickers, dl_descr, dl_valuta = tickers, descr, valuta_list
+                with open(user_pkl, 'rb') as f:
+                    src_data = pickle.load(f)
+            except Exception:
+                pass
 
-        # Memorizza ticker pendenti — il download parte solo quando l'utente clicca Aggiorna
-        start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
-        with _DL_LOCK:
-            _PENDING.update({
-                'tickers': dl_tickers, 'descr': dl_descr, 'valuta': dl_valuta,
-                'cache': cache, 'start': start,
-                'incremental': cache.exists(),
-            })
-        print(f"▶ {len(dl_tickers)} ticker in attesa — clicca Aggiorna per scaricare")
+        if src_data is None:
+            default_pkl = _file_cache_path(filename)
+            if default_pkl.exists():
+                try:
+                    with open(default_pkl, 'rb') as f:
+                        src_data = pickle.load(f)
+                except Exception:
+                    pass
+
+        existing_descr = set()
+        if src_data is not None:
+            existing_descr = set(src_data.get('ticker_map', {}).keys())
+            if not existing_descr and src_data.get('original_prices') is not None:
+                existing_descr = set(src_data['original_prices'].columns)
+
+        # Resetta il buffer cliente — ora il pkl utente è la fonte di verità
+        _cl_clear(_u)
+
+        # ── Ticker da scaricare (quelli non già presenti nella sorgente) ──────
+        new_idx    = [i for i, d in enumerate(descr) if d not in existing_descr]
+        dl_tickers = [tickers[i] for i in new_idx]
+        dl_descr   = [descr[i]   for i in new_idx]
+        dl_valuta  = [valuta_list[i] for i in new_idx]
+        start      = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+
+        if not dl_tickers:
+            # Nessun ticker nuovo — applica solo aggiunte/rimozioni alla sorgente
+            if src_data is not None and src_data.get('original_prices') is not None:
+                src_op    = src_data['original_prices']
+                keep_cols = [c for c in src_op.columns if c in want]
+                sliced    = {}
+                for key, val in src_data.items():
+                    if isinstance(val, pd.DataFrame) and not val.empty:
+                        sliced[key] = val[[c for c in keep_cols if c in val.columns]]
+                    else:
+                        sliced[key] = val
+                sliced['ticker_map']    = new_tm
+                sliced['close_returns'] = sliced['original_prices'].pct_change(fill_method=None)
+                sliced['saved_at']      = datetime.now().strftime('%d/%m/%Y %H:%M')
+                _atomic_pkl_write(user_pkl, sliced)
+                with _DL_LOCK:
+                    _DL_BUFFER.update(sliced)
+                    _DL_STATE.update({'status': 'done', 'current': len(keep_cols),
+                                      'total': len(keep_cols), 'errors': []})
+            return ('✓ Lista aggiornata — nessun nuovo asset da scaricare.',
+                    no_update, _list_files(),
+                    False, 0, True, no_update)
+
+        # ── Avvia download in background, editor rimane aperto ───────────────
+        print(f"▶ Download gestisci: {len(dl_tickers)} nuovi ticker per {_u}")
+        t = threading.Thread(
+            target=_do_gestisci_download,
+            args=(dl_tickers, dl_descr, dl_valuta, start, _u, filename, descr),
+            daemon=True,
+        )
+        t.start()
+
     except Exception as e:
-        print(f"⚠ Errore post-salvataggio: {e}")
+        print(f"⚠ Errore save_file_editor: {e}")
         return f'⚠ {e}', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update, no_update
 
-    # Chiude l'editor, SVUOTA la lista asset, chiede all'utente di cliccare Aggiorna
-    return ('✓ File salvato — clicca Aggiorna per caricare i nuovi asset.',
-            _EDITOR_HIDDEN, _list_files(),
-            no_update, no_update, no_update, [])
+    return (f'⏳ Download {len(dl_tickers)} asset in corso…',
+            no_update, _list_files(),
+            False, 0, True, no_update)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1964,15 +2181,14 @@ def start_refresh(n_clicks, start_date_picker):
     Output('modal-status-text',       'children', allow_duplicate=True),
     Output('modal-status-text',       'style',    allow_duplicate=True),
     Output('progress-modal-overlay',  'style',    allow_duplicate=True),
+    Output('file-editor-overlay',     'style',    allow_duplicate=True),
     Input('refresh-poll-interval', 'n_intervals'),
     prevent_initial_call=True,
 )
 def poll_refresh_progress(n):
-    # Legge dal buffer cliente (per-utente) se attivo, altrimenti da ETF
     _u = _get_username()
-    with _CL_LOCK:
-        cl_state  = dict(_cl_state(_u))
-        cl_buffer = dict(_cl_buf(_u))
+    cl_state  = dict(_cl_state(_u))
+    cl_buffer = dict(_cl_buf(_u))
     with _DL_LOCK:
         dl_state  = dict(_DL_STATE)
         dl_buffer = dict(_DL_BUFFER)
@@ -1994,14 +2210,14 @@ def poll_refresh_progress(n):
         return (no_update, no_update, no_update, no_update, no_update,
                 False, True,
                 modal_fill, f'{current} / {total}  ({pct}%)',
-                'Download in corso…', _STATUS_GREY, no_update)
+                'Download in corso…', _STATUS_GREY, no_update, no_update)
 
     if status == 'error':
         err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
         return (no_update, no_update, no_update, no_update, no_update,
                 True, False,
                 err_fill, '❌ Download fallito',
-                'Si è verificato un errore.', _STATUS_RED, no_update)
+                'Si è verificato un errore.', _STATUS_RED, no_update, _EDITOR_HIDDEN)
 
     close_returns   = buffer.get('close_returns')
     original_prices = buffer.get('original_prices')
@@ -2010,7 +2226,7 @@ def poll_refresh_progress(n):
         return (no_update, no_update, no_update, no_update, no_update,
                 True, False,
                 err_fill, '❌ Nessun dato ricevuto',
-                'Il download è terminato senza dati.', _STATUS_RED, no_update)
+                'Il download è terminato senza dati.', _STATUS_RED, no_update, _EDITOR_HIDDEN)
 
     options      = [{'label': col, 'value': col} for col in close_returns.columns]
     ticker_map   = buffer.get('ticker_map', {})
@@ -2032,7 +2248,7 @@ def poll_refresh_progress(n):
         True, False,
         ok_fill, f'✓ {n_ok} asset{err_note}',
         status_msg, _STATUS_GREEN if not n_err else {**_STATUS_GREEN, 'color': '#b8860b'},
-        _MODAL_HIDDEN,
+        _MODAL_HIDDEN, _EDITOR_HIDDEN,
     )
 
 
