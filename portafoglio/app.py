@@ -1764,9 +1764,7 @@ def save_file_editor(n, rows, filename):
                 for t, d, v in zip(tickers, descr, valuta_list):
                     if d not in existing_cols:
                         new_t.append(t); new_d.append(d); new_v.append(v)
-                # Carica subito i dati esistenti nel buffer senza toccarli
-                with _DL_LOCK:
-                    _DL_BUFFER.update(existing)
+                del existing  # libera subito la memoria
             except Exception:
                 new_t, new_d, new_v = tickers, descr, valuta_list
         else:
