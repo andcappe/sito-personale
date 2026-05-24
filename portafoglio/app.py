@@ -1830,13 +1830,12 @@ def save_file_editor(n, rows, filename):
         return '⚠ La lista è vuota, nessun file salvato.', no_update, no_update, no_update, no_update, no_update, no_update
     filename = filename or 'ETF.xlsx'
     _cl_clear(_get_username())
-    ok = _save_xlsx_rows(filename, rows)
-    if not ok:
-        return '⚠ Errore nel salvataggio del file.', no_update, no_update, no_update, no_update, no_update, no_update
 
     _active_file_store['filename'] = filename
     try:
-        tickers, descr, valuta_list = _build_ticker_list(filename)
+        tickers     = [r['ticker']                         for r in rows if str(r.get('ticker', '')).strip()]
+        descr       = [r.get('descrizione') or r['ticker'] for r in rows if str(r.get('ticker', '')).strip()]
+        valuta_list = [r.get('valuta', 'EUR')              for r in rows if str(r.get('ticker', '')).strip()]
         cache = _file_cache_path(filename)
 
         # Identifica i ticker nuovi (non presenti nel pkl di default)
