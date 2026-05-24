@@ -390,8 +390,10 @@ def _clean_prices(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True):
-    """Scarica da Yahoo Finance e salva nella cache; cache_file=None usa market_data.pkl."""
+def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True,
+                 merge_with_existing=False):
+    """Scarica da Yahoo Finance e salva nella cache; cache_file=None usa market_data.pkl.
+    Se merge_with_existing=True unisce i nuovi dati al pkl già presente invece di sovrascriverlo."""
     total = len(tickers)
     with _DL_LOCK:
         _DL_STATE.update({'status': 'running', 'current': 0, 'total': total, 'errors': []})
@@ -488,10 +490,33 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
         'close_returns':   close_returns,
     }
     target_pkl = cache_file or _MARKET_DATA_FILE
+
+    # Se merge_with_existing, unisce i nuovi prezzi al pkl esistente
+    if merge_with_existing and Path(target_pkl).exists():
+        try:
+            with open(target_pkl, 'rb') as f:
+                old = pickle.load(f)
+            old_prices = old.get('original_prices')
+            old_tm     = old.get('ticker_map', {})
+            if old_prices is not None:
+                combined = pd.concat([old_prices, original_prices], axis=1)
+                combined = combined.loc[:, ~combined.columns.duplicated(keep='last')]
+                combined = combined.sort_index().ffill()
+                combined = _clean_prices(combined)
+                merged_tm = {**old_tm, **ticker_map}
+                data['original_prices'] = combined
+                data['close_returns']   = combined.pct_change(fill_method=None)
+                data['ticker_map']      = merged_tm
+                if 'arima' in old:
+                    data['arima'] = old['arima']
+                print(f"↗ Merge completato: {len(combined.columns)} asset totali")
+        except Exception as e:
+            print(f"⚠ Merge con pkl esistente fallito (uso solo nuovi dati): {e}")
+
     try:
         with open(target_pkl, 'wb') as f:
             pickle.dump(data, f)
-        print(f"✓ {target_pkl.name} salvato — {len(all_prices)} asset — {saved_at}")
+        print(f"✓ {Path(target_pkl).name} salvato — {len(data['original_prices'].columns)} asset — {saved_at}")
     except Exception as e:
         print(f"⚠ Salvataggio su disco fallito: {e}")
 
@@ -1720,34 +1745,59 @@ def save_file_editor(n, rows, filename):
     ok = _save_xlsx_rows(filename, rows)
     if not ok:
         return '⚠ Errore nel salvataggio del file.', no_update, no_update, no_update, no_update, no_update, no_update
-    # Aggiorna subito la lista asset con i ticker salvati
+
     new_options = [{'label': r.get('descrizione') or r.get('ticker',''), 'value': r.get('descrizione') or r.get('ticker','')} for r in rows if r.get('ticker')]
-    # Imposta il file editato come attivo e avvia download
     _active_file_store['filename'] = filename
     start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+
     try:
         tickers, descr, valuta_list = _build_ticker_list(filename)
         cache = _file_cache_path(filename)
+
+        # Trova quali asset sono già presenti nel pkl — scarica solo i nuovi
+        new_t, new_d, new_v = [], [], []
+        if cache.exists():
+            try:
+                with open(cache, 'rb') as f:
+                    existing = pickle.load(f)
+                existing_cols = set(existing.get('original_prices', pd.DataFrame()).columns)
+                for t, d, v in zip(tickers, descr, valuta_list):
+                    if d not in existing_cols:
+                        new_t.append(t); new_d.append(d); new_v.append(v)
+                # Carica subito i dati esistenti nel buffer senza toccarli
+                with _DL_LOCK:
+                    _DL_BUFFER.update(existing)
+            except Exception:
+                new_t, new_d, new_v = tickers, descr, valuta_list
+        else:
+            new_t, new_d, new_v = tickers, descr, valuta_list
+
+        if not new_t:
+            # Nessun asset nuovo — lista già aggiornata, niente da scaricare
+            print(f"✓ {filename}: nessun nuovo asset da scaricare")
+            return '✓ Lista aggiornata — nessun nuovo asset da scaricare.', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update, new_options
+
         with _DL_LOCK:
             if _DL_STATE.get('status') == 'running':
                 cur = _DL_STATE.get('current', 0)
                 tot = _DL_STATE.get('total', 1) or 1
                 return (f'⚠ Download già in corso ({cur}/{tot}). Attendi il completamento.',
                         no_update, no_update, no_update, no_update, no_update, new_options)
-            _DL_BUFFER.clear()
             _DL_STATE.update({'status': 'running', 'current': 0,
-                              'total': len(tickers), 'errors': []})
+                              'total': len(new_t), 'errors': []})
+
         threading.Thread(
             target=_do_download,
-            args=(tickers, descr, valuta_list, start),
-            kwargs={'cache_file': cache, 'update_buffer': True},
+            args=(new_t, new_d, new_v, start),
+            kwargs={'cache_file': cache, 'update_buffer': True, 'merge_with_existing': True},
             daemon=True,
         ).start()
-        print(f"▶ Aggiornamento post-salvataggio {filename}: {len(tickers)} ticker")
+        print(f"▶ Download {len(new_t)} nuovi asset su {filename}")
+
     except Exception as e:
         print(f"⚠ Avvio download dopo salvataggio fallito: {e}")
         return '⚠ Download non avviato.', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update, new_options
-    # Chiude modal, aggiorna lista subito e abilita il poll per i dati aggiornati
+
     return no_update, _EDITOR_HIDDEN, _list_files(), False, 0, True, new_options
 
 
