@@ -1918,7 +1918,7 @@ def start_refresh(n_clicks, start_date_picker):
     _cl_clear(_get_username())
 
     if pending:
-        # Nuovi ticker da Gestisci: download solo quelli + merge + ARIMA
+        # Nuovi ticker da Gestisci: download solo quelli + merge nel pkl
         dl_tickers  = pending['tickers']
         dl_descr    = pending['descr']
         dl_valuta   = pending['valuta']
