@@ -300,7 +300,7 @@ def _get_df(json_str):
         df = pd.read_json(io.StringIO(json_str), orient='split')
         df.index = pd.to_datetime(df.index)
         _DF_CACHE[key] = df
-        if len(_DF_CACHE) > 20:
+        if len(_DF_CACHE) > 5:
             oldest = next(iter(_DF_CACHE))
             del _DF_CACHE[oldest]
     return _DF_CACHE[key].copy()
@@ -392,10 +392,11 @@ def _clean_prices(df: pd.DataFrame) -> pd.DataFrame:
 
 def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True):
     """Scarica da Yahoo Finance e salva nella cache; cache_file=None usa market_data.pkl."""
-    global _DL_STATE, _DL_BUFFER
     total = len(tickers)
     with _DL_LOCK:
-        _DL_STATE = {'status': 'running', 'current': 0, 'total': total, 'errors': []}
+        _DL_STATE.update({'status': 'running', 'current': 0, 'total': total, 'errors': []})
+        # Libera memoria dalla cache DataFrame prima di scaricare nuovi dati
+        _DF_CACHE.clear()
 
     # Proxy e User-Agent da variabili d'ambiente (configura su Render se Yahoo blocca)
     _proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or None
@@ -1628,6 +1629,14 @@ def on_file_selected(filename):
     tm       = {descr[i]: tickers[i] for i in range(len(tickers))}
     start    = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
     with _DL_LOCK:
+        if _DL_STATE.get('status') == 'running':
+            # Un download è già in corso: mostra messaggio, non sovrapporre
+            cur = _DL_STATE.get('current', 0)
+            tot = _DL_STATE.get('total', 1) or 1
+            return (filename, None, None, options, tm,
+                    f'Download già in corso ({cur}/{tot})…',
+                    html.Div(f'⏳ Attendi il download in corso prima di cambiare file…',
+                             style={'color': '#c0392b', 'font-size': '11px'}))
         _DL_BUFFER.clear()
         _DL_STATE.update({'status': 'running', 'current': 0, 'total': len(tickers), 'errors': []})
     threading.Thread(target=_do_download,
@@ -1720,6 +1729,11 @@ def save_file_editor(n, rows, filename):
         tickers, descr, valuta_list = _build_ticker_list(filename)
         cache = _file_cache_path(filename)
         with _DL_LOCK:
+            if _DL_STATE.get('status') == 'running':
+                cur = _DL_STATE.get('current', 0)
+                tot = _DL_STATE.get('total', 1) or 1
+                return (f'⚠ Download già in corso ({cur}/{tot}). Attendi il completamento.',
+                        no_update, no_update, no_update, no_update, no_update, new_options)
             _DL_BUFFER.clear()
             _DL_STATE.update({'status': 'running', 'current': 0,
                               'total': len(tickers), 'errors': []})
