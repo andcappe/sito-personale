@@ -390,7 +390,77 @@ def _clean_prices(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True, merge_with=None):
+def _atomic_pkl_write(path: Path, data: dict):
+    """Scrive il pkl in modo atomico: prima su .tmp, poi os.replace."""
+    tmp = path.with_suffix('.tmp')
+    with open(tmp, 'wb') as f:
+        pickle.dump(data, f)
+    os.replace(tmp, path)
+
+
+def _do_add_tickers(new_tickers, new_descr, new_valuta, start_date, cache_file):
+    """
+    Scarica solo i nuovi ticker (stessa procedura nightly) su file temp,
+    fa il merge con il pkl esistente, scrive atomicamente, aggiorna il buffer.
+    Lo status rimane 'running' fino a merge completato.
+    """
+    global _DL_STATE, _DL_BUFFER
+    total = len(new_tickers)
+    tmp_pkl = cache_file.parent / (cache_file.stem + '_adding_new.pkl')
+
+    try:
+        # Scarica i nuovi ticker su file temporaneo (NON tocca il pkl di default)
+        _do_download(new_tickers, new_descr, new_valuta, start_date,
+                     cache_file=tmp_pkl, update_buffer=False)
+        # _do_download lascia _DL_STATE['status'] invariato (update_buffer=False)
+
+        if not tmp_pkl.exists():
+            with _DL_LOCK:
+                _DL_STATE['status'] = 'error'
+            return
+
+        with open(tmp_pkl, 'rb') as f:
+            new_data = pickle.load(f)
+
+        # Merge: leggi il pkl esistente, aggiungi le nuove colonne
+        merged = dict(new_data)
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'rb') as f:
+                    ex = pickle.load(f)
+                ex_op = ex.get('original_prices')
+                ex_cr = ex.get('close_returns')
+                ex_tm = dict(ex.get('ticker_map', {}))
+                if ex_op is not None and ex_cr is not None:
+                    for col in new_data['original_prices'].columns:
+                        ex_op[col] = new_data['original_prices'][col].reindex(ex_op.index).ffill()
+                        ex_cr[col] = new_data['close_returns'][col].reindex(ex_op.index)
+                    ex_tm.update(new_data['ticker_map'])
+                    merged['original_prices'] = ex_op
+                    merged['close_returns']   = ex_cr
+                    merged['ticker_map']      = ex_tm
+                    print(f"✓ Merge — {len(ex_op.columns)} asset totali")
+            except Exception as e:
+                print(f"⚠ Merge fallito, uso solo nuovi: {e}")
+
+        # Scrittura atomica — il pkl di default viene sostituito solo qui
+        _atomic_pkl_write(cache_file, merged)
+
+        with _DL_LOCK:
+            _DL_BUFFER.update(merged)
+            _DL_STATE['status']  = 'done'
+            _DL_STATE['current'] = total
+
+    except Exception as e:
+        print(f"❌ _do_add_tickers: {e}")
+        with _DL_LOCK:
+            _DL_STATE['status'] = 'error'
+    finally:
+        if tmp_pkl.exists():
+            tmp_pkl.unlink()
+
+
+def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True):
     """Scarica da Yahoo Finance e salva nella cache; cache_file=None usa market_data.pkl."""
     global _DL_STATE, _DL_BUFFER
     total = len(tickers)
@@ -486,40 +556,17 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
         'original_prices': original_prices,
         'close_returns':   close_returns,
     }
-
-    # Merge con pkl esistente se richiesto (aggiunta incrementale di nuovi ticker)
-    if merge_with is not None and Path(merge_with).exists():
-        try:
-            with open(merge_with, 'rb') as f:
-                existing = pickle.load(f)
-            ex_op = existing.get('original_prices')
-            ex_cr = existing.get('close_returns')
-            if ex_op is not None and ex_cr is not None:
-                for col in original_prices.columns:
-                    ex_op[col] = original_prices[col].reindex(ex_op.index).ffill()
-                    ex_cr[col] = close_returns[col].reindex(ex_op.index)
-                existing['ticker_map'].update(ticker_map)
-                existing['saved_at'] = saved_at
-                existing['date'] = data['date']
-                data['original_prices'] = ex_op
-                data['close_returns'] = ex_cr
-                data['ticker_map'] = existing['ticker_map']
-                print(f"✓ Merge OK — {len(data['original_prices'].columns)} asset totali")
-        except Exception as e:
-            print(f"⚠ Merge con pkl esistente fallito, salvo solo nuovi ticker: {e}")
-
     target_pkl = cache_file or _MARKET_DATA_FILE
     try:
-        with open(target_pkl, 'wb') as f:
-            pickle.dump(data, f)
-        print(f"✓ {target_pkl.name} salvato — {len(data['original_prices'].columns)} asset — {saved_at}")
+        _atomic_pkl_write(target_pkl, data)
+        print(f"✓ {target_pkl.name} salvato — {len(all_prices)} asset — {saved_at}")
     except Exception as e:
         print(f"⚠ Salvataggio su disco fallito: {e}")
 
     with _DL_LOCK:
         if update_buffer:
             _DL_BUFFER.update(data)
-        _DL_STATE['status']  = 'done'
+            _DL_STATE['status'] = 'done'
         _DL_STATE['current'] = total
 
 
@@ -1733,17 +1780,16 @@ def save_file_editor(n, rows, filename):
     ok = _save_xlsx_rows(filename, rows)
     if not ok:
         return '⚠ Errore nel salvataggio del file.', no_update, no_update, no_update, no_update, no_update, no_update
-    # Aggiorna subito la lista asset con i ticker salvati
-    new_options = [{'label': r.get('descrizione') or r.get('ticker',''), 'value': r.get('descrizione') or r.get('ticker','')} for r in rows if r.get('ticker')]
-    # Imposta il file editato come attivo e avvia download (solo nuovi ticker)
+    # Imposta il file editato come attivo
     _active_file_store['filename'] = filename
     start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
     try:
         tickers, descr, valuta_list = _build_ticker_list(filename)
         cache = _file_cache_path(filename)
 
-        # Trova solo i ticker nuovi non presenti nel pkl esistente
-        dl_tickers, dl_descr, dl_valuta, merge_with = tickers, descr, valuta_list, None
+        # Identifica i ticker nuovi (non presenti nel pkl di default)
+        dl_tickers, dl_descr, dl_valuta = tickers, descr, valuta_list
+        incremental = False
         if cache.exists():
             try:
                 with open(cache, 'rb') as f:
@@ -1751,14 +1797,14 @@ def save_file_editor(n, rows, filename):
                 ex_cols = set(ex.get('original_prices', pd.DataFrame()).columns)
                 new_idx = [i for i, d in enumerate(descr) if d not in ex_cols]
                 if not new_idx:
-                    # Nessun ticker nuovo, chiudi senza download
-                    return ('✓ File salvato (nessun nuovo asset da scaricare).',
+                    # Nessun ticker nuovo: chiudi editor, lista asset invariata
+                    return ('✓ File salvato — nessun nuovo asset da scaricare.',
                             _EDITOR_HIDDEN, _list_files(),
-                            no_update, no_update, no_update, new_options)
+                            no_update, no_update, no_update, no_update)
                 dl_tickers = [tickers[i] for i in new_idx]
                 dl_descr   = [descr[i]   for i in new_idx]
                 dl_valuta  = [valuta_list[i] for i in new_idx]
-                merge_with = cache
+                incremental = True
                 print(f"▶ Nuovi ticker da scaricare: {dl_tickers}")
             except Exception as e:
                 print(f"⚠ Lettura pkl esistente fallita, scarico tutto: {e}")
@@ -1767,23 +1813,34 @@ def save_file_editor(n, rows, filename):
             if _DL_STATE.get('status') == 'running':
                 return ('⚠ Download già in corso, riprova tra poco.',
                         no_update, no_update,
-                        no_update, no_update, no_update, new_options)
-            if merge_with is None:
-                _DL_BUFFER.clear()  # download completo: reset buffer
+                        no_update, no_update, no_update, no_update)
+            if not incremental:
+                _DL_BUFFER.clear()
             _DL_STATE.update({'status': 'running', 'current': 0,
                               'total': len(dl_tickers), 'errors': []})
-        threading.Thread(
-            target=_do_download,
-            args=(dl_tickers, dl_descr, dl_valuta, start),
-            kwargs={'cache_file': cache, 'update_buffer': True, 'merge_with': merge_with},
-            daemon=True,
-        ).start()
-        print(f"▶ Aggiornamento post-salvataggio {filename}: {len(dl_tickers)}/{len(tickers)} ticker")
+
+        if incremental:
+            # Scarica solo nuovi ticker su file temp → merge → scrittura atomica
+            threading.Thread(
+                target=_do_add_tickers,
+                args=(dl_tickers, dl_descr, dl_valuta, start, cache),
+                daemon=True,
+            ).start()
+        else:
+            # Nessun pkl esistente: download completo (stessa procedura nightly)
+            threading.Thread(
+                target=_do_download,
+                args=(dl_tickers, dl_descr, dl_valuta, start),
+                kwargs={'cache_file': cache, 'update_buffer': True},
+                daemon=True,
+            ).start()
+        print(f"▶ Post-salvataggio {filename}: {len(dl_tickers)}/{len(tickers)} ticker")
     except Exception as e:
         print(f"⚠ Avvio download dopo salvataggio fallito: {e}")
-        return '⚠ Download non avviato.', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update, new_options
-    # Chiude modal, aggiorna lista subito e abilita il poll per i dati aggiornati
-    return no_update, _EDITOR_HIDDEN, _list_files(), False, 0, True, new_options
+        return '⚠ Download non avviato.', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update, no_update
+
+    # Chiude l'editor, svuota la lista asset (il poll la ripopolerà quando il download finisce)
+    return no_update, _EDITOR_HIDDEN, _list_files(), False, 0, True, []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
