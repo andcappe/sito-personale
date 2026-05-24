@@ -1964,6 +1964,7 @@ def start_refresh(n_clicks, start_date_picker):
     Output('modal-pct-text',          'children', allow_duplicate=True),
     Output('modal-status-text',       'children', allow_duplicate=True),
     Output('modal-status-text',       'style',    allow_duplicate=True),
+    Output('progress-modal-overlay',  'style',    allow_duplicate=True),
     Input('refresh-poll-interval', 'n_intervals'),
     prevent_initial_call=True,
 )
@@ -1994,14 +1995,14 @@ def poll_refresh_progress(n):
         return (no_update, no_update, no_update, no_update, no_update,
                 False, True,
                 modal_fill, f'{current} / {total}  ({pct}%)',
-                'Download in corso…', _STATUS_GREY)
+                'Download in corso…', _STATUS_GREY, no_update)
 
     if status == 'error':
         err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
         return (no_update, no_update, no_update, no_update, no_update,
                 True, False,
                 err_fill, '❌ Download fallito',
-                'Si è verificato un errore.', _STATUS_RED)
+                'Si è verificato un errore.', _STATUS_RED, no_update)
 
     close_returns   = buffer.get('close_returns')
     original_prices = buffer.get('original_prices')
@@ -2010,7 +2011,7 @@ def poll_refresh_progress(n):
         return (no_update, no_update, no_update, no_update, no_update,
                 True, False,
                 err_fill, '❌ Nessun dato ricevuto',
-                'Il download è terminato senza dati.', _STATUS_RED)
+                'Il download è terminato senza dati.', _STATUS_RED, no_update)
 
     options      = [{'label': col, 'value': col} for col in close_returns.columns]
     ticker_map   = buffer.get('ticker_map', {})
@@ -2032,6 +2033,7 @@ def poll_refresh_progress(n):
         True, False,
         ok_fill, f'✓ {n_ok} asset{err_note}',
         status_msg, _STATUS_GREEN if not n_err else {**_STATUS_GREEN, 'color': '#b8860b'},
+        _MODAL_HIDDEN,
     )
 
 
