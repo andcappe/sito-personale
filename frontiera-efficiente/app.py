@@ -668,8 +668,14 @@ def _read_arima_cache():
     pkl_mu = pkl_cov = pkl_ts = None
     pkl_raw = None
     try:
-        if os.path.exists(_PORT_PKL):
-            with open(_PORT_PKL, 'rb') as f:
+        # Prima cerca nel file ARIMA separato (nuovo formato)
+        _arima_sep = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            '..', 'portafoglio', 'sessions', 'market_data_arima.pkl',
+        ))
+        _src = _arima_sep if os.path.exists(_arima_sep) else _PORT_PKL
+        if os.path.exists(_src):
+            with open(_src, 'rb') as f:
                 pkl_data = pickle.load(f)
             pkl_raw = pkl_data.get('arima')
             pkl_mu, pkl_cov, pkl_ts = _parse(pkl_raw)

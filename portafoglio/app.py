@@ -322,6 +322,7 @@ _CL_STATES:  dict = {}   # {username: stato download cliente}
 _CL_LOCK   = threading.Lock()
 
 _active_file_store: dict = {'filename': 'ETF.xlsx'}  # file attivo corrente
+_PENDING: dict = {}  # ticker in attesa di download da Gestisci — processati da start_refresh
 
 
 def _get_username() -> str:
@@ -458,6 +459,34 @@ def _do_add_tickers(new_tickers, new_descr, new_valuta, start_date, cache_file):
     finally:
         if tmp_pkl.exists():
             tmp_pkl.unlink()
+
+
+def _do_full_update(tickers, descr, valuta, start_date, cache_file, incremental=False):
+    """Un unico processo: download (incrementale o completo) + ARIMA nello stesso thread."""
+    if incremental:
+        _do_add_tickers(tickers, descr, valuta, start_date, cache_file)
+    else:
+        _do_download(tickers, descr, valuta, start_date, cache_file=cache_file, update_buffer=True)
+
+    with _DL_LOCK:
+        if _DL_STATE.get('status') != 'done':
+            return  # download fallito, non eseguire ARIMA
+
+    # ARIMA sugli asset aggiornati
+    try:
+        with open(cache_file, 'rb') as f:
+            cached = pickle.load(f)
+        ret = cached.get('close_returns')
+        if ret is None or (hasattr(ret, 'empty') and ret.empty):
+            return
+        active_file = _active_file_store.get('filename', 'ETF.xlsx')
+        arima_pkl = _arima_cache_path(active_file)
+        print(f"▶ ARIMA post-aggiornamento: {len(ret.columns)} asset…")
+        mu, cov = _compute_arima_garch(ret, window=250)
+        if mu is not None:
+            _save_arima_to_pkl(mu, cov, target_pkl=arima_pkl)
+    except Exception as e:
+        print(f"⚠ ARIMA post-aggiornamento fallito: {e}")
 
 
 def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True):
@@ -702,6 +731,14 @@ def _file_cache_path(filename='ETF.xlsx'):
     if stem == 'ETF':
         return _MARKET_DATA_FILE
     return SESSIONS_DIR / f'market_data_{stem}.pkl'
+
+
+def _arima_cache_path(filename='ETF.xlsx'):
+    """Percorso del pkl ARIMA separato dal pkl principale."""
+    stem = Path(filename).stem
+    if stem == 'ETF':
+        return SESSIONS_DIR / 'market_data_arima.pkl'
+    return SESSIONS_DIR / f'market_data_{stem}_arima.pkl'
 
 
 def _load_xlsx_rows(filename):
@@ -1487,10 +1524,12 @@ def update_output(contents, filename):
     _noup = (no_update,) * 8
 
     if triggered_id == 'initial_load':
-        # Ogni volta che la pagina viene (ri)caricata, svuota il buffer cliente
-        # e ripristina il file attivo a ETF (default).
+        # Ogni volta che la pagina viene (ri)caricata, svuota il buffer cliente,
+        # ripristina il file attivo a ETF (default) e cancella i ticker pendenti.
         _cl_clear(_get_username())
         _active_file_store['filename'] = 'ETF.xlsx'
+        with _DL_LOCK:
+            _PENDING.clear()
         import pickle as _pickle
         cr, op, tm, saved_at = None, None, {}, ''
         if _MARKET_DATA_FILE.exists():
@@ -1780,16 +1819,13 @@ def save_file_editor(n, rows, filename):
     ok = _save_xlsx_rows(filename, rows)
     if not ok:
         return '⚠ Errore nel salvataggio del file.', no_update, no_update, no_update, no_update, no_update, no_update
-    # Imposta il file editato come attivo
+
     _active_file_store['filename'] = filename
-    start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
     try:
         tickers, descr, valuta_list = _build_ticker_list(filename)
         cache = _file_cache_path(filename)
 
         # Identifica i ticker nuovi (non presenti nel pkl di default)
-        dl_tickers, dl_descr, dl_valuta = tickers, descr, valuta_list
-        incremental = False
         if cache.exists():
             try:
                 with open(cache, 'rb') as f:
@@ -1804,43 +1840,29 @@ def save_file_editor(n, rows, filename):
                 dl_tickers = [tickers[i] for i in new_idx]
                 dl_descr   = [descr[i]   for i in new_idx]
                 dl_valuta  = [valuta_list[i] for i in new_idx]
-                incremental = True
-                print(f"▶ Nuovi ticker da scaricare: {dl_tickers}")
             except Exception as e:
-                print(f"⚠ Lettura pkl esistente fallita, scarico tutto: {e}")
-
-        with _DL_LOCK:
-            if _DL_STATE.get('status') == 'running':
-                return ('⚠ Download già in corso, riprova tra poco.',
-                        no_update, no_update,
-                        no_update, no_update, no_update, no_update)
-            if not incremental:
-                _DL_BUFFER.clear()
-            _DL_STATE.update({'status': 'running', 'current': 0,
-                              'total': len(dl_tickers), 'errors': []})
-
-        if incremental:
-            # Scarica solo nuovi ticker su file temp → merge → scrittura atomica
-            threading.Thread(
-                target=_do_add_tickers,
-                args=(dl_tickers, dl_descr, dl_valuta, start, cache),
-                daemon=True,
-            ).start()
+                print(f"⚠ Lettura pkl esistente fallita, tratto come nuovo: {e}")
+                dl_tickers, dl_descr, dl_valuta = tickers, descr, valuta_list
         else:
-            # Nessun pkl esistente: download completo (stessa procedura nightly)
-            threading.Thread(
-                target=_do_download,
-                args=(dl_tickers, dl_descr, dl_valuta, start),
-                kwargs={'cache_file': cache, 'update_buffer': True},
-                daemon=True,
-            ).start()
-        print(f"▶ Post-salvataggio {filename}: {len(dl_tickers)}/{len(tickers)} ticker")
-    except Exception as e:
-        print(f"⚠ Avvio download dopo salvataggio fallito: {e}")
-        return '⚠ Download non avviato.', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update, no_update
+            dl_tickers, dl_descr, dl_valuta = tickers, descr, valuta_list
 
-    # Chiude l'editor, svuota la lista asset (il poll la ripopolerà quando il download finisce)
-    return no_update, _EDITOR_HIDDEN, _list_files(), False, 0, True, []
+        # Memorizza ticker pendenti — il download parte solo quando l'utente clicca Aggiorna
+        start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+        with _DL_LOCK:
+            _PENDING.update({
+                'tickers': dl_tickers, 'descr': dl_descr, 'valuta': dl_valuta,
+                'cache': cache, 'start': start,
+                'incremental': cache.exists(),
+            })
+        print(f"▶ {len(dl_tickers)} ticker in attesa — clicca Aggiorna per scaricare")
+    except Exception as e:
+        print(f"⚠ Errore post-salvataggio: {e}")
+        return f'⚠ {e}', _EDITOR_HIDDEN, _list_files(), no_update, no_update, no_update, no_update
+
+    # Chiude l'editor, SVUOTA la lista asset, chiede all'utente di cliccare Aggiorna
+    return ('✓ File salvato — clicca Aggiorna per caricare i nuovi asset.',
+            _EDITOR_HIDDEN, _list_files(),
+            no_update, no_update, no_update, [])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1873,26 +1895,51 @@ def start_refresh(n_clicks, start_date_picker):
                     f'Aggiornamento in corso: {current}/{total}…',
                     'Un aggiornamento è già in corso…', _STATUS_GREY)
 
-    start_date = start_date_picker or (
-        pd.Timestamp.today() - pd.DateOffset(years=10)
-    ).strftime('%Y-%m-%d')
+        # Prendi i ticker pendenti da Gestisci (se presenti)
+        pending = dict(_PENDING)
+        _PENDING.clear()
 
-    try:
-        active_file = _active_file_store.get('filename', 'ETF.xlsx')
-        tickers, descr, valuta = _build_ticker_list(active_file)
-    except Exception as e:
-        err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
-        return (no_update, no_update, False, _MODAL_SHOWN, err_fill,
-                'Errore', f'❌ {e}', _STATUS_RED)
-
-    _cl_clear(_get_username())
+    active_file = _active_file_store.get('filename', 'ETF.xlsx')
     cache = _file_cache_path(active_file)
-    threading.Thread(target=_do_download,
-                     args=(tickers, descr, valuta, start_date),
-                     kwargs={'cache_file': cache}, daemon=True).start()
-    print(f"▶ Aggiornamento {active_file}: {len(tickers)} ticker da {start_date}")
+    _cl_clear(_get_username())
+
+    if pending:
+        # Aggiornamento incrementale: solo i nuovi ticker aggiunti da Gestisci
+        dl_tickers   = pending['tickers']
+        dl_descr     = pending['descr']
+        dl_valuta    = pending['valuta']
+        incremental  = pending.get('incremental', True)
+        start_date   = pending['start']
+        label        = f'{len(dl_tickers)} nuovi asset'
+    else:
+        # Aggiornamento completo (stesso flusso nightly)
+        start_date = start_date_picker or (
+            pd.Timestamp.today() - pd.DateOffset(years=10)
+        ).strftime('%Y-%m-%d')
+        try:
+            dl_tickers, dl_descr, dl_valuta = _build_ticker_list(active_file)
+        except Exception as e:
+            err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
+            return (no_update, no_update, False, _MODAL_SHOWN, err_fill,
+                    'Errore', f'❌ {e}', _STATUS_RED)
+        incremental = False
+        label = f'{len(dl_tickers)} asset'
+
+    with _DL_LOCK:
+        if not incremental:
+            _DL_BUFFER.clear()
+        _DL_STATE.update({'status': 'running', 'current': 0,
+                          'total': len(dl_tickers), 'errors': []})
+
+    threading.Thread(
+        target=_do_full_update,
+        args=(dl_tickers, dl_descr, dl_valuta, start_date, cache),
+        kwargs={'incremental': incremental},
+        daemon=True,
+    ).start()
+    print(f"▶ Aggiornamento {active_file}: {len(dl_tickers)} ticker — incremental={incremental}")
     return (False, 0, True, _MODAL_SHOWN, _FILL_LOADING,
-            f'Aggiornamento {Path(active_file).stem} — {len(tickers)} asset…', '', _STATUS_GREY)
+            f'Aggiornamento {Path(active_file).stem} — {label}…', '', _STATUS_GREY)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3260,6 +3307,20 @@ def _startup_load():
         except Exception as e:
             print(f"⚠ Lettura market_data.pkl fallita: {e}")
 
+    # Carica ARIMA dal file separato (se esiste)
+    _arima_pkl = _arima_cache_path('ETF.xlsx')
+    if _arima_pkl.exists():
+        try:
+            with open(_arima_pkl, 'rb') as f:
+                arima_data = pickle.load(f)
+            with _DL_LOCK:
+                if arima_data.get('arima'):
+                    _DL_BUFFER['arima']             = arima_data['arima']
+                    _DL_BUFFER['arima_computed_at'] = arima_data.get('arima_computed_at', '')
+            print(f"✓ ARIMA caricato da {_arima_pkl.name}")
+        except Exception as e:
+            print(f"⚠ Lettura {_arima_pkl.name} fallita: {e}")
+
     # Scarica in background tutti i file xlsx per cui manca il pkl
     def _bg_all():
         start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
@@ -3384,29 +3445,31 @@ def _compute_arima_garch(returns_df, window=250):
 
 
 def _save_arima_to_pkl(mu_series, cov_df, target_pkl=None):
-    """Scrive arima nel pkl del file specificato (default: market_data.pkl = ETF)."""
+    """Salva ARIMA nel file separato (NON dentro il pkl principale)."""
     ts = datetime.now().strftime('%d/%m/%Y %H:%M')
     arima_data = {
         'mu':          mu_series.to_dict(),
         'cov':         cov_df.to_dict(),
         'computed_at': ts,
     }
-    pkl_path = Path(target_pkl) if target_pkl else _MARKET_DATA_FILE
+    # target_pkl qui è il percorso del FILE ARIMA separato (non il pkl principale)
+    arima_pkl = Path(target_pkl) if target_pkl else _arima_cache_path('ETF.xlsx')
     try:
-        if pkl_path.exists():
-            with open(pkl_path, 'rb') as f:
-                pkl = pickle.load(f)
-            pkl['arima']             = arima_data
-            pkl['arima_computed_at'] = ts
-            with open(pkl_path, 'wb') as f:
-                pickle.dump(pkl, f)
-        if target_pkl is None or pkl_path == _MARKET_DATA_FILE:
-            with _DL_LOCK:
-                _DL_BUFFER['arima']             = arima_data
-                _DL_BUFFER['arima_computed_at'] = ts
-        print(f"✓ ARIMA salvato in {pkl_path.name} — {ts}")
+        existing = {}
+        if arima_pkl.exists():
+            with open(arima_pkl, 'rb') as f:
+                existing = pickle.load(f)
+        existing['arima']             = arima_data
+        existing['arima_computed_at'] = ts
+        _atomic_pkl_write(arima_pkl, existing)
+        print(f"✓ ARIMA salvato in {arima_pkl.name} — {ts}")
     except Exception as e:
-        print(f"⚠ Salvataggio ARIMA fallito ({pkl_path.name}): {e}")
+        print(f"⚠ Salvataggio ARIMA fallito ({arima_pkl.name}): {e}")
+    # Aggiorna buffer in memoria (solo per il file ETF principale)
+    if target_pkl is None or 'market_data_arima' in str(arima_pkl):
+        with _DL_LOCK:
+            _DL_BUFFER['arima']             = arima_data
+            _DL_BUFFER['arima_computed_at'] = ts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3438,6 +3501,7 @@ def _scheduled_arima():
     for xlsx_path in xlsx_files:
         filename = xlsx_path.name
         cache_pkl = _file_cache_path(filename)
+        arima_pkl = _arima_cache_path(filename)
         try:
             if not Path(cache_pkl).exists():
                 print(f"⚠ ARIMA {filename}: cache non trovata, skip")
@@ -3451,7 +3515,7 @@ def _scheduled_arima():
             print(f"🌙 ARIMA+GARCH {filename} — {len(ret.columns)} asset…")
             mu, cov = _compute_arima_garch(ret, window=250)
             if mu is not None:
-                _save_arima_to_pkl(mu, cov, target_pkl=cache_pkl)
+                _save_arima_to_pkl(mu, cov, target_pkl=arima_pkl)
                 print(f"✓ ARIMA+GARCH completato: {filename}")
             else:
                 print(f"⚠ ARIMA {filename}: calcolo non riuscito")
