@@ -497,31 +497,11 @@ def _do_reload_from_disk(cache_file, active_file='ETF.xlsx'):
 
 
 def _do_full_update(tickers, descr, valuta, start_date, cache_file, incremental=False):
-    """Un unico processo: download (incrementale o completo) + ARIMA nello stesso thread."""
+    """Download incrementale o completo. ARIMA non viene eseguito qui (gira solo a mezzanotte)."""
     if incremental:
         _do_add_tickers(tickers, descr, valuta, start_date, cache_file)
     else:
         _do_download(tickers, descr, valuta, start_date, cache_file=cache_file, update_buffer=True)
-
-    with _DL_LOCK:
-        if _DL_STATE.get('status') != 'done':
-            return  # download fallito, non eseguire ARIMA
-
-    # ARIMA sugli asset aggiornati
-    try:
-        with open(cache_file, 'rb') as f:
-            cached = pickle.load(f)
-        ret = cached.get('close_returns')
-        if ret is None or (hasattr(ret, 'empty') and ret.empty):
-            return
-        active_file = _active_file_store.get('filename', 'ETF.xlsx')
-        arima_pkl = _arima_cache_path(active_file)
-        print(f"▶ ARIMA post-aggiornamento: {len(ret.columns)} asset…")
-        mu, cov = _compute_arima_garch(ret, window=250)
-        if mu is not None:
-            _save_arima_to_pkl(mu, cov, target_pkl=arima_pkl)
-    except Exception as e:
-        print(f"⚠ ARIMA post-aggiornamento fallito: {e}")
 
 
 def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True):
@@ -1563,8 +1543,7 @@ def update_output(contents, filename):
         # ripristina il file attivo a ETF (default) e cancella i ticker pendenti.
         _cl_clear(_get_username())
         _active_file_store['filename'] = 'ETF.xlsx'
-        with _DL_LOCK:
-            _PENDING.clear()
+        _PENDING.clear()
         import pickle as _pickle
         cr, op, tm, saved_at = None, None, {}, ''
         if _MARKET_DATA_FILE.exists():
