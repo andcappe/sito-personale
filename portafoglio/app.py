@@ -461,6 +461,41 @@ def _do_add_tickers(new_tickers, new_descr, new_valuta, start_date, cache_file):
             tmp_pkl.unlink()
 
 
+def _do_reload_from_disk(cache_file, active_file='ETF.xlsx'):
+    """Ricarica dati + ARIMA dal disco senza scaricare nulla da internet."""
+    global _DL_STATE, _DL_BUFFER
+    with _DL_LOCK:
+        _DL_STATE = {'status': 'running', 'current': 0, 'total': 1, 'errors': []}
+    try:
+        if not cache_file.exists():
+            with _DL_LOCK:
+                _DL_STATE['status'] = 'error'
+            print(f"⚠ Reload: {cache_file.name} non trovato")
+            return
+        with open(cache_file, 'rb') as f:
+            data = pickle.load(f)
+        # Carica anche ARIMA dal file separato
+        arima_pkl = _arima_cache_path(active_file)
+        if arima_pkl.exists():
+            try:
+                with open(arima_pkl, 'rb') as f:
+                    ad = pickle.load(f)
+                if ad.get('arima'):
+                    data['arima']             = ad['arima']
+                    data['arima_computed_at'] = ad.get('arima_computed_at', '')
+            except Exception:
+                pass
+        with _DL_LOCK:
+            _DL_BUFFER.update(data)
+            _DL_STATE['status']  = 'done'
+            _DL_STATE['current'] = 1
+        print(f"✓ Dati ricaricati da disco — {data.get('saved_at', '?')}")
+    except Exception as e:
+        print(f"⚠ Reload dal disco fallito: {e}")
+        with _DL_LOCK:
+            _DL_STATE['status'] = 'error'
+
+
 def _do_full_update(tickers, descr, valuta, start_date, cache_file, incremental=False):
     """Un unico processo: download (incrementale o completo) + ARIMA nello stesso thread."""
     if incremental:
@@ -1904,42 +1939,35 @@ def start_refresh(n_clicks, start_date_picker):
     _cl_clear(_get_username())
 
     if pending:
-        # Aggiornamento incrementale: solo i nuovi ticker aggiunti da Gestisci
-        dl_tickers   = pending['tickers']
-        dl_descr     = pending['descr']
-        dl_valuta    = pending['valuta']
-        incremental  = pending.get('incremental', True)
-        start_date   = pending['start']
-        label        = f'{len(dl_tickers)} nuovi asset'
+        # Nuovi ticker da Gestisci: download solo quelli + merge + ARIMA
+        dl_tickers  = pending['tickers']
+        dl_descr    = pending['descr']
+        dl_valuta   = pending['valuta']
+        incremental = pending.get('incremental', True)
+        start_date  = pending['start']
+        with _DL_LOCK:
+            _DL_STATE.update({'status': 'running', 'current': 0,
+                              'total': len(dl_tickers), 'errors': []})
+        threading.Thread(
+            target=_do_full_update,
+            args=(dl_tickers, dl_descr, dl_valuta, start_date, cache),
+            kwargs={'incremental': incremental},
+            daemon=True,
+        ).start()
+        print(f"▶ Download {len(dl_tickers)} nuovi ticker per {active_file}")
+        label = f'{len(dl_tickers)} nuovi asset'
     else:
-        # Aggiornamento completo (stesso flusso nightly)
-        start_date = start_date_picker or (
-            pd.Timestamp.today() - pd.DateOffset(years=10)
-        ).strftime('%Y-%m-%d')
-        try:
-            dl_tickers, dl_descr, dl_valuta = _build_ticker_list(active_file)
-        except Exception as e:
-            err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
-            return (no_update, no_update, False, _MODAL_SHOWN, err_fill,
-                    'Errore', f'❌ {e}', _STATUS_RED)
-        incremental = False
-        label = f'{len(dl_tickers)} asset'
+        # Nessun ticker pendente: ricarica il file di default dal disco (nessun download)
+        threading.Thread(
+            target=_do_reload_from_disk,
+            args=(cache, active_file),
+            daemon=True,
+        ).start()
+        print(f"▶ Ricaricamento {active_file} da disco")
+        label = f'Caricamento {Path(active_file).stem}'
 
-    with _DL_LOCK:
-        if not incremental:
-            _DL_BUFFER.clear()
-        _DL_STATE.update({'status': 'running', 'current': 0,
-                          'total': len(dl_tickers), 'errors': []})
-
-    threading.Thread(
-        target=_do_full_update,
-        args=(dl_tickers, dl_descr, dl_valuta, start_date, cache),
-        kwargs={'incremental': incremental},
-        daemon=True,
-    ).start()
-    print(f"▶ Aggiornamento {active_file}: {len(dl_tickers)} ticker — incremental={incremental}")
     return (False, 0, True, _MODAL_SHOWN, _FILL_LOADING,
-            f'Aggiornamento {Path(active_file).stem} — {label}…', '', _STATUS_GREY)
+            f'{label}…', '', _STATUS_GREY)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
