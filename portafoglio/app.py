@@ -491,25 +491,36 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
     }
     target_pkl = cache_file or _MARKET_DATA_FILE
 
-    # Se merge_with_existing, unisce i nuovi prezzi al pkl esistente
+    # Se merge_with_existing, aggiunge le nuove colonne al pkl esistente
     if merge_with_existing and Path(target_pkl).exists():
         try:
             with open(target_pkl, 'rb') as f:
                 old = pickle.load(f)
+            # Estrai solo ciò che serve e libera subito il resto
             old_prices = old.get('original_prices')
             old_tm     = old.get('ticker_map', {})
+            old_arima  = old.get('arima')
+            del old  # libera il dict originale subito
+
             if old_prices is not None:
-                combined = pd.concat([old_prices, original_prices], axis=1)
-                combined = combined.loc[:, ~combined.columns.duplicated(keep='last')]
-                combined = combined.sort_index().ffill()
-                combined = _clean_prices(combined)
-                merged_tm = {**old_tm, **ticker_map}
-                data['original_prices'] = combined
-                data['close_returns']   = combined.pct_change(fill_method=None)
-                data['ticker_map']      = merged_tm
-                if 'arima' in old:
-                    data['arima'] = old['arima']
-                print(f"↗ Merge completato: {len(combined.columns)} asset totali")
+                # Aggiunge le nuove colonne in-place sull'esistente (evita pd.concat)
+                for col in original_prices.columns:
+                    old_prices[col] = original_prices[col].reindex(old_prices.index).ffill()
+                del original_prices  # libera i dati del solo nuovo asset
+
+                old_prices = _clean_prices(old_prices)
+                merged_returns = old_prices.pct_change(fill_method=None)
+
+                # Svuota _DL_BUFFER prima di aggiornarlo per liberare i vecchi riferimenti
+                with _DL_LOCK:
+                    _DL_BUFFER.clear()
+
+                data['original_prices'] = old_prices
+                data['close_returns']   = merged_returns
+                data['ticker_map']      = {**old_tm, **ticker_map}
+                if old_arima:
+                    data['arima'] = old_arima
+                print(f"↗ Merge completato: {len(old_prices.columns)} asset totali")
         except Exception as e:
             print(f"⚠ Merge con pkl esistente fallito (uso solo nuovi dati): {e}")
 
