@@ -752,8 +752,8 @@ def _asset_name_div(asset, short_map):
 
 def _w_cell(w, color):
     if w is None or w < 0.05:
-        return html.Span('—', style={'fontSize':FONT['sm'],'color':'#bbb'})
-    return html.Span(f'{w:.1f}%', style={'fontSize':FONT['sm'],'fontWeight':'700','color': color})
+        return html.Span('—', style={'fontSize':'10px','color':'#bbb'})
+    return html.Span(f'{w:.1f}%', style={'fontSize':'10px','fontWeight':'700','color': color})
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: grafico performance cumulativa
@@ -1145,6 +1145,8 @@ app.layout = html.Div([
     dcc.Store(id='fe-selected-pt',     data=None),
     dcc.Store(id='fe-arima-reqid',     data=None),
     dcc.Interval(id='fe-arima-poll',   interval=600, n_intervals=0, disabled=True),
+    dcc.Store(id='fe-sync-sig',        data=''),
+    dcc.Interval(id='fe-live-sync',    interval=2000, n_intervals=0, disabled=False),
 ], style={'minHeight':'100vh'})
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2384,6 +2386,35 @@ _cb_chart = _make_selall_cb('fe-selall-chart', 'fe-chart')
 _cb_p1    = _make_selall_cb('fe-selall-p1',   'fe-p1')
 _cb_p2    = _make_selall_cb('fe-selall-p2',   'fe-p2')
 _cb_p3    = _make_selall_cb('fe-selall-p3',   'fe-p3')
+
+
+@app.callback(
+    Output('fe-stock-data',   'data',     allow_duplicate=True),
+    Output('fe-prices-data',  'data',     allow_duplicate=True),
+    Output('fe-loaded-flag',  'data',     allow_duplicate=True),
+    Output('fe-last-updated', 'children', allow_duplicate=True),
+    Output('fe-data-source',  'data',     allow_duplicate=True),
+    Output('fe-sync-sig',     'data'),
+    Input('fe-live-sync',     'n_intervals'),
+    State('fe-sync-sig',      'data'),
+    prevent_initial_call=True,
+)
+def fe_live_sync(_, sig):
+    ns = _read_user_json()
+    new_sig = ','.join(sorted(ns.keys())) if ns else ''
+    if new_sig == (sig or ''):
+        raise PreventUpdate
+    if not ns:
+        raise PreventUpdate
+    op, cr = _reconstruct_from_json_fe(ns)
+    if op is None or cr is None:
+        raise PreventUpdate
+    return (
+        cr.to_json(orient='split', date_format='iso'),
+        op.to_json(orient='split', date_format='iso'),
+        True, '', 'default', new_sig,
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 server = app.server

@@ -899,23 +899,34 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     merged_op  = new_prices.copy()
     merged_tm  = dict(new_tm)
 
-    # Merge con il pkl utente (fonte specifica per questo utente/file)
+    # Merge con i dati esistenti: prima pkl utente, poi fallback su _DL_BUFFER
+    ex_op, ex_tm = None, {}
     if user_pkl.exists():
         try:
             with open(user_pkl, 'rb') as f:
                 ex = pickle.load(f)
             ex_op = ex.get('original_prices')
             ex_tm = dict(ex.get('ticker_map', {}))
-            if ex_op is not None and not ex_op.empty:
-                for col in new_prices.columns:
-                    ex_op = ex_op.copy()
-                    ex_op[col] = new_prices[col].reindex(ex_op.index).ffill()
-                merged_op = ex_op
-                ex_tm.update(new_tm)
-                merged_tm = ex_tm
-                print(f"✓ Merge gestisci (pkl utente) — {len(merged_op.columns)} asset pre-filtro")
+            print(f"✓ Merge gestisci da pkl utente")
         except Exception as e:
             print(f"⚠ Merge gestisci pkl fallito: {e}")
+            ex_op, ex_tm = None, {}
+
+    if ex_op is None or ex_op.empty:
+        with _DL_LOCK:
+            ex_op = _DL_BUFFER.get('original_prices')
+            ex_tm = dict(_DL_BUFFER.get('ticker_map', {}))
+        if ex_op is not None and not ex_op.empty:
+            print(f"✓ Merge gestisci da _DL_BUFFER — {len(ex_op.columns)} asset esistenti")
+
+    if ex_op is not None and not ex_op.empty:
+        ex_op = ex_op.copy()
+        for col in new_prices.columns:
+            ex_op[col] = new_prices[col].reindex(ex_op.index).ffill()
+        merged_op = ex_op
+        ex_tm.update(new_tm)
+        merged_tm = ex_tm
+        print(f"✓ Merge gestisci — {len(merged_op.columns)} asset pre-filtro")
 
     # Filtra: tieni solo le descrizioni che l'utente vuole (all_descr)
     if all_descr is not None:
@@ -2937,7 +2948,7 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
             return dcc.Input(
                 id={'type': 'weight-input', 'index': f'{port_key}-{a}'},
                 type='number', value=saved_val, min=0, max=100, step=0.1, placeholder='0',
-                style={'width': '90%', 'text-align': 'right', 'font-size': '9px',
+                style={'width': '90%', 'text-align': 'right', 'font-size': '8px',
                        'height': '18px', 'padding': '1px 2px', 'box-sizing': 'border-box'}
             )
 
