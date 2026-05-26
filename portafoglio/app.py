@@ -109,6 +109,7 @@ _FOTO_PNG = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file_
 _FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
 
 _FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES']
+_PERSONALE_OPT = {'label': '👤 Personale', 'value': '__personale__'}
 
 def _list_files():
     """Restituisce lista di opzioni dcc.Dropdown dai .xlsx in Files/."""
@@ -118,6 +119,9 @@ def _list_files():
     files.sort(key=lambda f: _FILE_ORDER.index(f.stem.upper()) if f.stem.upper() in _FILE_ORDER else 99)
     return [{'label': f.stem, 'value': f.name} for f in files] or \
            [{'label': 'ETF', 'value': 'ETF.xlsx'}]
+
+def _list_files_with_personale():
+    return [_PERSONALE_OPT] + _list_files()
 
 def _xlsx_path(filename='ETF.xlsx'):
     """Percorso assoluto del file xlsx nella cartella Files/."""
@@ -323,6 +327,80 @@ _CL_LOCK   = threading.Lock()
 
 _active_file_store: dict = {'filename': 'ETF.xlsx'}  # file attivo corrente
 _PENDING: dict = {}  # ticker in attesa di download da Gestisci — processati da start_refresh
+
+_ROOT_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent
+
+def _user_json_path(username=None):
+    u = username or _get_username()
+    d = _ROOT_DIR / 'sessions' / u
+    d.mkdir(parents=True, exist_ok=True)
+    return d / 'current.json'
+
+def _write_user_json(cr, op, tm, vm=None, username=None, reset_state=False):
+    if cr is None or op is None:
+        return
+    vm = vm or {}
+    path = _user_json_path(username)
+    existing = {}
+    if not reset_state:
+        try:
+            existing = json.load(open(path))
+        except Exception:
+            pass
+    dates = [d.strftime('%Y-%m-%d') for d in op.index]
+    result = {}
+    for desc in cr.columns:
+        if desc not in op.columns:
+            continue
+        ex = existing.get(desc, {})
+        result[desc] = {
+            'ticker':   tm.get(desc, desc),
+            'currency': vm.get(desc, ex.get('currency', 'EUR')),
+            'dates':    dates,
+            'prices':   [round(float(v), 4) if pd.notna(v) else None for v in op[desc]],
+            'returns':  [round(float(v), 6) if pd.notna(v) else None for v in cr[desc]],
+            'checked':  False if reset_state else ex.get('checked', False),
+            'P1':       0     if reset_state else ex.get('P1', 0),
+            'P2':       0     if reset_state else ex.get('P2', 0),
+            'P3':       0     if reset_state else ex.get('P3', 0),
+        }
+    try:
+        json.dump(result, open(path, 'w'))
+    except Exception as e:
+        print(f'⚠ write_user_json: {e}')
+
+def _update_user_json(checked=None, weights=None, username=None):
+    path = _user_json_path(username)
+    try:
+        data = json.load(open(path))
+    except Exception:
+        return
+    changed = False
+    if checked is not None:
+        s = set(checked)
+        for desc in data:
+            v = desc in s
+            if data[desc].get('checked') != v:
+                data[desc]['checked'] = v
+                changed = True
+    if weights is not None:
+        for desc in data:
+            for k in ('P1', 'P2', 'P3'):
+                v = float(weights.get(k, {}).get(desc, 0) or 0)
+                if data[desc].get(k) != v:
+                    data[desc][k] = v
+                    changed = True
+    if changed:
+        try:
+            json.dump(data, open(path, 'w'))
+        except Exception:
+            pass
+
+def _read_user_json(username=None):
+    try:
+        return json.load(open(_user_json_path(username)))
+    except Exception:
+        return {}
 
 
 def _get_username() -> str:
@@ -704,6 +782,7 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
     ticker_map      = {descrizione[i]: tickers[i] for i in range(len(tickers))}
     saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
 
+    valuta_map = {descrizione[i]: valuta[i] for i in range(len(tickers))}
     with _CL_LOCK:
         _CL_BUFFERS[username].update({
             'date':            datetime.now().strftime('%Y-%m-%d'),
@@ -711,9 +790,11 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
             'ticker_map':      ticker_map,
             'original_prices': original_prices,
             'close_returns':   close_returns,
+            'valuta_map':      valuta_map,
         })
         _CL_STATES[username]['status']  = 'done'
         _CL_STATES[username]['current'] = total
+    _write_user_json(close_returns, original_prices, ticker_map, valuta_map, username=username, reset_state=True)
     print(f"✓ Download cliente [{username}]: {len(all_prices)} asset isolati")
 
 
@@ -744,22 +825,23 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     except Exception:
         pass
 
-    fx = None
-    try:
-        fx = yf.download(['EURUSD=X', 'EURGBP=X'], start=start_date,
-                         group_by='ticker', **_dl_kwargs)
-    except Exception as e:
-        print(f"⚠ FX gestisci fallito: {e}")
+    _needs_fx = any(v.upper() not in ('EUR', '', 'NAN') for v in new_valuta if v)
+    _fx_res   = [None]
 
-    def _fx(name):
-        if fx is None or fx.empty:
-            return None
+    def _dl_fx():
         try:
-            return fx[(name, 'Close')] if isinstance(fx.columns, pd.MultiIndex) else fx['Close']
-        except Exception:
-            return None
+            _fx_res[0] = yf.download(['EURUSD=X', 'EURGBP=X'], start=start_date,
+                                     group_by='ticker', **_dl_kwargs)
+        except Exception as e:
+            print(f"⚠ FX gestisci fallito: {e}")
 
-    eurusd, eurgbp = _fx('EURUSD=X'), _fx('EURGBP=X')
+    # Avvia download FX in parallelo con i batch ticker
+    _fx_thread = None
+    if _needs_fx:
+        _fx_thread = threading.Thread(target=_dl_fx, daemon=True)
+        _fx_thread.start()
+
+    # Fase 1: scarica i prezzi grezzi di tutti i batch (FX scarica in parallelo)
     all_prices = {}
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
@@ -770,6 +852,17 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
             raw = yf.download(bt, start=start_date, group_by='ticker', **_dl_kwargs)
             if raw.empty:
                 raise ValueError("risposta vuota")
+            # Al primo batch: FX thread dovrebbe essere finito in parallelo — join con timeout
+            if i == 0 and _fx_thread is not None:
+                _fx_thread.join(timeout=30)
+            _eurusd = _fx_res[0]
+            def _get_fx(name):
+                if _eurusd is None or _eurusd.empty: return None
+                try:
+                    return _eurusd[(name, 'Close')] if isinstance(_eurusd.columns, pd.MultiIndex) else _eurusd['Close']
+                except Exception: return None
+            eurusd = _get_fx('EURUSD=X')
+            eurgbp = _get_fx('EURGBP=X')
             for j, t in enumerate(bt):
                 desc, curr = bd[j], bv[j]
                 try:
@@ -846,6 +939,7 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
         _DL_BUFFER.update(merged_data)
         _DL_STATE['status']  = 'done'
         _DL_STATE['current'] = total
+    _write_user_json(merged_cr, merged_op, merged_tm, username=username)
     print(f"✓ Gestisci [{username}]: {user_pkl.name} — {len(merged_op.columns)} asset")
 
 
@@ -1042,10 +1136,16 @@ def get_session_panel_layout():
     btn_base = {'border': 'none', 'border-radius': '4px', 'cursor': 'pointer',
                 'font-size': '11px', 'padding': '4px 10px', 'font-weight': 'bold'}
     return html.Div([
-        html.Button('💾 Sessioni', id='session-toggle-btn', n_clicks=0,
-                    style={**btn_base, 'background-color': '#1a3a5c',
-                           'color': 'white', 'margin-left': '12px',
-                           'padding': '6px 14px', 'font-size': '12px'}),
+        html.Div([
+            html.Button('💾 Sessioni', id='session-toggle-btn', n_clicks=0,
+                        style={**btn_base, 'background-color': '#1a3a5c',
+                               'color': 'white', 'margin-left': '12px',
+                               'padding': '6px 14px', 'font-size': '12px'}),
+            html.Button('🔄 Default', id='reset-default-btn', n_clicks=0,
+                        title='Ricarica asset dai file di default',
+                        style={**btn_base, 'background-color': '#5a3a1a',
+                               'color': 'white', 'padding': '6px 12px', 'font-size': '12px'}),
+        ], style={'display': 'inline-flex', 'align-items': 'center', 'gap': '4px'}),
         html.Div(id='session-panel', style={'display': 'none'}, children=[
             html.Div([
                 # Colonna sinistra: salva
@@ -1279,6 +1379,29 @@ def get_portfolio_analysis_tab(options_tickers):
                     ),
                     html.Div(id='weights-grid-container', style={'display': 'block'}),
                     html.Div([
+                        dcc.Input(id='inline-ticker-input', placeholder='Ticker (es. AAPL)',
+                                  style={'width': '90px', 'fontSize': '9px', 'padding': '2px 4px',
+                                         'border': '1px solid #ccc', 'borderRadius': '3px'}),
+                        dcc.Input(id='inline-desc-input', placeholder='Descrizione',
+                                  style={'width': '140px', 'fontSize': '9px', 'padding': '2px 4px',
+                                         'border': '1px solid #ccc', 'borderRadius': '3px'}),
+                        dcc.Dropdown(id='inline-valuta-dropdown',
+                                     options=[{'label': 'EUR', 'value': 'EUR'},
+                                              {'label': 'USD', 'value': 'USD'},
+                                              {'label': 'GBP', 'value': 'GBP'}],
+                                     value='EUR', clearable=False,
+                                     style={'width': '65px', 'fontSize': '9px',
+                                            'display': 'inline-block'}),
+                        html.Button('➕', id='inline-add-btn', n_clicks=0,
+                                    style={'fontSize': '10px', 'padding': '2px 7px',
+                                           'background': '#e8f5e9', 'border': '1px solid #a5d6a7',
+                                           'color': '#1b5e20', 'borderRadius': '3px',
+                                           'cursor': 'pointer'}),
+                        html.Span(id='inline-add-status',
+                                  style={'fontSize': '9px', 'color': '#555', 'marginLeft': '4px'}),
+                    ], style={'display': 'flex', 'alignItems': 'center', 'gap': '3px',
+                              'padding': '4px 2px', 'marginTop': '4px'}),
+                    html.Div([
                         html.Hr(style={'margin': '10px 0'}),
                         html.Div([
                             html.Div('Totale Pesi:',
@@ -1432,11 +1555,7 @@ app.layout = html.Div([
             optionHeight=28,
         ),
         html.Button('✏️ Gestisci', id='gestisci-btn', n_clicks=0,
-                    title='Aggiungi o rimuovi asset dalla lista selezionata',
-                    style={'fontSize': '11px', 'padding': '5px 12px', 'borderRadius': '4px',
-                           'cursor': 'pointer', 'background': '#fff3e0',
-                           'border': '1px solid #ffb74d', 'color': '#e65100',
-                           'marginRight': '4px'}),
+                    style={'display': 'none'}),
         # 4. Scarica template ticker
         html.Button('📋 Template', id='btn-download-template', n_clicks=0,
                     title='Scarica il file Excel template da compilare con i tuoi titoli',
@@ -1562,6 +1681,7 @@ app.layout = html.Div([
     dcc.Store(id='tab1-slider-store',       data=None),
     dcc.Store(id='custom-tickers-store',    data=None),
     dcc.Store(id='upload-done-ts',          data=None),
+    dcc.Store(id='nav-reload',              storage_type='memory', data=None),
     dcc.Download(id='download-data'),
     dcc.Download(id='download-template'),
 
@@ -1644,6 +1764,43 @@ app.layout = html.Div([
 ])
 
 
+def _reconstruct_from_json(ns):
+    first = next(iter(ns.values()))
+    dates = pd.to_datetime(first['dates'])
+    pr, ret, tm, vm = {}, {}, {}, {}
+    for desc, v in ns.items():
+        p = v.get('prices') or []
+        r = v.get('returns') or []
+        if p:  pr[desc]  = [float(x) if x is not None else float('nan') for x in p]
+        if r:  ret[desc] = [float(x) if x is not None else float('nan') for x in r]
+        tm[desc] = v.get('ticker', desc)
+        vm[desc] = v.get('currency', 'EUR')
+    op = pd.DataFrame(pr,  index=dates) if pr  else None
+    cr = pd.DataFrame(ret, index=dates) if ret else None
+    return cr, op, tm, vm
+
+
+app.clientside_callback(
+    """
+    function(_) {
+        var t = 0;
+        try {
+            if (window.performance && window.performance.getEntriesByType) {
+                var e = window.performance.getEntriesByType('navigation');
+                if (e.length > 0) { t = e[0].type === 'reload' ? 1 : 0; }
+            } else if (window.performance && window.performance.navigation) {
+                t = window.performance.navigation.type;
+            }
+        } catch(ex) {}
+        return t;
+    }
+    """,
+    Output('nav-reload', 'data'),
+    Input('nav-reload',  'data'),
+    prevent_initial_call=False,
+)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Callback: inizializzazione + upload
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1665,41 +1822,72 @@ app.layout = html.Div([
     Output('modal-status-text',       'children',    allow_duplicate=True),
     Output('modal-status-text',       'style',       allow_duplicate=True),
     Output('upload-done-ts',          'data',        allow_duplicate=True),
+    Input('nav-reload',  'data'),
     Input('upload-data', 'contents'),
     State('upload-data', 'filename'),
-    prevent_initial_call='initial_duplicate',
+    prevent_initial_call=True,
 )
-def update_output(contents, filename):
+def update_output(nav_reload, contents, filename):
     import time as _time
     ctx = callback_context
-    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else 'initial_load'
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ''
 
     _noup = (no_update,) * 8
 
-    if triggered_id == 'initial_load':
-        # Ogni volta che la pagina viene (ri)caricata, svuota il buffer cliente,
-        # ripristina il file attivo a ETF (default) e cancella i ticker pendenti.
+    if triggered_id == 'nav-reload':
         _cl_clear(_get_username())
         _active_file_store['filename'] = 'ETF.xlsx'
         _PENDING.clear()
         import pickle as _pickle
+        _u = _get_username()
         cr, op, tm, saved_at = None, None, {}, ''
-        if _MARKET_DATA_FILE.exists():
-            try:
-                with open(_MARKET_DATA_FILE, 'rb') as _f:
-                    _d = _pickle.load(_f)
-                cr       = _d.get('close_returns')
-                op       = _d.get('original_prices')
-                tm       = _d.get('ticker_map', {})
-                saved_at = _d.get('saved_at', '')
-            except Exception:
-                pass
+
+        if nav_reload == 1:
+            # F5 → azzera buffer e ricrea JSON da zero dai dati di default
+            with _DL_LOCK:
+                _DL_BUFFER.clear()
+            if _MARKET_DATA_FILE.exists():
+                try:
+                    with open(_MARKET_DATA_FILE, 'rb') as _f:
+                        _d = _pickle.load(_f)
+                    cr = _d.get('close_returns'); op = _d.get('original_prices')
+                    tm = _d.get('ticker_map', {}); saved_at = _d.get('saved_at', '')
+                except Exception:
+                    pass
+            if cr is not None:
+                with _DL_LOCK:
+                    _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
+                                       'ticker_map': tm, 'saved_at': saved_at})
+                _write_user_json(cr, op, tm, reset_state=True)
+            _active_file_store['is_personale'] = False
+        else:
+            # Navigazione → ricostruisce buffer dal JSON (preserva stato)
+            ns = _read_user_json(_u)
+            if ns:
+                cr, op, tm, vm = _reconstruct_from_json(ns)
+                if cr is not None:
+                    with _DL_LOCK:
+                        _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
+                                           'ticker_map': tm, 'valuta_map': vm, 'saved_at': ''})
+            if cr is None and _MARKET_DATA_FILE.exists():
+                # Nessun JSON → carica da default
+                try:
+                    with open(_MARKET_DATA_FILE, 'rb') as _f:
+                        _d = _pickle.load(_f)
+                    cr = _d.get('close_returns'); op = _d.get('original_prices')
+                    tm = _d.get('ticker_map', {}); saved_at = _d.get('saved_at', '')
+                except Exception:
+                    pass
+                if cr is not None:
+                    with _DL_LOCK:
+                        _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
+                                           'ticker_map': tm, 'saved_at': saved_at})
+                    _write_user_json(cr, op, tm, reset_state=True)
+                _active_file_store['is_personale'] = False
+
         if cr is not None:
             options  = [{'label': col, 'value': col} for col in cr.columns]
             last_upd = f"Aggiornati: {saved_at}" if saved_at else ''
-            with _DL_LOCK:
-                _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
-                                   'ticker_map': tm, 'saved_at': saved_at})
             return (
                 html.Div(f'✓ {len(options)} asset — da file locale',
                          style={'color': '#007755', 'font-size': '11px'}),
@@ -1751,6 +1939,7 @@ def update_output(contents, filename):
                         'original_prices': df_prices,
                         'ticker_map': ticker_map,
                     })
+                _write_user_json(close_returns, df_prices, ticker_map, reset_state=True)
                 return (
                     html.Div(f'✓ {len(options)} asset — prezzi caricati dal file',
                              style={'color': '#007755', 'font-size': '11px'}),
@@ -1764,12 +1953,15 @@ def update_output(contents, filename):
             else:
                 try:
                     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    copy_path = SESSIONS_DIR / f'tickers_{ts}.xlsx'
+                    _arch = _ROOT_DIR / 'archive' / _get_username()
+                    _arch.mkdir(parents=True, exist_ok=True)
+                    stem = Path(filename or 'upload').stem
+                    copy_path = _arch / f'{stem}_{ts}.xlsx'
                     with open(copy_path, 'wb') as fout:
                         fout.write(decoded)
-                    print(f"✓ File cliente salvato: {copy_path.name}")
+                    print(f"✓ File cliente archiviato: {copy_path}")
                 except Exception as e:
-                    print(f"⚠ Salvataggio file cliente fallito: {e}")
+                    print(f"⚠ Archiviazione file cliente fallita: {e}")
 
                 tickers     = list(df[col_names[0]])
                 descrizione = (list(df[col_names[1]]) if len(col_names) > 1
@@ -1840,20 +2032,28 @@ def render_tab1(options_tickers):
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
     Output('active-xlsx-file',          'data'),
-    Output('stock-data',                'data',  allow_duplicate=True),
-    Output('original-prices-data',      'data',  allow_duplicate=True),
-    Output('asset-checklist',           'data',  allow_duplicate=True),
-    Output('ticker-map-store',          'data',  allow_duplicate=True),
+    Output('stock-data',                'data',     allow_duplicate=True),
+    Output('original-prices-data',      'data',     allow_duplicate=True),
+    Output('asset-checklist',           'data',     allow_duplicate=True),
+    Output('ticker-map-store',          'data',     allow_duplicate=True),
     Output('data-last-updated',         'children', allow_duplicate=True),
     Output('upload-status',             'children', allow_duplicate=True),
+    Output('weights-store-P1',          'data',     allow_duplicate=True),
+    Output('weights-store-P2',          'data',     allow_duplicate=True),
+    Output('weights-store-P3',          'data',     allow_duplicate=True),
+    Output('update-portfolio-button',   'n_clicks', allow_duplicate=True),
     Input('file-selector',              'value'),
+    State('update-portfolio-button',    'n_clicks'),
     prevent_initial_call=True,
 )
-def on_file_selected(filename):
-    if not filename:
+def on_file_selected(filename, cur_clicks):
+    if not filename or filename == '__personale__':
         raise PreventUpdate
     _active_file_store['filename'] = filename
+    _active_file_store['is_personale'] = False
     _cl_clear(_get_username())
+
+    _noup4 = (no_update,) * 4
 
     cache = _file_cache_path(filename)
     if cache.exists():
@@ -1863,11 +2063,13 @@ def on_file_selected(filename):
             cr       = data.get('close_returns')
             op       = data.get('original_prices')
             tm       = data.get('ticker_map', {})
+            vm       = data.get('valuta_map', {})
             saved_at = data.get('saved_at', '')
             if cr is not None:
                 with _DL_LOCK:
                     _DL_BUFFER.clear()
                     _DL_BUFFER.update(data)
+                _write_user_json(cr, op, tm, vm, reset_state=True)
                 options = [{'label': c, 'value': c} for c in cr.columns]
                 return (filename,
                         cr.to_json(date_format='iso', orient='split'),
@@ -1875,14 +2077,15 @@ def on_file_selected(filename):
                         options, tm,
                         f'Aggiornati: {saved_at}',
                         html.Div(f'✓ {len(options)} asset — {Path(filename).stem}',
-                                 style={'color': '#007755', 'font-size': '11px'}))
+                                 style={'color': '#007755', 'font-size': '11px'}),
+                        {}, {}, {}, (cur_clicks or 0) + 1)
         except Exception:
             pass
 
     # Cache non trovata → scarica da Yahoo Finance
     try:
         tickers, descr, valuta = _build_ticker_list(filename)
-    except Exception as e:
+    except Exception:
         raise PreventUpdate
     options  = [{'label': d, 'value': d} for d in descr]
     tm       = {descr[i]: tickers[i] for i in range(len(tickers))}
@@ -1897,7 +2100,8 @@ def on_file_selected(filename):
     return (filename, None, None, options, tm,
             f'Download {Path(filename).stem}…',
             html.Div(f'⏳ Download {Path(filename).stem} — {len(tickers)} asset…',
-                     style={'color': '#e67e22', 'font-size': '11px'}))
+                     style={'color': '#e67e22', 'font-size': '11px'}),
+            {}, {}, {}, (cur_clicks or 0) + 1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1928,19 +2132,12 @@ def toggle_file_editor(open_n, close_n, filename):
             rows = [{'ticker': v, 'descrizione': k, 'valuta': 'EUR'}
                     for k, v in cl_tm.items()]
 
-        # 2. Pkl personale salvato via Gestisci per il file selezionato
+        # 2. JSON utente (source of truth — sempre coerente con i dati caricati)
         if not rows:
-            user_pkl = _user_cache_path(_u, fn)
-            if user_pkl.exists():
-                try:
-                    with open(user_pkl, 'rb') as f:
-                        data = pickle.load(f)
-                    tm2 = data.get('ticker_map', {})
-                    if tm2:
-                        rows = [{'ticker': v, 'descrizione': k, 'valuta': 'EUR'}
-                                for k, v in tm2.items()]
-                except Exception:
-                    pass
+            ns = _read_user_json(_u)
+            if ns:
+                rows = [{'ticker': v['ticker'], 'descrizione': k, 'valuta': v.get('currency', 'EUR')}
+                        for k, v in ns.items()]
 
         # 3. Xlsx del file selezionato (fallback diretto)
         if not rows:
@@ -2073,6 +2270,7 @@ def save_file_editor(n, rows, filename):
                     _DL_BUFFER.update(sliced)
                     _DL_STATE.update({'status': 'done', 'current': len(keep_cols),
                                       'total': len(keep_cols), 'errors': []})
+                _write_user_json(sliced['close_returns'], sliced['original_prices'], new_tm)
             return ('✓ Lista aggiornata — nessun nuovo asset da scaricare.',
                     no_update, _list_files(),
                     False, 0, True, no_update)
@@ -2182,6 +2380,8 @@ def start_refresh(n_clicks, start_date_picker):
     Output('modal-status-text',       'style',    allow_duplicate=True),
     Output('progress-modal-overlay',  'style',    allow_duplicate=True),
     Output('file-editor-overlay',     'style',    allow_duplicate=True),
+    Output('file-selector',           'options',  allow_duplicate=True),
+    Output('file-selector',           'value',    allow_duplicate=True),
     Input('refresh-poll-interval', 'n_intervals'),
     prevent_initial_call=True,
 )
@@ -2210,14 +2410,16 @@ def poll_refresh_progress(n):
         return (no_update, no_update, no_update, no_update, no_update,
                 False, True,
                 modal_fill, f'{current} / {total}  ({pct}%)',
-                'Download in corso…', _STATUS_GREY, no_update, no_update)
+                'Download in corso…', _STATUS_GREY, no_update, no_update,
+                no_update, no_update)
 
     if status == 'error':
         err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
         return (no_update, no_update, no_update, no_update, no_update,
                 True, False,
                 err_fill, '❌ Download fallito',
-                'Si è verificato un errore.', _STATUS_RED, no_update, _EDITOR_HIDDEN)
+                'Si è verificato un errore.', _STATUS_RED, no_update, _EDITOR_HIDDEN,
+                no_update, no_update)
 
     close_returns   = buffer.get('close_returns')
     original_prices = buffer.get('original_prices')
@@ -2226,7 +2428,8 @@ def poll_refresh_progress(n):
         return (no_update, no_update, no_update, no_update, no_update,
                 True, False,
                 err_fill, '❌ Nessun dato ricevuto',
-                'Il download è terminato senza dati.', _STATUS_RED, no_update, _EDITOR_HIDDEN)
+                'Il download è terminato senza dati.', _STATUS_RED, no_update, _EDITOR_HIDDEN,
+                no_update, no_update)
 
     options      = [{'label': col, 'value': col} for col in close_returns.columns]
     ticker_map   = buffer.get('ticker_map', {})
@@ -2242,6 +2445,7 @@ def poll_refresh_progress(n):
     status_msg = (f'Dati pronti — {n_ok} asset scaricati{err_note}.\n'
                   + ('\n'.join(errors[:5]) if errors else ''))
 
+    _write_user_json(close_returns, original_prices, ticker_map, buffer.get('valuta_map', {}))
     return (
         returns_json, prices_json, options, ticker_map,
         f"Aggiornati: {saved_at}",
@@ -2249,7 +2453,118 @@ def poll_refresh_progress(n):
         ok_fill, f'✓ {n_ok} asset{err_note}',
         status_msg, _STATUS_GREEN if not n_err else {**_STATUS_GREEN, 'color': '#b8860b'},
         _MODAL_HIDDEN, _EDITOR_HIDDEN,
+        no_update, no_update,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: elimina asset dalla lista inline
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('stock-data',              'data',     allow_duplicate=True),
+    Output('asset-checklist',         'data',     allow_duplicate=True),
+    Output('update-portfolio-button', 'n_clicks', allow_duplicate=True),
+    Output('file-selector',           'options',  allow_duplicate=True),
+    Output('file-selector',           'value',    allow_duplicate=True),
+    Input({'type': 'delete-asset-btn', 'index': ALL}, 'n_clicks'),
+    State('asset-checklist',          'data'),
+    State('update-portfolio-button',  'n_clicks'),
+    State('file-selector',            'value'),
+    prevent_initial_call=True,
+)
+def delete_asset_inline(clicks, options, current_clicks, filename):
+    triggered = callback_context.triggered_id
+    if not triggered or not any(c for c in (clicks or [])):
+        raise PreventUpdate
+    asset = triggered['index']
+    _u = _get_username()
+    fn = filename or 'ETF.xlsx'
+
+    with _DL_LOCK:
+        cr = _DL_BUFFER.get('close_returns')
+        op = _DL_BUFFER.get('original_prices')
+        tm = dict(_DL_BUFFER.get('ticker_map', {}))
+        if cr is not None and asset in cr.columns:
+            _DL_BUFFER['close_returns'] = cr.drop(columns=[asset])
+        if op is not None and asset in op.columns:
+            _DL_BUFFER['original_prices'] = op.drop(columns=[asset])
+        tm.pop(asset, None)
+        _DL_BUFFER['ticker_map'] = tm
+        new_cr = _DL_BUFFER.get('close_returns')
+        new_op = _DL_BUFFER.get('original_prices')
+
+    ns = _read_user_json(_u)
+    if asset in ns:
+        del ns[asset]
+        try:
+            json.dump(ns, open(_user_json_path(_u), 'w'))
+        except Exception:
+            pass
+
+    user_pkl = _user_cache_path(_u, fn)
+    try:
+        if user_pkl.exists():
+            data = pickle.load(open(user_pkl, 'rb'))
+            for key, val in list(data.items()):
+                if isinstance(val, pd.DataFrame) and asset in val.columns:
+                    data[key] = val.drop(columns=[asset])
+            data['ticker_map'] = tm
+        else:
+            data = {'close_returns': new_cr, 'original_prices': new_op,
+                    'ticker_map': tm, 'saved_at': datetime.now().strftime('%d/%m/%Y %H:%M')}
+        _atomic_pkl_write(user_pkl, data)
+    except Exception as e:
+        print(f'⚠ delete_asset_inline pkl: {e}')
+
+    _active_file_store['is_personale'] = True
+    new_options = [o for o in (options or []) if o['value'] != asset]
+    new_stock = new_cr.to_json(date_format='iso', orient='split') if new_cr is not None else no_update
+    return new_stock, new_options, (current_clicks or 0) + 1, _list_files_with_personale(), '__personale__'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: aggiungi asset inline
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('inline-ticker-input',     'value',    allow_duplicate=True),
+    Output('inline-desc-input',       'value',    allow_duplicate=True),
+    Output('inline-add-status',       'children', allow_duplicate=True),
+    Output('refresh-poll-interval',   'disabled', allow_duplicate=True),
+    Output('refresh-poll-interval',   'n_intervals', allow_duplicate=True),
+    Output('refresh-data-btn',        'disabled', allow_duplicate=True),
+    Output('file-selector',           'options',  allow_duplicate=True),
+    Output('file-selector',           'value',    allow_duplicate=True),
+    Input('inline-add-btn',           'n_clicks'),
+    State('inline-ticker-input',      'value'),
+    State('inline-desc-input',        'value'),
+    State('inline-valuta-dropdown',   'value'),
+    State('file-selector',            'value'),
+    prevent_initial_call=True,
+)
+def add_asset_inline(n, ticker, desc, valuta, filename):
+    if not n or not ticker or not ticker.strip():
+        raise PreventUpdate
+    ticker = ticker.strip().upper()
+    desc   = (desc or ticker).strip()
+    valuta = valuta or 'EUR'
+    _u = _get_username()
+    fn = filename if filename and filename != '__personale__' else 'ETF.xlsx'
+
+    with _DL_LOCK:
+        existing_tm = dict(_DL_BUFFER.get('ticker_map', {}))
+
+    if desc in existing_tm:
+        return no_update, no_update, f'⚠ "{desc}" già presente', no_update, no_update, no_update, no_update, no_update
+
+    start     = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+    all_descr = list(existing_tm.keys()) + [desc]
+    _active_file_store['is_personale'] = True
+    threading.Thread(
+        target=_do_gestisci_download,
+        args=([ticker], [desc], [valuta], start, _u, fn, all_descr),
+        daemon=True,
+    ).start()
+    return '', '', f'⏳ Download {ticker}…', False, 0, True, _list_files_with_personale(), '__personale__'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2558,6 +2873,14 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
     saved_p2 = saved_p2 or {}
     saved_p3 = saved_p3 or {}
 
+    if not saved_selected and not saved_p1 and not saved_p2 and not saved_p3:
+        ns = _read_user_json()
+        if ns:
+            saved_selected = [d for d, v in ns.items() if v.get('checked')]
+            saved_p1 = {d: v.get('P1', 0) for d, v in ns.items()}
+            saved_p2 = {d: v.get('P2', 0) for d, v in ns.items()}
+            saved_p3 = {d: v.get('P3', 0) for d, v in ns.items()}
+
     # Calcola AKRatio per colorazione etichette
     assets_above_threshold = set()
     if ir_filter and ir_filter != 'all' and benchmark_value:
@@ -2651,6 +2974,12 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
             _chk({'type': 'vol-select-checkbox',    'index': asset}, f'{asset}_Vol',              vol_val,    '7%'),
             _chk({'type': 'var90-select-checkbox',  'index': asset}, f'{asset}_VaR90',            var90_val,  '7%'),
             _chk({'type': 'var95-select-checkbox',  'index': asset}, f'{asset}_VaR95',            var95_val,  '8%'),
+            html.Button('×', id={'type': 'delete-asset-btn', 'index': asset}, n_clicks=0,
+                        style={'fontSize': '11px', 'width': '16px', 'height': '16px',
+                               'background': 'none', 'border': '1px solid #ddd',
+                               'color': '#bbb', 'cursor': 'pointer', 'borderRadius': '2px',
+                               'padding': '0', 'flexShrink': '0', 'lineHeight': '14px',
+                               'marginLeft': '2px'}),
         ], style={'display': 'flex', 'align-items': 'center', 'border-bottom': '1px dotted #eee'})
         rows.append(row_content)
 
@@ -2716,7 +3045,9 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
     prevent_initial_call=True,
 )
 def collect_selected_assets(all_values):
-    return [v[0] for v in all_values if v]
+    selected = [v[0] for v in all_values if v]
+    _update_user_json(checked=selected)
+    return selected
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2864,6 +3195,7 @@ def update_portfolio_weights(all_input_values, all_input_ids, p1_data, p2_data, 
         base['color'] = '#1b7a34' if abs(s - 100) < 0.01 else '#d62728'
         return base
 
+    _update_user_json(weights={'P1': p1, 'P2': p2, 'P3': p3})
     return (f'{sum1:.1f}%', f'{sum2:.1f}%', f'{sum3:.1f}%',
             _style(sum1), _style(sum2), _style(sum3),
             p1, p2, p3)
@@ -3745,6 +4077,83 @@ def _scheduled_arima():
                 print(f"⚠ ARIMA {filename}: calcolo non riuscito")
         except Exception as e:
             print(f"⚠ ARIMA notturno {filename} fallito: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: reset asset ai default
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('upload-status',           'children',  allow_duplicate=True),
+    Output('asset-checklist',         'data',      allow_duplicate=True),
+    Output('stock-data',              'data',      allow_duplicate=True),
+    Output('original-prices-data',    'data',      allow_duplicate=True),
+    Output('ticker-map-store',        'data',      allow_duplicate=True),
+    Output('data-last-updated',       'children',  allow_duplicate=True),
+    Output('weights-store-P1',        'data',      allow_duplicate=True),
+    Output('weights-store-P2',        'data',      allow_duplicate=True),
+    Output('weights-store-P3',        'data',      allow_duplicate=True),
+    Output('update-portfolio-button', 'n_clicks',  allow_duplicate=True),
+    Output('file-selector',           'options',   allow_duplicate=True),
+    Output('file-selector',           'value',     allow_duplicate=True),
+    Input('reset-default-btn',        'n_clicks'),
+    State('update-portfolio-button',  'n_clicks'),
+    prevent_initial_call=True,
+)
+def reset_to_default(n, cur_clicks):
+    if not n:
+        raise PreventUpdate
+    _err = (no_update,) * 11
+    if not _MARKET_DATA_FILE.exists():
+        return ('⚠ File di default non trovato', *_err)
+    try:
+        with open(_MARKET_DATA_FILE, 'rb') as f:
+            d = pickle.load(f)
+        cr = d.get('close_returns')
+        op = d.get('original_prices')
+        tm = d.get('ticker_map', {})
+        vm = d.get('valuta_map', {})
+        saved_at = d.get('saved_at', '')
+    except Exception as e:
+        return (f'⚠ Errore: {e}', *_err)
+    if cr is None or op is None:
+        return ('⚠ Dati non trovati nel file di default', *_err)
+    with _DL_LOCK:
+        _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
+                           'ticker_map': tm, 'valuta_map': vm, 'saved_at': saved_at})
+    _write_user_json(cr, op, tm, vm, reset_state=True)
+    _active_file_store['is_personale'] = False
+    options  = [{'label': col, 'value': col} for col in cr.columns]
+    last_upd = f'Aggiornati: {saved_at}' if saved_at else ''
+    return (
+        html.Div(f'✓ {len(options)} asset — file di default',
+                 style={'color': '#007755', 'font-size': '11px'}),
+        options,
+        cr.to_json(date_format='iso', orient='split'),
+        op.to_json(date_format='iso', orient='split'),
+        tm,
+        last_upd,
+        {}, {}, {},
+        (cur_clicks or 0) + 1,
+        _list_files(), 'ETF.xlsx',
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: ripristina file-selector al caricamento pagina
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('file-selector', 'options', allow_duplicate=True),
+    Output('file-selector', 'value',   allow_duplicate=True),
+    Input('nav-reload', 'data'),
+    prevent_initial_call=True,
+)
+def restore_file_selector(nav_reload):
+    if nav_reload == 1:
+        return _list_files(), 'ETF.xlsx'
+    if _active_file_store.get('is_personale'):
+        return _list_files_with_personale(), '__personale__'
+    fn = _active_file_store.get('filename', 'ETF.xlsx')
+    return _list_files(), fn
 
 
 try:
