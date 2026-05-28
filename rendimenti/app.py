@@ -43,12 +43,18 @@ _NU = no_update
 def _to_json(df):
     if df is None:
         return None
+    if hasattr(df.index, 'tz') and df.index.tz is not None:
+        df = df.copy()
+        df.index = df.index.tz_localize(None)
     return df.to_json(date_format='iso', orient='split')
 
 def _get_df(js):
     if not js:
         return None
-    return pd.read_json(js, orient='split')
+    df = pd.read_json(js, orient='split')
+    if hasattr(df.index, 'tz') and df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    return df
 
 def _get_username():
     try:

@@ -710,6 +710,8 @@ def _get_returns(data_json):
     if key not in _DF_CACHE:
         df = pd.read_json(io.StringIO(data_json), orient='split')
         df.index = pd.to_datetime(df.index)
+        if hasattr(df.index, 'tz') and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
         _DF_CACHE[key] = df
     return _DF_CACHE[key].copy()
 
@@ -769,6 +771,8 @@ def _build_perf_chart(prices_data, chart_assets, frontier_weights, show_frontier
     try:
         prices_df = pd.read_json(io.StringIO(prices_data), orient='split')
         prices_df.index = pd.to_datetime(prices_df.index)
+        if hasattr(prices_df.index, 'tz') and prices_df.index.tz is not None:
+            prices_df.index = prices_df.index.tz_localize(None)
         if date_start: prices_df = prices_df.loc[date_start:]
         if date_end:   prices_df = prices_df.loc[:date_end]
         fig2 = go.Figure()
@@ -844,6 +848,8 @@ def _build_drawdown_chart(prices_data, chart_assets, frontier_weights, show_fron
     try:
         prices_df = pd.read_json(io.StringIO(prices_data), orient='split')
         prices_df.index = pd.to_datetime(prices_df.index)
+        if hasattr(prices_df.index, 'tz') and prices_df.index.tz is not None:
+            prices_df.index = prices_df.index.tz_localize(None)
         if date_start: prices_df = prices_df.loc[date_start:]
         if date_end:   prices_df = prices_df.loc[:date_end]
         fig_dd = go.Figure()
