@@ -273,6 +273,8 @@ app.layout = html.Div([
 
     # Trigger caricamento dati al primo render
     dcc.Interval(id='rend-init', interval=400, max_intervals=1),
+    dcc.Store(id='rend-sync-sig', data=''),
+    dcc.Interval(id='rend-live-sync', interval=2000, n_intervals=0, disabled=False),
 
     html.Div([
 
@@ -421,12 +423,12 @@ app.layout = html.Div([
 
 # ─── Callback 1: Carica dati e pesi al primo render ──────────────────────────
 @app.callback(
-    Output('rend-prices-data', 'data'),
-    Output('rend-stock-data', 'data'),
-    Output('rend-data-info', 'children'),
-    Output('rend-weights-p1', 'data'),
-    Output('rend-weights-p2', 'data'),
-    Output('rend-weights-p3', 'data'),
+    Output('rend-prices-data', 'data',     allow_duplicate=True),
+    Output('rend-stock-data',  'data',     allow_duplicate=True),
+    Output('rend-data-info',   'children', allow_duplicate=True),
+    Output('rend-weights-p1',  'data'),
+    Output('rend-weights-p2',  'data'),
+    Output('rend-weights-p3',  'data'),
     Input('rend-init', 'n_intervals'),
     prevent_initial_call=False,
 )
@@ -1170,3 +1172,32 @@ def render_table(perf_data, sort_state, akr_filter):
     })
 
     return html.Div([info_bar, table])
+
+
+# ─── Sync live con portafoglio: aggiorna dati quando la lista asset cambia ───
+@app.callback(
+    Output('rend-prices-data', 'data',     allow_duplicate=True),
+    Output('rend-stock-data',  'data',     allow_duplicate=True),
+    Output('rend-data-info',   'children', allow_duplicate=True),
+    Output('rend-sync-sig',    'data'),
+    Input('rend-live-sync',    'n_intervals'),
+    State('rend-sync-sig',     'data'),
+    prevent_initial_call=True,
+)
+def rend_live_sync(_, sig):
+    ns = _read_user_json()
+    new_sig = ','.join(sorted(ns.keys())) if ns else ''
+    if new_sig == (sig or '') or not ns:
+        raise PreventUpdate
+    op, cr = _reconstruct_from_json(ns)
+    if op is None or cr is None:
+        raise PreventUpdate
+    n = len(op.columns)
+    label = html.Span([
+        html.I(className='fa-solid fa-circle-info',
+               style={'marginRight': '6px', 'color': '#1a3a6b'}),
+        html.Span('👤 Personale', style={'fontWeight': '700', 'color': '#1a5c1a',
+                                          'marginRight': '8px'}),
+        f'{n} asset',
+    ])
+    return _to_json(op), _to_json(cr), label, new_sig

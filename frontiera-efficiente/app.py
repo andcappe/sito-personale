@@ -1256,11 +1256,11 @@ def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
     Output('fe-grid',        'children', allow_duplicate=True),
     Output('fe-asset-count', 'children', allow_duplicate=True),
     Input('fe-loaded-flag',  'data'),
-    State('fe-stock-data',   'data'),
+    Input('fe-stock-data',   'data'),
     prevent_initial_call=True,
 )
 def build_grid_on_load(loaded, stock_data):
-    if not loaded or not stock_data:
+    if not stock_data:
         raise PreventUpdate
     returns_df = _get_returns(stock_data)
     if returns_df is None or returns_df.empty:
@@ -2409,10 +2409,11 @@ def fe_live_sync(_, sig):
     op, cr = _reconstruct_from_json_fe(ns)
     if op is None or cr is None:
         raise PreventUpdate
+    n = len(op.columns)
     return (
         cr.to_json(orient='split', date_format='iso'),
         op.to_json(orient='split', date_format='iso'),
-        True, '', 'default', new_sig,
+        True, f'👤 Personale ({n} asset)', 'default', new_sig,
     )
 
 
