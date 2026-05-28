@@ -17,6 +17,8 @@ _NAV_LINKS = [
 _TABS = [
     ("Portafoglio",          "/portafoglio/"),
     ("Frontiera Efficiente", "/frontiera/"),
+    ("Rendimenti Storici",   "/rendimenti/"),
+    ("Strategie Opzioni",    "/opzioni/"),
     ("Macro Economia",       "/macro/"),
 ]
 
