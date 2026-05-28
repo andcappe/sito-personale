@@ -423,9 +423,9 @@ app.layout = html.Div([
 
 # ─── Callback 1: Carica dati e pesi al primo render ──────────────────────────
 @app.callback(
-    Output('rend-prices-data', 'data',     allow_duplicate=True),
-    Output('rend-stock-data',  'data',     allow_duplicate=True),
-    Output('rend-data-info',   'children', allow_duplicate=True),
+    Output('rend-prices-data', 'data'),
+    Output('rend-stock-data',  'data'),
+    Output('rend-data-info',   'children'),
     Output('rend-weights-p1',  'data'),
     Output('rend-weights-p2',  'data'),
     Output('rend-weights-p3',  'data'),
