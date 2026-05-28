@@ -349,6 +349,13 @@ app.layout = html.Div([
                 'border': '1px solid #d0d8e8', 'borderRadius': '5px',
                 'marginRight': '8px',
             }),
+            html.Button('⟳ Ricarica Dati', id='rend-reload-btn', n_clicks=0, style={
+                'background': '#1a6a3c', 'color': 'white', 'border': 'none',
+                'padding': '4px 14px', 'borderRadius': '4px', 'cursor': 'pointer',
+                'fontWeight': 'bold', 'fontSize': '10px',
+                'whiteSpace': 'nowrap',
+                'boxShadow': '0 2px 6px rgba(26,106,60,0.4)',
+            }),
             html.Button('Aggiorna Tabella', id='rend-update-btn', n_clicks=0, style={
                 'background': '#c0392b', 'color': 'white', 'border': 'none',
                 'padding': '4px 14px', 'borderRadius': '4px', 'cursor': 'pointer',
@@ -428,9 +435,10 @@ app.layout = html.Div([
     Output('rend-weights-p2', 'data'),
     Output('rend-weights-p3', 'data'),
     Input('rend-init', 'n_intervals'),
+    Input('rend-reload-btn', 'n_clicks'),
     prevent_initial_call=False,
 )
-def load_default_data(_):
+def load_default_data(_, _reload):
     prices, returns, saved_at = _read_shared_data()
     if prices is None or returns is None:
         return None, None, html.Span(
