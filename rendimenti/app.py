@@ -4,10 +4,12 @@ Analisi dei rendimenti per periodo: YTD, annuali, T-N, Information Ratio, Sharpe
 Legge i dati direttamente dal portafoglio condiviso (market_data.pkl / buffer live).
 """
 
+import io
 import json
 import pickle
 import sys
 import os
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -40,18 +42,11 @@ _PORT_PKL = os.path.normpath(os.path.join(
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 _NU = no_update
 
-def _to_json(df):
-    if df is None:
-        return None
-    if hasattr(df.index, 'tz') and df.index.tz is not None:
-        df = df.copy()
-        df.index = df.index.tz_localize(None)
-    return df.to_json(date_format='iso', orient='split')
-
 def _get_df(js):
     if not js:
         return None
-    df = pd.read_json(js, orient='split')
+    df = pd.read_json(io.StringIO(js), orient='split')
+    df.index = pd.to_datetime(df.index)
     if hasattr(df.index, 'tz') and df.index.tz is not None:
         df.index = df.index.tz_localize(None)
     return df
@@ -277,8 +272,8 @@ app.layout = html.Div([
     dcc.Store(id='rend-akr-ma-store',     data=1),
     dcc.Store(id='rend-akr-filter-store', data='all'),
 
-    # Trigger caricamento dati al primo render
-    dcc.Interval(id='rend-init', interval=400, max_intervals=1),
+    # Trigger caricamento dati al primo render (stesso pattern di frontiera)
+    dcc.Store(id='rend-page-load', data=1),
     dcc.Store(id='rend-sync-sig', data=''),
     dcc.Interval(id='rend-live-sync', interval=2000, n_intervals=0, disabled=False),
 
@@ -435,7 +430,7 @@ app.layout = html.Div([
     Output('rend-weights-p1',  'data'),
     Output('rend-weights-p2',  'data'),
     Output('rend-weights-p3',  'data'),
-    Input('rend-init', 'n_intervals'),
+    Input('rend-page-load', 'data'),
     prevent_initial_call='initial_duplicate',
 )
 def load_default_data(_):
@@ -465,7 +460,9 @@ def load_default_data(_):
         ' — seleziona asset/portafogli e clicca Aggiorna Tabella',
         style={'color': '#888'},
     ))
-    return _to_json(prices), _to_json(returns), html.Span(info_parts), p1, p2, p3
+    return (prices.to_json(orient='split', date_format='iso'),
+            returns.to_json(orient='split', date_format='iso'),
+            html.Span(info_parts), p1, p2, p3)
 
 
 # ─── Callback 2: Costruisce la griglia asset ──────────────────────────────────
@@ -484,8 +481,9 @@ def build_asset_grid(stock_json, selected, p1, p2, p3):
                         style={'padding': '12px', 'color': '#888', 'fontSize': '12px'}), []
     try:
         returns = _get_df(stock_json)
-    except Exception:
-        return html.Div('Errore nel caricamento dei dati.',
+    except Exception as _e:
+        print(f'[rendimenti] build_asset_grid error: {traceback.format_exc()}')
+        return html.Div(f'Errore nel caricamento dei dati: {type(_e).__name__}: {_e}',
                         style={'padding': '12px', 'color': '#c0392b', 'fontSize': '12px'}), []
 
     asset_names = list(returns.columns)
@@ -1206,4 +1204,6 @@ def rend_live_sync(_, sig):
                                           'marginRight': '8px'}),
         f'{n} asset',
     ])
-    return _to_json(op), _to_json(cr), label, new_sig
+    return (op.to_json(orient='split', date_format='iso'),
+            cr.to_json(orient='split', date_format='iso'),
+            label, new_sig)
