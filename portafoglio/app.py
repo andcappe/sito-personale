@@ -328,6 +328,14 @@ _CL_LOCK   = threading.Lock()
 _active_file_store: dict = {'filename': 'ETF.xlsx'}  # file attivo corrente
 _PENDING: dict = {}  # ticker in attesa di download da Gestisci — processati da start_refresh
 
+_ISIN_LOCK  = threading.Lock()
+_ISIN_STATE: dict = {
+    'running': False, 'done': False, 'req_id': None,
+    'progress': '', 'n_done': 0, 'n_total': 0,
+    'result_bytes': None, 'excluded': [],
+    'tickers': [], 'descr': [], 'valuta': [], 'pesi': [],
+}
+
 _ROOT_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent
 
 def _user_json_path(username=None):
@@ -955,6 +963,301 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ISIN → Ticker conversion helpers
+# ─────────────────────────────────────────────────────────────────────────────
+import re as _re_isin
+
+_ISIN_PATTERN = _re_isin.compile(r'^[A-Z]{2}[A-Z0-9]{9}[0-9]$')
+
+_DEFAULT_PORTFOLIO_ROWS = [
+    ('ISAC.L',    'Az. ACWI',                    'USD'),
+    ('SWDA.MI',   'Az. World',                    'EUR'),
+    ('DBMFE.PA',  'Alt. MF',                      'EUR'),
+    ('UIQ4.DE',   'Alt. Eu.Def',                  'EUR'),
+    ('JEGA.MI',   'Alt. Pr.Inc.Ac',               'EUR'),
+    ('INFL.PA',   'Alt. Inf.Br.',                 'EUR'),
+    ('IWVU.L',    'Az. World Value Factor',        'USD'),
+    ('QDVE.DE',   'AZ. USA Info Tech SP500',       'EUR'),
+    ('CNDX.L',    'Az.USA Nasdaq100',              'USD'),
+    ('CSSPX.MI',  'Az. USA SP500',                'EUR'),
+    ('IUSG',      'Az. USA Growth SP500',          'USD'),
+    ('VUG',       'Az. USA Growth',               'USD'),
+    ('IVE',       'Az. USA Value SP500',           'USD'),
+    ('ZPRV.DE',   'Az USA Value Small Cap',        'EUR'),
+    ('R2US.MI',   'Az USA Small Cap Russell2000',  'EUR'),
+    ('ZPRX.DE',   'Az EUROPA Value Small Cap',     'EUR'),
+    ('XSX6.MI',   'Az. Europe Stoxx 600',          'EUR'),
+    ('EIMI.MI',   'Az. Emerging Market',           'EUR'),
+]
+
+
+def _is_isin(s):
+    return bool(_ISIN_PATTERN.match(str(s).strip().upper()))
+
+
+def _parse_weight_col(series):
+    """Normalizza una colonna pesi a float 0-100. Ritorna Series o None."""
+    try:
+        cleaned = series.astype(str).str.strip().str.replace('%', '', regex=False)
+        nums = pd.to_numeric(cleaned, errors='coerce').dropna()
+        if len(nums) == 0 or nums.min() < 0:
+            return None
+        if nums.max() <= 1.01:
+            return (nums * 100).round(4)
+        if nums.max() <= 100.01:
+            return nums.round(4)
+    except Exception:
+        pass
+    return None
+
+
+def _detect_ticker_and_weight_cols(df):
+    """Restituisce (ticker_col, weight_col, weight_series)."""
+    _TICKER_H = {'ticker', 'isin', 'simbolo', 'symbol', 'codice', 'code', 'titolo', 'cusip'}
+    _WEIGHT_H = {'peso', 'weight', 'allocation', '%', 'pct', 'percentual',
+                 'quota', 'alloc', 'perc', 'ponder', 'peso %', 'weight %'}
+
+    ticker_col = None
+    for col in df.columns:
+        if str(col).strip().lower() in _TICKER_H:
+            ticker_col = col
+            break
+    if ticker_col is None:
+        ticker_col = df.columns[0]
+
+    weight_col, w_vals = None, None
+    for col in df.columns:
+        if col == ticker_col:
+            continue
+        if str(col).strip().lower() in _WEIGHT_H:
+            w_vals = _parse_weight_col(df[col])
+            if w_vals is not None:
+                weight_col = col
+                break
+    if weight_col is None:
+        for col in df.columns:
+            if col == ticker_col:
+                continue
+            w_vals = _parse_weight_col(df[col])
+            if w_vals is not None:
+                weight_col = col
+                break
+
+    return ticker_col, weight_col, w_vals
+
+
+def _yahoo_search_isin(isin, ua):
+    """Cerca ISIN su Yahoo Finance, ritorna [(symbol, name, currency), ...]."""
+    import requests as _rq
+    try:
+        r = _rq.get(
+            'https://query1.finance.yahoo.com/v1/finance/search',
+            params={'q': isin, 'quotesCount': 10, 'newsCount': 0, 'listsCount': 0},
+            headers={'User-Agent': ua, 'Accept': 'application/json'},
+            timeout=8,
+        )
+        quotes = r.json().get('quotes', [])
+        return [
+            (q['symbol'], q.get('shortname') or q.get('longname') or q['symbol'],
+             q.get('currency', 'EUR'))
+            for q in quotes
+            if q.get('typeDisp') in ('Equity', 'ETF', 'Fund', 'Mutualfund')
+            and q.get('symbol')
+        ]
+    except Exception:
+        return []
+
+
+def _best_ticker_from_candidates(candidates, start_date, dl_kwargs):
+    """Tra i candidati scarica in batch e sceglie quello con più dati storici."""
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        sym = candidates[0][0]
+        try:
+            raw = yf.download(sym, start=start_date, progress=False, **dl_kwargs)
+            return candidates[0] if not raw.empty else None
+        except Exception:
+            return None
+    symbols = [c[0] for c in candidates[:6]]
+    try:
+        raw = yf.download(symbols, start=start_date, group_by='ticker',
+                          progress=False, **dl_kwargs)
+        if raw.empty:
+            return None
+        best_sym, best_n = None, 0
+        for sym in symbols:
+            try:
+                col = (raw[(sym, 'Close')] if isinstance(raw.columns, pd.MultiIndex)
+                       else raw['Close'])
+                n = int(col.dropna().shape[0])
+                if n > best_n:
+                    best_n, best_sym = n, sym
+            except Exception:
+                pass
+        if best_sym:
+            return next((c for c in candidates if c[0] == best_sym), candidates[0])
+    except Exception:
+        pass
+    return candidates[0]
+
+
+def _run_isin_conversion(file_bytes, username, req_id):
+    """Thread principale: ISIN→ticker, costruisce Excel, avvia download dati."""
+    import io as _io
+
+    ua = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+          'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+    dl_kwargs  = dict(auto_adjust=True, progress=False)
+    start_date = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+
+    def _upd(**kw):
+        with _ISIN_LOCK:
+            if _ISIN_STATE.get('req_id') != req_id:
+                return False
+            _ISIN_STATE.update(kw)
+            return True
+
+    try:
+        df = pd.read_excel(_io.BytesIO(file_bytes))
+    except Exception as e:
+        _upd(running=False, done=True, progress=f'⚠ Errore lettura file: {e}')
+        return
+
+    if df.empty:
+        _upd(running=False, done=True, progress='⚠ File vuoto.')
+        return
+
+    ticker_col, weight_col, w_vals = _detect_ticker_and_weight_cols(df)
+
+    rows = df[ticker_col].dropna().astype(str).str.strip().tolist()
+    rows = [r for r in rows if r and r.lower() not in ('nan', '')]
+    _upd(n_total=len(rows), n_done=0)
+
+    converted, excluded = [], []
+
+    for idx, raw_val in enumerate(rows):
+        if not _upd(progress=f'Analisi {idx+1}/{len(rows)}: {raw_val}…', n_done=idx):
+            return
+
+        val_up = raw_val.strip().upper()
+
+        if _is_isin(val_up):
+            candidates = _yahoo_search_isin(val_up, ua)
+            if not candidates:
+                excluded.append((raw_val, 'ISIN non trovato su Yahoo Finance'))
+                continue
+            best = _best_ticker_from_candidates(candidates, start_date, dl_kwargs)
+            if best is None:
+                excluded.append((raw_val, 'Nessun dato storico disponibile'))
+                continue
+            ticker, name, currency = best
+        else:
+            # Già un ticker — leggi info veloci da Yahoo
+            ticker   = val_up
+            name     = raw_val
+            currency = 'EUR'
+            try:
+                fi = yf.Ticker(ticker).fast_info
+                currency = getattr(fi, 'currency', 'EUR') or 'EUR'
+                name     = getattr(fi, 'name',     raw_val) or raw_val
+            except Exception:
+                pass
+
+        # Peso
+        peso = None
+        if weight_col is not None and w_vals is not None:
+            try:
+                mask = df[ticker_col].astype(str).str.strip() == raw_val
+                idx_match = df[mask].index
+                if not idx_match.empty and idx_match[0] in w_vals.index:
+                    peso = float(w_vals.loc[idx_match[0]])
+            except Exception:
+                pass
+
+        converted.append((ticker, name, currency, peso))
+
+    if not _upd(progress='Creazione file Excel…', n_done=len(rows)):
+        return
+
+    # ── Excel output ──────────────────────────────────────────────────────────
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Portafoglio'
+
+    hdr_fill = PatternFill('solid', fgColor='1A3A5C')
+    hdr_font = Font(bold=True, color='FFFFFF', size=10)
+    hdr_aln  = Alignment(horizontal='center', vertical='center')
+    has_pesi = any(c[3] is not None for c in converted)
+    headers  = ['TICKER', 'DESCRIZIONE', 'VALUTA'] + (['Peso %'] if has_pesi else [])
+
+    for ci, h in enumerate(headers, 1):
+        c = ws.cell(row=1, column=ci, value=h)
+        c.fill, c.font, c.alignment = hdr_fill, hdr_font, hdr_aln
+
+    ws.column_dimensions['A'].width = 14
+    ws.column_dimensions['B'].width = 32
+    ws.column_dimensions['C'].width = 8
+    if has_pesi:
+        ws.column_dimensions['D'].width = 10
+
+    alt = PatternFill('solid', fgColor='EEF4FF')
+    whi = PatternFill('solid', fgColor='FFFFFF')
+
+    def _wr(r, t, d, v, p):
+        f = alt if r % 2 == 0 else whi
+        for ci, val in enumerate([t, d, v] + ([round(p, 2) if p is not None else ''] if has_pesi else []), 1):
+            ws.cell(r, ci, val).fill = f
+
+    row_n = 2
+    for t, d, v in _DEFAULT_PORTFOLIO_ROWS:
+        _wr(row_n, t, d, v, None)
+        row_n += 1
+    for t, d, v, p in converted:
+        _wr(row_n, t, d, v, p)
+        row_n += 1
+
+    if excluded:
+        ws2 = wb.create_sheet('Titoli non trovati')
+        ws2.cell(1, 1, 'Valore originale').font = Font(bold=True)
+        ws2.cell(1, 2, 'Motivo esclusione').font = Font(bold=True)
+        ws2.column_dimensions['A'].width = 20
+        ws2.column_dimensions['B'].width = 48
+        for i, (v, r) in enumerate(excluded, 2):
+            ws2.cell(i, 1, v)
+            ws2.cell(i, 2, r)
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+
+    tickers = [c[0] for c in converted]
+    descrs  = [c[1] for c in converted]
+    valutas = [c[2] for c in converted]
+    pesi    = [c[3] for c in converted]
+
+    _upd(
+        running=False, done=True,
+        progress=f'✓ {len(converted)} titoli, {len(excluded)} esclusi.',
+        result_bytes=buf.getvalue(),
+        tickers=tickers, descr=descrs, valuta=valutas, pesi=pesi,
+    )
+
+    if tickers:
+        def _download_and_set_weights():
+            _do_gestisci_download(tickers, descrs, valutas, start_date,
+                                  username, 'ETF.xlsx', descrs)
+            if any(p is not None for p in pesi):
+                w_map = {descrs[i]: pesi[i] for i in range(len(descrs))
+                         if pesi[i] is not None}
+                _update_user_json(weights={'P1': w_map, 'P2': {}, 'P3': {}},
+                                  username=username)
+        threading.Thread(target=_download_and_set_weights, daemon=True).start()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Carica solo nomi (avvio rapido)
 # ─────────────────────────────────────────────────────────────────────────────
 def load_ticker_names_only(filename='ETF.xlsx'):
@@ -1554,6 +1857,13 @@ app.layout = html.Div([
             ]),
             html.Span(id='data-last-updated', style={'display': 'none'}),
         ], style={'display': 'none'}),
+        # 1b. Converti ISIN
+        html.Button('🔀 Converti ISIN', id='isin-open-btn', n_clicks=0,
+                    title='Carica un file con ISIN e converti in ticker Yahoo Finance',
+                    style={'font-size': '11px', 'padding': '5px 12px', 'border-radius': '4px',
+                           'cursor': 'pointer', 'background': '#fff3e0',
+                           'border': '1px solid #ffb74d', 'color': '#e65100',
+                           'font-weight': 'bold', 'margin-right': '4px'}),
         # 2. Sessioni
         get_session_panel_layout(),
         # 3. Selettore file dataset
@@ -1695,6 +2005,64 @@ app.layout = html.Div([
     dcc.Store(id='nav-reload',              storage_type='memory', data=None),
     dcc.Download(id='download-data'),
     dcc.Download(id='download-template'),
+    dcc.Download(id='isin-download-data'),
+    dcc.Interval(id='isin-poll', interval=600, n_intervals=0, disabled=True),
+    dcc.Store(id='isin-req-id', data=None),
+
+    # ── Modale ISIN conversion ────────────────────────────────────────────────
+    html.Div(id='isin-modal-overlay',
+             style={'display': 'none', 'position': 'fixed', 'top': '0', 'left': '0',
+                    'width': '100%', 'height': '100%', 'z-index': '9000',
+                    'background': 'rgba(0,0,0,0.45)', 'align-items': 'center',
+                    'justify-content': 'center'},
+             children=[
+        html.Div([
+            html.Div([
+                html.Span('🔀 Converti ISIN in Ticker',
+                          style={'font-weight': '700', 'font-size': '14px', 'color': '#1a3a5c'}),
+                html.Button('✕', id='isin-close-btn', n_clicks=0,
+                            style={'background': 'none', 'border': 'none', 'font-size': '18px',
+                                   'cursor': 'pointer', 'color': '#666', 'float': 'right'}),
+            ], style={'display': 'flex', 'justify-content': 'space-between',
+                      'align-items': 'center', 'margin-bottom': '12px'}),
+
+            html.P('Carica un file Excel con una colonna di ISIN (o ticker). '
+                   'Il sistema trova il ticker Yahoo con più dati storici, '
+                   'costruisce il file portafoglio e scarica i prezzi.',
+                   style={'font-size': '11px', 'color': '#555', 'margin-bottom': '12px'}),
+
+            dcc.Upload(id='isin-upload',
+                children=html.Div([
+                    html.I(className='fa-solid fa-file-excel',
+                           style={'font-size': '28px', 'color': '#e65100', 'margin-bottom': '8px'}),
+                    html.Div('Trascina il file Excel qui', style={'font-weight': '600', 'font-size': '12px'}),
+                    html.Div('oppure clicca per selezionare', style={'font-size': '10px', 'color': '#888'}),
+                ], style={'textAlign': 'center', 'padding': '20px'}),
+                style={'border': '2px dashed #ffb74d', 'border-radius': '8px',
+                       'background': '#fffde7', 'cursor': 'pointer', 'margin-bottom': '12px'},
+                multiple=False,
+            ),
+
+            html.Div(id='isin-progress-text',
+                     style={'font-size': '11px', 'color': '#555', 'min-height': '20px',
+                            'margin-bottom': '8px'}),
+
+            html.Div([
+                html.Button('📥 Scarica file portafoglio', id='isin-dl-btn', n_clicks=0,
+                            style={'display': 'none', 'font-size': '11px', 'padding': '6px 14px',
+                                   'background': '#1b7a34', 'color': 'white', 'border': 'none',
+                                   'border-radius': '4px', 'cursor': 'pointer',
+                                   'font-weight': 'bold', 'margin-right': '8px'}),
+                html.Span(id='isin-load-status',
+                          style={'font-size': '11px', 'color': '#1a7a4a', 'font-weight': '600'}),
+            ]),
+
+        ], style={
+            'background': 'white', 'border-radius': '10px', 'padding': '20px 24px',
+            'width': '520px', 'box-shadow': '0 4px 24px rgba(0,0,0,0.18)',
+            'position': 'relative',
+        }),
+    ]),
 
     # ── Modale progresso aggiornamento ───────────────────────────────────────
     html.Div([
@@ -4183,6 +4551,133 @@ try:
 except ImportError:
     print("⚠ apscheduler non installato — aggiornamento automatico disabilitato")
     print("  pip install apscheduler")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callbacks: Converti ISIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.callback(
+    Output('isin-modal-overlay', 'style'),
+    Input('isin-open-btn',  'n_clicks'),
+    Input('isin-close-btn', 'n_clicks'),
+    State('isin-modal-overlay', 'style'),
+    prevent_initial_call=True,
+)
+def _toggle_isin_modal(open_n, close_n, style):
+    _BASE = {'position': 'fixed', 'top': '0', 'left': '0', 'width': '100%', 'height': '100%',
+             'z-index': '9000', 'background': 'rgba(0,0,0,0.45)',
+             'align-items': 'center', 'justify-content': 'center'}
+    tid = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else ''
+    return {**_BASE, 'display': 'flex'} if tid == 'isin-open-btn' else {**_BASE, 'display': 'none'}
+
+
+@app.callback(
+    Output('isin-req-id',       'data'),
+    Output('isin-poll',         'disabled'),
+    Output('isin-progress-text','children'),
+    Output('isin-dl-btn',       'style'),
+    Output('isin-load-status',  'children'),
+    Input('isin-upload',        'contents'),
+    State('isin-upload',        'filename'),
+    prevent_initial_call=True,
+)
+def _start_isin_conversion(contents, filename):
+    if not contents:
+        raise PreventUpdate
+    import uuid, base64
+    _u   = _get_username()
+    rid  = str(uuid.uuid4())[:8]
+    _, b64 = contents.split(',', 1)
+    raw  = base64.b64decode(b64)
+    with _ISIN_LOCK:
+        _ISIN_STATE.update({
+            'running': True, 'done': False, 'req_id': rid,
+            'progress': 'Avvio conversione…', 'n_done': 0, 'n_total': 0,
+            'result_bytes': None, 'excluded': [],
+            'tickers': [], 'descr': [], 'valuta': [], 'pesi': [],
+        })
+    threading.Thread(target=_run_isin_conversion, args=(raw, _u, rid), daemon=True).start()
+    _BTN_HIDE = {'display': 'none'}
+    return rid, False, f'⏳ Avvio conversione {filename}…', _BTN_HIDE, ''
+
+
+@app.callback(
+    Output('isin-progress-text', 'children',     allow_duplicate=True),
+    Output('isin-poll',          'disabled',     allow_duplicate=True),
+    Output('isin-dl-btn',        'style',        allow_duplicate=True),
+    Output('isin-load-status',   'children',     allow_duplicate=True),
+    Output('stock-data',         'data',         allow_duplicate=True),
+    Output('asset-checklist',    'data',         allow_duplicate=True),
+    Output('update-portfolio-button', 'n_clicks', allow_duplicate=True),
+    Input('isin-poll',           'n_intervals'),
+    State('isin-req-id',         'data'),
+    State('update-portfolio-button', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def _poll_isin(_, req_id, cur_clicks):
+    _NU = no_update
+    _BTN_SHOW = {'display': 'inline-block', 'font-size': '11px', 'padding': '6px 14px',
+                 'background': '#1b7a34', 'color': 'white', 'border': 'none',
+                 'border-radius': '4px', 'cursor': 'pointer',
+                 'font-weight': 'bold', 'margin-right': '8px'}
+    _BTN_HIDE = {'display': 'none'}
+
+    if not req_id:
+        raise PreventUpdate
+    with _ISIN_LOCK:
+        s = dict(_ISIN_STATE)
+    if s.get('req_id') != req_id:
+        raise PreventUpdate
+
+    progress = s.get('progress', '')
+    n_done   = s.get('n_done', 0)
+    n_total  = s.get('n_total', 1)
+    pct      = int(n_done / max(n_total, 1) * 100)
+    txt      = f'{progress} ({pct}%)' if n_total > 0 else progress
+
+    if not s.get('done'):
+        return txt, False, _BTN_HIDE, '', _NU, _NU, _NU
+
+    # Done
+    load_msg = _NU
+    new_stock = _NU
+    new_opts  = _NU
+    new_clicks = _NU
+
+    tickers = s.get('tickers', [])
+    if tickers:
+        with _DL_LOCK:
+            cr = _DL_BUFFER.get('close_returns')
+        if cr is not None:
+            new_stock  = cr.to_json(date_format='iso', orient='split')
+            new_opts   = [{'label': c, 'value': c} for c in cr.columns]
+            new_clicks = (cur_clicks or 0) + 1
+        n_excl   = len(s.get('excluded', []))
+        load_msg = (f'⏳ Download dati in corso per {len(tickers)} ticker…'
+                    if cr is None else
+                    f'✓ Dati caricati — {len(tickers)} titoli'
+                    + (f', {n_excl} esclusi' if n_excl else ''))
+    else:
+        load_msg = s.get('progress', '')
+
+    return txt, True, _BTN_SHOW, load_msg, new_stock, new_opts, new_clicks
+
+
+@app.callback(
+    Output('isin-download-data', 'data'),
+    Input('isin-dl-btn', 'n_clicks'),
+    State('isin-req-id', 'data'),
+    prevent_initial_call=True,
+)
+def _download_isin_excel(n, req_id):
+    if not n or not req_id:
+        raise PreventUpdate
+    with _ISIN_LOCK:
+        s = dict(_ISIN_STATE)
+    if s.get('req_id') != req_id or not s.get('result_bytes'):
+        raise PreventUpdate
+    return dcc.send_bytes(s['result_bytes'], 'portafoglio_convertito.xlsx')
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 server = app.server   # esposto per gunicorn
