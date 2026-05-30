@@ -2956,6 +2956,9 @@ def start_refresh(n_clicks, start_date_picker):
     Output('file-selector',           'value',    allow_duplicate=True),
     Output('update-portfolio-button', 'n_clicks', allow_duplicate=True),
     Output('inline-add-status',       'children', allow_duplicate=True),
+    Output('weights-store-P1',        'data',     allow_duplicate=True),
+    Output('weights-store-P2',        'data',     allow_duplicate=True),
+    Output('weights-store-P3',        'data',     allow_duplicate=True),
     Input('refresh-poll-interval', 'n_intervals'),
     State('update-portfolio-button',  'n_clicks'),
     prevent_initial_call=True,
@@ -2981,12 +2984,13 @@ def poll_refresh_progress(n, n_btn):
     if status == 'idle':
         raise PreventUpdate
 
+    _NU3 = (no_update, no_update, no_update)
     if status == 'running':
         return (no_update, no_update, no_update, no_update, no_update,
                 False, True,
                 modal_fill, f'{current} / {total}  ({pct}%)',
                 'Download in corso…', _STATUS_GREY, no_update, no_update,
-                no_update, no_update, no_update, no_update)
+                no_update, no_update, no_update, no_update, *_NU3)
 
     if status == 'error':
         err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
@@ -2994,7 +2998,7 @@ def poll_refresh_progress(n, n_btn):
                 True, False,
                 err_fill, '❌ Download fallito',
                 'Si è verificato un errore.', _STATUS_RED, no_update, _EDITOR_HIDDEN,
-                no_update, no_update, no_update, '❌ Errore download')
+                no_update, no_update, no_update, '❌ Errore download', *_NU3)
 
     close_returns   = buffer.get('close_returns')
     original_prices = buffer.get('original_prices')
@@ -3004,7 +3008,7 @@ def poll_refresh_progress(n, n_btn):
                 True, False,
                 err_fill, '❌ Nessun dato ricevuto',
                 'Il download è terminato senza dati.', _STATUS_RED, no_update, _EDITOR_HIDDEN,
-                no_update, no_update, no_update, '❌ Nessun dato')
+                no_update, no_update, no_update, '❌ Nessun dato', *_NU3)
 
     options      = [{'label': col, 'value': col} for col in close_returns.columns]
     ticker_map   = buffer.get('ticker_map', {})
@@ -3029,6 +3033,8 @@ def poll_refresh_progress(n, n_btn):
         _MODAL_HIDDEN, _EDITOR_HIDDEN,
         no_update, no_update,
         (n_btn or 0) + 1, f'✓ {n_ok} asset caricati',
+        {}, {}, {},   # azzera weights-store P1/P2/P3 → generate_asset_and_weight_inputs
+                      # rilegge i pesi freschi da current.json
     )
 
 
