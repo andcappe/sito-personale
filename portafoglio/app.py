@@ -751,10 +751,22 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
         bt = tickers[i:i + DOWNLOAD_BATCH_SIZE]
         bd = descrizione[i:i + DOWNLOAD_BATCH_SIZE]
         bv = valuta[i:i + DOWNLOAD_BATCH_SIZE]
-        try:
-            raw = yf.download(bt, start=start_date, group_by='ticker', **_dl_kwargs)
-            if raw.empty:
-                raise ValueError("risposta vuota")
+        raw_res = [None]
+        def _dl_batch(syms=bt):
+            try:
+                raw_res[0] = yf.download(syms, start=start_date,
+                                         group_by='ticker', **_dl_kwargs)
+            except Exception:
+                pass
+        _bt = threading.Thread(target=_dl_batch, daemon=True)
+        _bt.start()
+        _bt.join(timeout=60)  # max 60s per batch — se si blocca salta
+        if _bt.is_alive() or raw_res[0] is None or raw_res[0].empty:
+            with _CL_LOCK:
+                _CL_STATES[username]['errors'].append(
+                    f"Batch {i//DOWNLOAD_BATCH_SIZE+1} ({','.join(bt)}): timeout o risposta vuota")
+        else:
+            raw = raw_res[0]
             for j, t in enumerate(bt):
                 desc, curr = bd[j], bv[j]
                 try:
@@ -769,9 +781,6 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
                 except Exception as e2:
                     with _CL_LOCK:
                         _CL_STATES[username]['errors'].append(f"{t}: {e2}")
-        except Exception as e:
-            with _CL_LOCK:
-                _CL_STATES[username]['errors'].append(f"Batch {i}: {e}")
         with _CL_LOCK:
             _CL_STATES[username]['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
         time.sleep(0.3)
@@ -1168,9 +1177,19 @@ def _run_isin_conversion(file_bytes, username, req_id):
 
     ticker_col, weight_col, w_vals = _detect_ticker_and_weight_cols(df)
 
+    # Rileva colonna descrizione e valuta per il modo TICKER
+    col_names = df.columns.tolist()
+    desc_col  = col_names[1] if len(col_names) > 1 else None
+    curr_col  = col_names[2] if len(col_names) > 2 else None
+
     rows = df[ticker_col].dropna().astype(str).str.strip().tolist()
     rows = [r for r in rows if r and r.lower() not in ('nan', '')]
-    _upd(n_total=len(rows), n_done=0)
+
+    # Rileva modalità: ISIN o TICKER
+    n_isins   = sum(1 for r in rows if _is_isin(r.strip().upper()))
+    mode_isin = n_isins > 0   # True = file con ISIN, False = file con ticker
+    _upd(n_total=len(rows), n_done=0,
+         progress=f'Modalità: {"conversione ISIN" if mode_isin else "validazione ticker"} — {len(rows)} righe')
 
     converted, excluded = [], []
 
@@ -1181,19 +1200,24 @@ def _run_isin_conversion(file_bytes, username, req_id):
         val_up = raw_val.strip().upper()
 
         if _is_isin(val_up):
+            # ── Modalità ISIN: cerca ticker su Yahoo ─────────────────────────
             candidates = _yahoo_search_isin(val_up, ua)
-            time.sleep(0.4)  # evita rate-limit Yahoo
+            time.sleep(0.4)
             if not candidates:
                 excluded.append((raw_val, 'ISIN non trovato su Yahoo Finance'))
                 continue
-            # Prendi il primo risultato — yf.Search li ordina già per rilevanza
-            # Il download prezzi avviene dopo via _do_gestisci_download
             ticker, name, currency = candidates[0]
         else:
-            # Già un ticker — usalo così com'è
-            ticker   = val_up
-            name     = raw_val
-            currency = 'EUR'
+            # ── Modalità TICKER: leggi da file ───────────────────────────────
+            ticker = val_up
+            try:
+                row_df = df[df[ticker_col].astype(str).str.strip().str.upper() == val_up]
+                name   = str(row_df[desc_col].iloc[0]).strip() if desc_col and not row_df.empty else ticker
+                currency = str(row_df[curr_col].iloc[0]).strip().upper() if curr_col and not row_df.empty else 'EUR'
+                if currency.lower() in ('nan', ''):
+                    currency = 'EUR'
+            except Exception:
+                name, currency = ticker, 'EUR'
 
         # Peso
         peso = None
@@ -1208,50 +1232,106 @@ def _run_isin_conversion(file_bytes, username, req_id):
 
         converted.append((ticker, name, currency, peso))
 
-    # ── Validazione batch ticker convertiti ──────────────────────────────────
-    if converted:
-        if not _upd(progress=f'Validazione {len(converted)} ticker su Yahoo Finance…'):
-            return
+    # ── Validazione / correzione ticker (solo modalità TICKER) ───────────────
+    # OpenFIGI (Bloomberg) + yf.Search per trovare il simbolo Yahoo corretto
+    # con l'estensione di borsa giusta (.MI, .L, .DE…) basata sulla valuta.
+    if converted and not mode_isin:
+        import requests as _rq
 
-        def _validate_batch(batch_syms):
-            result = [None]
-            def _dl():
+        # Mappa codice exchange OpenFIGI → suffisso Yahoo + valuta tipica
+        _EXCH = {
+            'LN': ('.L',  'GBP'), 'IM': ('.MI', 'EUR'), 'GY': ('.DE', 'EUR'),
+            'FP': ('.PA', 'EUR'), 'NA': ('.AS', 'EUR'), 'BB': ('.BR', 'EUR'),
+            'SM': ('.MC', 'EUR'), 'AV': ('.VI', 'EUR'), 'SS': ('.ST', 'SEK'),
+            'HE': ('.HE', 'EUR'), 'DC': ('.CO', 'DKK'), 'OS': ('.OL', 'NOK'),
+            'SW': ('.SW', 'CHF'), 'US': ('',    'USD'), 'UW': ('',    'USD'),
+            'UN': ('',    'USD'), 'UA': ('',    'USD'),
+        }
+        # Preferenza borsa per valuta
+        _PREF = {
+            'EUR': ['IM','GY','FP','NA','BB','SM','AV','HE'],
+            'GBP': ['LN'],
+            'USD': ['UW','UN','US','UA'],
+            'CHF': ['SW'], 'SEK': ['SS'], 'DKK': ['DC'], 'NOK': ['OS'],
+        }
+
+        def _resolve_ticker(ticker, currency):
+            """Trova il simbolo Yahoo corretto tramite OpenFIGI, fallback yf.Search."""
+            curr_up = (currency or 'EUR').strip().upper()
+
+            # 1. OpenFIGI: cerca per ticker su tutti gli exchange
+            try:
+                r = _rq.post(
+                    'https://api.openfigi.com/v3/mapping',
+                    json=[{'idType': 'TICKER', 'idValue': ticker}],
+                    headers={'Content-Type': 'application/json'},
+                    timeout=8,
+                )
+                entries = r.json()[0].get('data') or []
+                candidates = []
+                for e in entries:
+                    t_raw = e.get('ticker', '').strip()
+                    exch  = e.get('exchCode', '')
+                    if not t_raw or exch not in _EXCH:
+                        continue
+                    suffix, _ = _EXCH[exch]
+                    candidates.append((t_raw + suffix, exch))
+
+                # Scegli la borsa che corrisponde alla valuta del file
+                prefs = _PREF.get(curr_up, [])
+                for pref_exch in prefs:
+                    for sym, exch in candidates:
+                        if exch == pref_exch:
+                            return sym, currency
+                # Fallback: primo candidato OpenFIGI
+                if candidates:
+                    return candidates[0][0], currency
+            except Exception:
+                pass
+
+            # 2. yf.Search come fallback
+            try:
+                s = yf.Search(ticker, max_results=10, news_count=0)
+                quotes = [q for q in (s.quotes or [])
+                          if q.get('quoteType') in
+                          ('EQUITY','ETF','FUND','Mutualfund','Equity','Fund')]
+                # Preferisci il quote con la valuta giusta
+                for q in quotes:
+                    if q.get('currency','').upper() == curr_up:
+                        return q['symbol'], q.get('currency', currency)
+                if quotes:
+                    return quotes[0]['symbol'], quotes[0].get('currency', currency)
+            except Exception:
+                pass
+
+            return ticker, currency  # nessuna correzione trovata
+
+        ok = []
+        n_tot = len(converted)
+        for idx_v, (t, d, v, p) in enumerate(converted):
+            if not _upd(progress=f'Verifica {idx_v+1}/{n_tot}: {t}…'):
+                return
+
+            new_sym, new_curr = _resolve_ticker(t, v)
+            time.sleep(0.25)
+
+            # Validazione rapida del simbolo trovato
+            valid = [False]
+            def _chk(sym=new_sym):
                 try:
-                    r = yf.download(batch_syms, period='5d', group_by='ticker',
-                                    progress=False, **dl_kwargs)
-                    result[0] = r
+                    fi = yf.Ticker(sym).fast_info
+                    valid[0] = bool(getattr(fi, 'currency', None))
                 except Exception:
                     pass
-            t = threading.Thread(target=_dl, daemon=True)
-            t.start()
-            t.join(timeout=25)
-            valid = set()
-            if result[0] is not None and not result[0].empty:
-                r = result[0]
-                for sym in batch_syms:
-                    try:
-                        col = (r[(sym, 'Close')] if isinstance(r.columns, pd.MultiIndex)
-                               else r['Close'])
-                        if col.dropna().shape[0] > 0:
-                            valid.add(sym)
-                    except Exception:
-                        pass
-            return valid
+            th = threading.Thread(target=_chk, daemon=True)
+            th.start()
+            th.join(timeout=6)
 
-        valid_syms = set()
-        syms_to_check = [c[0] for c in converted]
-        for i in range(0, len(syms_to_check), 10):
-            batch = syms_to_check[i:i+10]
-            if not _upd(progress=f'Validazione {min(i+10, len(syms_to_check))}/{len(syms_to_check)} ticker…'):
-                return
-            valid_syms |= _validate_batch(batch)
-            time.sleep(0.3)
+            if valid[0]:
+                ok.append((new_sym, d, new_curr or v, p))
+            else:
+                excluded.append((t, f'Ticker non trovato su Yahoo Finance (provato: {new_sym})'))
 
-        ok, ko = [], []
-        for item in converted:
-            (ok if item[0] in valid_syms else ko).append(item)
-        for t, d, v, p in ko:
-            excluded.append((t, f'Nessun dato recente su Yahoo Finance'))
         converted = ok
 
     if not _upd(progress='Creazione file Excel…', n_done=len(rows)):
@@ -1290,9 +1370,12 @@ def _run_isin_conversion(file_bytes, username, req_id):
             ws.cell(r, ci, val).fill = f
 
     row_n = 2
-    for t, d, v in _DEFAULT_PORTFOLIO_ROWS:
-        _wr(row_n, t, d, v, None)
-        row_n += 1
+    # Modalità ISIN: aggiungi default come riferimento
+    # Modalità TICKER: solo i ticker dell'utente (già validati)
+    if mode_isin:
+        for t, d, v in _DEFAULT_PORTFOLIO_ROWS:
+            _wr(row_n, t, d, v, None)
+            row_n += 1
     for t, d, v, p in converted:
         _wr(row_n, t, d, v, p)
         row_n += 1
@@ -1315,9 +1398,10 @@ def _run_isin_conversion(file_bytes, username, req_id):
     valutas = [c[2] for c in converted]
     pesi    = [c[3] for c in converted]
 
+    modo_txt = 'convertiti da ISIN' if mode_isin else 'validati'
     _upd(
         running=False, done=True,
-        progress=f'✓ {len(converted)} titoli, {len(excluded)} esclusi.',
+        progress=f'✓ {len(converted)} titoli {modo_txt}, {len(excluded)} esclusi.',
         result_bytes=buf.getvalue(),
         tickers=tickers, descr=descrs, valuta=valutas, pesi=pesi,
     )
@@ -3222,42 +3306,44 @@ def download_template(n_clicks):
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = 'Template Ticker'
+    ws.title = 'Portafoglio'
 
-    headers = ['TICKER', 'DESCRIZIONE', 'VALUTA', 'MERCATO']
-    examples = [
-        ['ISAC.L',   'Az. ACWI',   'USD', 'Azionario ACWI'],
-        ['SWDA.MI',  'Az. World',  'EUR', 'Azionario World'],
+    headers   = ['TICKER', 'DESCRIZIONE', 'VALUTA', 'Peso %']
+    col_widths = [14, 32, 10, 10]
+    examples  = [
+        ['ISAC.L',   'Az. ACWI',                    'USD', ''],
+        ['SWDA.MI',  'Az. World',                    'EUR', ''],
+        ['CSSPX.MI', 'Az. USA SP500',                'EUR', ''],
+        ['EIMI.MI',  'Az. Emerging Market',          'EUR', ''],
+        ['NVDA',     'NVIDIA Corporation',           'USD', ''],
     ]
 
-    header_fill = PatternFill('solid', fgColor='1A3A6B')
-    header_font = Font(bold=True, color='FFFFFF', size=11)
-    example_fill = PatternFill('solid', fgColor='EBF3FF')
-    thin = Side(style='thin', color='C0D0E8')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    col_widths = [14, 30, 10, 25]
+    hdr_fill  = PatternFill('solid', fgColor='1A3A5C')
+    hdr_font  = Font(bold=True, color='FFFFFF', size=10)
+    hdr_aln   = Alignment(horizontal='center', vertical='center')
+    alt_fill  = PatternFill('solid', fgColor='EEF4FF')
+    whi_fill  = PatternFill('solid', fgColor='FFFFFF')
+    thin      = Side(style='thin', color='C0D0E8')
+    border    = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    for col_idx, (h, w) in enumerate(zip(headers, col_widths), start=1):
-        cell = ws.cell(row=1, column=col_idx, value=h)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-        cell.border = border
-        ws.column_dimensions[cell.column_letter].width = w
+    for ci, (h, w) in enumerate(zip(headers, col_widths), 1):
+        c = ws.cell(row=1, column=ci, value=h)
+        c.font, c.fill, c.alignment, c.border = hdr_font, hdr_fill, hdr_aln, border
+        ws.column_dimensions[c.column_letter].width = w
+    ws.row_dimensions[1].height = 18
 
-    for row_idx, row_data in enumerate(examples, start=2):
-        for col_idx, val in enumerate(row_data, start=1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            cell.fill = example_fill
-            cell.alignment = Alignment(horizontal='left', vertical='center')
-            cell.border = border
-
-    ws.row_dimensions[1].height = 20
+    for ri, row_data in enumerate(examples, 2):
+        fill = alt_fill if ri % 2 == 0 else whi_fill
+        for ci, val in enumerate(row_data, 1):
+            c = ws.cell(row=ri, column=ci, value=val)
+            c.fill, c.border = fill, border
+            c.alignment = Alignment(horizontal='left', vertical='center')
+        ws.row_dimensions[ri].height = 16
 
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
-    return dcc.send_bytes(out.read(), 'template_ticker.xlsx')
+    return dcc.send_bytes(out.read(), 'template_portafoglio.xlsx')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
