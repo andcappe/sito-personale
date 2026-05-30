@@ -1046,45 +1046,78 @@ def _detect_ticker_and_weight_cols(df):
     return ticker_col, weight_col, w_vals
 
 
+_OPENFIGI_EXCH = {
+    'LN': '.L',   'IM': '.MI',  'GY': '.DE',  'FP': '.PA',
+    'NA': '.AS',  'BB': '.BR',  'SM': '.MC',  'VX': '.SW',
+    'SW': '.SW',  'AV': '.VI',  'SS': '.ST',  'HE': '.HE',
+    'DC': '.CO',  'OS': '.OL',  'LI': '.LI',
+}
+
+
 def _yahoo_search_isin(isin, ua):
-    """Cerca ISIN su Yahoo Finance, ritorna [(symbol, name, currency), ...]."""
-    import requests as _rq
+    """Cerca ISIN: yf.Search con retry, poi OpenFIGI come fallback."""
+    results = []
+
+    # 1. yf.Search con retry su rate-limit
+    for attempt in range(3):
+        try:
+            s = yf.Search(isin, max_results=10, news_count=0)
+            for q in (s.quotes or []):
+                if q.get('quoteType') not in ('EQUITY', 'ETF', 'FUND', 'MUTUALFUND',
+                                              'Equity', 'ETF', 'Fund', 'Mutualfund'):
+                    continue
+                sym  = q.get('symbol', '').strip()
+                name = q.get('shortname') or q.get('longname') or sym
+                curr = q.get('currency', 'EUR')
+                if sym:
+                    results.append((sym, name, curr))
+            break  # successo, esci dal retry
+        except Exception:
+            if attempt < 2:
+                time.sleep(1.0)
+
+    if results:
+        return results
+
+    # 2. OpenFIGI come fallback (Bloomberg ISIN→ticker, gratuito)
     try:
-        r = _rq.get(
-            'https://query1.finance.yahoo.com/v1/finance/search',
-            params={'q': isin, 'quotesCount': 10, 'newsCount': 0, 'listsCount': 0},
-            headers={'User-Agent': ua, 'Accept': 'application/json'},
-            timeout=8,
+        import requests as _rq
+        r = _rq.post(
+            'https://api.openfigi.com/v3/mapping',
+            json=[{'idType': 'ID_ISIN', 'idValue': isin}],
+            headers={'Content-Type': 'application/json'},
+            timeout=10,
         )
-        quotes = r.json().get('quotes', [])
-        return [
-            (q['symbol'], q.get('shortname') or q.get('longname') or q['symbol'],
-             q.get('currency', 'EUR'))
-            for q in quotes
-            if q.get('typeDisp') in ('Equity', 'ETF', 'Fund', 'Mutualfund')
-            and q.get('symbol')
-        ]
+        for entry in (r.json()[0].get('data') or []):
+            ticker_base = entry.get('ticker', '').strip()
+            exch        = entry.get('exchCode', '')
+            suffix      = _OPENFIGI_EXCH.get(exch, '')
+            sym         = ticker_base + suffix if ticker_base else ''
+            name        = entry.get('name', sym)
+            if sym:
+                results.append((sym, name, 'EUR'))
     except Exception:
-        return []
+        pass
+
+    return results
 
 
 def _best_ticker_from_candidates(candidates, start_date, dl_kwargs):
-    """Tra i candidati scarica in batch e sceglie quello con più dati storici."""
+    """Tra i candidati sceglie quello con più dati storici.
+    Con 1 solo candidato lo accetta direttamente (yf.Search già restituisce il migliore).
+    Con più candidati fa un batch download per confrontare."""
     if not candidates:
         return None
+    # Candidato unico: fidarsi di yf.Search senza download aggiuntivo
     if len(candidates) == 1:
-        sym = candidates[0][0]
-        try:
-            raw = yf.download(sym, start=start_date, progress=False, **dl_kwargs)
-            return candidates[0] if not raw.empty else None
-        except Exception:
-            return None
+        return candidates[0]
+    # Più candidati: confronta con batch download
     symbols = [c[0] for c in candidates[:6]]
     try:
         raw = yf.download(symbols, start=start_date, group_by='ticker',
                           progress=False, **dl_kwargs)
         if raw.empty:
-            return None
+            return candidates[0]
         best_sym, best_n = None, 0
         for sym in symbols:
             try:
@@ -1144,6 +1177,7 @@ def _run_isin_conversion(file_bytes, username, req_id):
 
         if _is_isin(val_up):
             candidates = _yahoo_search_isin(val_up, ua)
+            time.sleep(0.4)  # evita rate-limit Yahoo
             if not candidates:
                 excluded.append((raw_val, 'ISIN non trovato su Yahoo Finance'))
                 continue
@@ -1153,16 +1187,10 @@ def _run_isin_conversion(file_bytes, username, req_id):
                 continue
             ticker, name, currency = best
         else:
-            # Già un ticker — leggi info veloci da Yahoo
+            # Già un ticker — usalo così com'è
             ticker   = val_up
             name     = raw_val
             currency = 'EUR'
-            try:
-                fi = yf.Ticker(ticker).fast_info
-                currency = getattr(fi, 'currency', 'EUR') or 'EUR'
-                name     = getattr(fi, 'name',     raw_val) or raw_val
-            except Exception:
-                pass
 
         # Peso
         peso = None
@@ -1247,8 +1275,24 @@ def _run_isin_conversion(file_bytes, username, req_id):
 
     if tickers:
         def _download_and_set_weights():
+            # Assicura che _DL_BUFFER sia popolato prima del merge
+            with _DL_LOCK:
+                buf_op = _DL_BUFFER.get('original_prices')
+            if buf_op is None and _MARKET_DATA_FILE.exists():
+                try:
+                    with open(_MARKET_DATA_FILE, 'rb') as _f:
+                        _d = pickle.load(_f)
+                    with _DL_LOCK:
+                        if not _DL_BUFFER.get('original_prices'):
+                            _DL_BUFFER.update(_d)
+                    buf_op = _d.get('original_prices')
+                except Exception:
+                    pass
+            # all_descr = asset esistenti + nuovi da ISIN (non filtrare via il portafoglio)
+            existing_descr = list(buf_op.columns) if buf_op is not None else []
+            all_descr = existing_descr + [d for d in descrs if d not in existing_descr]
             _do_gestisci_download(tickers, descrs, valutas, start_date,
-                                  username, 'ETF.xlsx', descrs)
+                                  username, 'ETF.xlsx', all_descr)
             if any(p is not None for p in pesi):
                 w_map = {descrs[i]: pesi[i] for i in range(len(descrs))
                          if pesi[i] is not None}
@@ -4570,6 +4614,13 @@ def _toggle_isin_modal(open_n, close_n, style):
     tid = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else ''
     return {**_BASE, 'display': 'flex'} if tid == 'isin-open-btn' else {**_BASE, 'display': 'none'}
 
+
+app.clientside_callback(
+    "function(ts){ return ts ? null : window.dash_clientside.no_update; }",
+    Output('isin-upload', 'contents', allow_duplicate=True),
+    Input('isin-req-id',  'data'),
+    prevent_initial_call=True,
+)
 
 @app.callback(
     Output('isin-req-id',       'data'),
