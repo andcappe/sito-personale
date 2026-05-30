@@ -706,7 +706,7 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
         _DL_STATE['current'] = total
 
 
-def _do_download_client(tickers, descrizione, valuta, start_date, username='anon'):
+def _do_download_client(tickers, descrizione, valuta, start_date, username='anon', pesi_p1=None):
     """Download per file cliente: dati isolati in _CL_BUFFERS[username]."""
     total = len(tickers)
     with _CL_LOCK:
@@ -800,9 +800,14 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
             'close_returns':   close_returns,
             'valuta_map':      valuta_map,
         })
-        _CL_STATES[username]['status']  = 'done'
         _CL_STATES[username]['current'] = total
+    # Scrivi JSON e pesi P1 PRIMA di segnalare 'done' al poll
     _write_user_json(close_returns, original_prices, ticker_map, valuta_map, username=username, reset_state=True)
+    if pesi_p1:
+        _update_user_json(weights={'P1': pesi_p1, 'P2': {}, 'P3': {}}, username=username)
+        print(f"✓ Pesi P1 impostati: {len(pesi_p1)} asset")
+    with _CL_LOCK:
+        _CL_STATES[username]['status'] = 'done'
     print(f"✓ Download cliente [{username}]: {len(all_prices)} asset isolati")
 
 
@@ -1181,11 +1186,9 @@ def _run_isin_conversion(file_bytes, username, req_id):
             if not candidates:
                 excluded.append((raw_val, 'ISIN non trovato su Yahoo Finance'))
                 continue
-            best = _best_ticker_from_candidates(candidates, start_date, dl_kwargs)
-            if best is None:
-                excluded.append((raw_val, 'Nessun dato storico disponibile'))
-                continue
-            ticker, name, currency = best
+            # Prendi il primo risultato — yf.Search li ordina già per rilevanza
+            # Il download prezzi avviene dopo via _do_gestisci_download
+            ticker, name, currency = candidates[0]
         else:
             # Già un ticker — usalo così com'è
             ticker   = val_up
@@ -1204,6 +1207,52 @@ def _run_isin_conversion(file_bytes, username, req_id):
                 pass
 
         converted.append((ticker, name, currency, peso))
+
+    # ── Validazione batch ticker convertiti ──────────────────────────────────
+    if converted:
+        if not _upd(progress=f'Validazione {len(converted)} ticker su Yahoo Finance…'):
+            return
+
+        def _validate_batch(batch_syms):
+            result = [None]
+            def _dl():
+                try:
+                    r = yf.download(batch_syms, period='5d', group_by='ticker',
+                                    progress=False, **dl_kwargs)
+                    result[0] = r
+                except Exception:
+                    pass
+            t = threading.Thread(target=_dl, daemon=True)
+            t.start()
+            t.join(timeout=25)
+            valid = set()
+            if result[0] is not None and not result[0].empty:
+                r = result[0]
+                for sym in batch_syms:
+                    try:
+                        col = (r[(sym, 'Close')] if isinstance(r.columns, pd.MultiIndex)
+                               else r['Close'])
+                        if col.dropna().shape[0] > 0:
+                            valid.add(sym)
+                    except Exception:
+                        pass
+            return valid
+
+        valid_syms = set()
+        syms_to_check = [c[0] for c in converted]
+        for i in range(0, len(syms_to_check), 10):
+            batch = syms_to_check[i:i+10]
+            if not _upd(progress=f'Validazione {min(i+10, len(syms_to_check))}/{len(syms_to_check)} ticker…'):
+                return
+            valid_syms |= _validate_batch(batch)
+            time.sleep(0.3)
+
+        ok, ko = [], []
+        for item in converted:
+            (ok if item[0] in valid_syms else ko).append(item)
+        for t, d, v, p in ko:
+            excluded.append((t, f'Nessun dato recente su Yahoo Finance'))
+        converted = ok
 
     if not _upd(progress='Creazione file Excel…', n_done=len(rows)):
         return
@@ -2395,13 +2444,29 @@ def update_output(nav_reload, contents, filename):
                 options     = [{'label': d, 'value': d} for d in descrizione]
                 custom      = {'tickers': tickers, 'descr': descrizione, 'valuta': valuta}
 
+                # Leggi colonna pesi se presente (col 3 o colonna con header peso/weight/%)
+                pesi_map = {}
+                _, peso_col, peso_vals = _detect_ticker_and_weight_cols(df)
+                if peso_col is not None and peso_vals is not None:
+                    for i, desc in enumerate(descrizione):
+                        try:
+                            row_mask = df[col_names[0]].astype(str).str.strip() == str(tickers[i]).strip()
+                            idx_match = df[row_mask].index
+                            if not idx_match.empty and idx_match[0] in peso_vals.index:
+                                v = float(peso_vals.loc[idx_match[0]])
+                                if v > 0:
+                                    pesi_map[desc] = v
+                        except Exception:
+                            pass
+
                 start_date = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
                 _username  = _get_username()
-                print(f"▶ Upload file ticker [{_username}]: {len(tickers)} asset da scaricare da {start_date}")
+                print(f"▶ Upload file ticker [{_username}]: {len(tickers)} asset da scaricare da {start_date}"
+                      + (f', pesi P1 trovati: {len(pesi_map)}' if pesi_map else ''))
                 threading.Thread(
                     target=_do_download_client,
                     args=(tickers, descrizione, valuta, start_date),
-                    kwargs={'username': _username},
+                    kwargs={'username': _username, 'pesi_p1': pesi_map},
                     daemon=True,
                 ).start()
 
@@ -2871,7 +2936,6 @@ def poll_refresh_progress(n, n_btn):
     status_msg = (f'Dati pronti — {n_ok} asset scaricati{err_note}.\n'
                   + ('\n'.join(errors[:5]) if errors else ''))
 
-    _write_user_json(close_returns, original_prices, ticker_map, buffer.get('valuta_map', {}))
     return (
         returns_json, prices_json, options, ticker_map,
         f"Aggiornati: {saved_at}",
