@@ -2331,7 +2331,11 @@ app.layout = html.Div([
                                 'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
     ]),
     html.Div(id='tab1-content'),
-    html.Div(id='tab-sa-content'),
+    # SA layout sempre presente nel DOM (nascosto finché non si clicca il tab)
+    # Garantisce che i callback sa_populate_x/y trovino i componenti al caricamento
+    html.Div(id='tab-sa-content',
+             children=get_style_analysis_tab([]),
+             style={'display': 'none'}),
 
 ], style={'marginTop': '106px', 'padding': '0 1%'}),
 ])
@@ -2582,7 +2586,7 @@ app.clientside_callback(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Callback: renderizza contenuto Tab1 / Tab Style Analysis
+# Callback: renderizza contenuto Tab1 + mostra/nasconde tab SA
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
     Output('tab1-content',   'children'),
@@ -2597,18 +2601,6 @@ def render_tab1(active_tab, options_tickers):
     if active_tab == 'tab-sa':
         return no_update, hide, show
     return get_portfolio_analysis_tab(options_tickers), show, hide
-
-
-@app.callback(
-    Output('tab-sa-content', 'children'),
-    Input('main-tabs', 'value'),
-    State('asset-checklist', 'data'),
-    prevent_initial_call=True,
-)
-def render_tab_sa(active_tab, options_tickers):
-    if active_tab != 'tab-sa':
-        raise PreventUpdate
-    return get_style_analysis_tab(options_tickers)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
