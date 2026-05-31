@@ -21,6 +21,8 @@ PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
+from style_analysis import get_style_analysis_tab, register_style_analysis_callbacks
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -2185,6 +2187,7 @@ app.layout = html.Div([
     dcc.Download(id='isin-download-data'),
     dcc.Interval(id='isin-poll', interval=600, n_intervals=0, disabled=True),
     dcc.Store(id='isin-req-id', data=None),
+    dcc.Store(id='style-analysis-store', data=None),
 
     # ── Modale ISIN conversion ────────────────────────────────────────────────
     html.Div(id='isin-modal-overlay',
@@ -2313,8 +2316,22 @@ app.layout = html.Div([
         }),
     ], id='download-overlay', style=_MODAL_HIDDEN),
 
-    # ── Contenuto Tab 1 ───────────────────────────────────────────────────────
+    # ── Tab navigation ────────────────────────────────────────────────────────
+    dcc.Tabs(id='main-tabs', value='tab-portfolio',
+             style={'margin': '0 0 0 0'},
+             colors={'border': '#dee2e6', 'primary': '#1a3a5c', 'background': '#f0f4fa'},
+             children=[
+        dcc.Tab(label='📊 Analisi Portafoglio', value='tab-portfolio',
+                style={'font-size': '12px', 'padding': '8px 18px'},
+                selected_style={'font-size': '12px', 'padding': '8px 18px',
+                                'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
+        dcc.Tab(label='📐 Style Analysis', value='tab-sa',
+                style={'font-size': '12px', 'padding': '8px 18px'},
+                selected_style={'font-size': '12px', 'padding': '8px 18px',
+                                'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
+    ]),
     html.Div(id='tab1-content'),
+    html.Div(id='tab-sa-content'),
 
 ], style={'marginTop': '106px', 'padding': '0 1%'}),
 ])
@@ -2398,48 +2415,24 @@ def update_output(nav_reload, contents, filename):
         _u = _get_username()
         cr, op, tm, saved_at = None, None, {}, ''
 
-        if nav_reload == 1:
-            # F5 → azzera buffer e ricrea JSON da zero dai dati di default
+        # Sempre riparte dal default — nessuna persistenza automatica tra sessioni.
+        # Per recuperare un portafoglio precedente usare le Sessioni salvate.
+        with _DL_LOCK:
+            _DL_BUFFER.clear()
+        if _MARKET_DATA_FILE.exists():
+            try:
+                with open(_MARKET_DATA_FILE, 'rb') as _f:
+                    _d = _pickle.load(_f)
+                cr = _d.get('close_returns'); op = _d.get('original_prices')
+                tm = _d.get('ticker_map', {}); saved_at = _d.get('saved_at', '')
+            except Exception:
+                pass
+        if cr is not None:
             with _DL_LOCK:
-                _DL_BUFFER.clear()
-            if _MARKET_DATA_FILE.exists():
-                try:
-                    with open(_MARKET_DATA_FILE, 'rb') as _f:
-                        _d = _pickle.load(_f)
-                    cr = _d.get('close_returns'); op = _d.get('original_prices')
-                    tm = _d.get('ticker_map', {}); saved_at = _d.get('saved_at', '')
-                except Exception:
-                    pass
-            if cr is not None:
-                with _DL_LOCK:
-                    _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
-                                       'ticker_map': tm, 'saved_at': saved_at})
-                _write_user_json(cr, op, tm, reset_state=True)
-            _active_file_store['is_personale'] = False
-        else:
-            # Navigazione → ricostruisce buffer dal JSON (preserva stato)
-            ns = _read_user_json(_u)
-            if ns:
-                cr, op, tm, vm = _reconstruct_from_json(ns)
-                if cr is not None:
-                    with _DL_LOCK:
-                        _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
-                                           'ticker_map': tm, 'valuta_map': vm, 'saved_at': ''})
-            if cr is None and _MARKET_DATA_FILE.exists():
-                # Nessun JSON → carica da default
-                try:
-                    with open(_MARKET_DATA_FILE, 'rb') as _f:
-                        _d = _pickle.load(_f)
-                    cr = _d.get('close_returns'); op = _d.get('original_prices')
-                    tm = _d.get('ticker_map', {}); saved_at = _d.get('saved_at', '')
-                except Exception:
-                    pass
-                if cr is not None:
-                    with _DL_LOCK:
-                        _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
-                                           'ticker_map': tm, 'saved_at': saved_at})
-                    _write_user_json(cr, op, tm, reset_state=True)
-                _active_file_store['is_personale'] = False
+                _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
+                                   'ticker_map': tm, 'saved_at': saved_at})
+            _write_user_json(cr, op, tm, reset_state=True)
+        _active_file_store['is_personale'] = False
 
         if cr is not None:
             options  = [{'label': col, 'value': col} for col in cr.columns]
@@ -2589,14 +2582,33 @@ app.clientside_callback(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Callback: renderizza contenuto Tab1
+# Callback: renderizza contenuto Tab1 / Tab Style Analysis
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
-    Output('tab1-content', 'children'),
+    Output('tab1-content',   'children'),
+    Output('tab1-content',   'style'),
+    Output('tab-sa-content', 'style'),
+    Input('main-tabs',       'value'),
     Input('asset-checklist', 'data'),
 )
-def render_tab1(options_tickers):
-    return get_portfolio_analysis_tab(options_tickers)
+def render_tab1(active_tab, options_tickers):
+    show = {'display': 'block'}
+    hide = {'display': 'none'}
+    if active_tab == 'tab-sa':
+        return no_update, hide, show
+    return get_portfolio_analysis_tab(options_tickers), show, hide
+
+
+@app.callback(
+    Output('tab-sa-content', 'children'),
+    Input('main-tabs', 'value'),
+    State('asset-checklist', 'data'),
+    prevent_initial_call=True,
+)
+def render_tab_sa(active_tab, options_tickers):
+    if active_tab != 'tab-sa':
+        raise PreventUpdate
+    return get_style_analysis_tab(options_tickers)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4885,6 +4897,8 @@ def _download_isin_excel(n, req_id):
         raise PreventUpdate
     return dcc.send_bytes(s['result_bytes'], 'portafoglio_convertito.xlsx')
 
+
+register_style_analysis_callbacks(app)
 
 # ─────────────────────────────────────────────────────────────────────────────
 server = app.server   # esposto per gunicorn
