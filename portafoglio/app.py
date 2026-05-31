@@ -2419,18 +2419,24 @@ def update_output(nav_reload, contents, filename):
         _u = _get_username()
         cr, op, tm, saved_at = None, None, {}, ''
 
-        # Sempre riparte dal default — nessuna persistenza automatica tra sessioni.
-        # Per recuperare un portafoglio precedente usare le Sessioni salvate.
-        with _DL_LOCK:
-            _DL_BUFFER.clear()
+        # Carica dati di default — nessuna persistenza pesi tra sessioni.
+        # 1. Prova pkl (fonte principale)
         if _MARKET_DATA_FILE.exists():
             try:
                 with open(_MARKET_DATA_FILE, 'rb') as _f:
                     _d = _pickle.load(_f)
                 cr = _d.get('close_returns'); op = _d.get('original_prices')
                 tm = _d.get('ticker_map', {}); saved_at = _d.get('saved_at', '')
-            except Exception:
-                pass
+            except Exception as _e:
+                print(f"⚠ PKL load error nav-reload: {_e}")
+        # 2. Fallback: _DL_BUFFER già popolato da _startup_load
+        if cr is None:
+            with _DL_LOCK:
+                cr = _DL_BUFFER.get('close_returns')
+                op = _DL_BUFFER.get('original_prices')
+                tm = _DL_BUFFER.get('ticker_map', {})
+                saved_at = _DL_BUFFER.get('saved_at', '')
+        # Aggiorna buffer e resetta pesi (no persistenza portafoglio)
         if cr is not None:
             with _DL_LOCK:
                 _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
