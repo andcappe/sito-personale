@@ -21,6 +21,8 @@ PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
+import sessions_manager as _sm
+
 from style_analysis import get_style_analysis_tab, register_style_analysis_callbacks
 
 import numpy as np
@@ -817,6 +819,15 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
     if pesi_p1:
         _update_user_json(weights={'P1': pesi_p1, 'P2': {}, 'P3': {}}, username=username)
         print(f"✓ Pesi P1 impostati: {len(pesi_p1)} asset")
+    # Auto-save nella sessione di lavoro condivisa
+    _sm.save_working(username, {
+        'close_returns':   close_returns,
+        'original_prices': original_prices,
+        'ticker_map':      ticker_map,
+        'valuta_map':      valuta_map,
+        'saved_at':        saved_at,
+        '_source':         'user_file',
+    })
     with _CL_LOCK:
         _CL_STATES[username]['status'] = 'done'
     print(f"✓ Download cliente [{username}]: {len(all_prices)} asset isolati")
@@ -2188,6 +2199,11 @@ app.layout = html.Div([
     dcc.Interval(id='isin-poll', interval=600, n_intervals=0, disabled=True),
     dcc.Store(id='isin-req-id', data=None),
     dcc.Store(id='style-analysis-store', data=None),
+    dcc.Store(id='pending-upload-store', data=None),
+    dcc.ConfirmDialog(
+        id='overwrite-confirm',
+        message='Hai una sessione non salvata. Caricare il nuovo file la sovrascriverà.\nContinuare?',
+    ),
 
     # ── Modale ISIN conversion ────────────────────────────────────────────────
     html.Div(id='isin-modal-overlay',
@@ -2379,6 +2395,40 @@ app.clientside_callback(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Callback: intercetta upload → warning se sessione non salvata
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('pending-upload-store', 'data'),
+    Output('overwrite-confirm',    'displayed'),
+    Output('upload-data',          'contents', allow_duplicate=True),
+    Input('upload-data',           'contents'),
+    State('upload-data',           'filename'),
+    prevent_initial_call=True,
+)
+def _stage_upload(contents, filename):
+    if not contents:
+        raise PreventUpdate
+    _u = _get_username()
+    payload = {'contents': contents, 'filename': filename or ''}
+    if _sm.has_unsaved_changes(_u):
+        # Mostra warning — resetta contents per permettere re-upload stesso file
+        return payload, True, None
+    # Nessuna sessione a rischio — procedi direttamente (contents rimane)
+    return payload, False, no_update
+
+
+@app.callback(
+    Output('pending-upload-store', 'data', allow_duplicate=True),
+    Input('overwrite-confirm',     'cancel_n_clicks'),
+    prevent_initial_call=True,
+)
+def _cancel_upload(n):
+    if not n:
+        raise PreventUpdate
+    return None   # annulla il pending
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Callback: inizializzazione + upload
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
@@ -2399,15 +2449,26 @@ app.clientside_callback(
     Output('modal-status-text',       'children',    allow_duplicate=True),
     Output('modal-status-text',       'style',       allow_duplicate=True),
     Output('upload-done-ts',          'data',        allow_duplicate=True),
-    Input('nav-reload',  'data'),
-    Input('upload-data', 'contents'),
-    State('upload-data', 'filename'),
+    Input('nav-reload',              'data'),
+    Input('pending-upload-store',    'data'),     # sostituisce upload-data diretta
+    Input('overwrite-confirm',       'submit_n_clicks'),
+    State('upload-data',             'filename'),
     prevent_initial_call=True,
 )
-def update_output(nav_reload, contents, filename):
+def update_output(nav_reload, pending_upload, _confirm_n, filename):
     import time as _time
     ctx = callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ''
+
+    # Risolvi contents e filename da pending-upload-store
+    contents = None
+    if triggered_id in ('pending-upload-store', 'overwrite-confirm') and pending_upload:
+        contents = pending_upload.get('contents')
+        filename = pending_upload.get('filename', filename)
+        # Se triggered da confirm ma pending è None → l'utente ha annullato
+        if triggered_id == 'overwrite-confirm' and not contents:
+            raise PreventUpdate
+        triggered_id = 'upload-data'   # trattalo come upload normale
 
     _noup = (no_update,) * 8
 
@@ -2419,29 +2480,25 @@ def update_output(nav_reload, contents, filename):
         _u = _get_username()
         cr, op, tm, saved_at = None, None, {}, ''
 
-        # Carica dati di default — nessuna persistenza pesi tra sessioni.
-        # 1. Prova pkl (fonte principale)
-        if _MARKET_DATA_FILE.exists():
-            try:
-                with open(_MARKET_DATA_FILE, 'rb') as _f:
-                    _d = _pickle.load(_f)
-                cr = _d.get('close_returns'); op = _d.get('original_prices')
-                tm = _d.get('ticker_map', {}); saved_at = _d.get('saved_at', '')
-            except Exception as _e:
-                print(f"⚠ PKL load error nav-reload: {_e}")
-        # 2. Fallback: _DL_BUFFER già popolato da _startup_load
+        # Carica sessione tramite sessions_manager (no persistenza pesi)
+        _data, _source = _sm.load_for_user(_u)
+        if _data is not None:
+            cr       = _data.get('close_returns')
+            op       = _data.get('original_prices')
+            tm       = _data.get('ticker_map', {})
+            saved_at = _data.get('saved_at', '')
+        # Fallback: _DL_BUFFER già caricato da _startup_load
         if cr is None:
             with _DL_LOCK:
-                cr = _DL_BUFFER.get('close_returns')
-                op = _DL_BUFFER.get('original_prices')
-                tm = _DL_BUFFER.get('ticker_map', {})
+                cr       = _DL_BUFFER.get('close_returns')
+                op       = _DL_BUFFER.get('original_prices')
+                tm       = _DL_BUFFER.get('ticker_map', {})
                 saved_at = _DL_BUFFER.get('saved_at', '')
-        # Aggiorna buffer e resetta pesi (no persistenza portafoglio)
         if cr is not None:
             with _DL_LOCK:
                 _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
                                    'ticker_map': tm, 'saved_at': saved_at})
-            _write_user_json(cr, op, tm, reset_state=True)
+            _write_user_json(cr, op, tm, reset_state=True)  # pesi sempre a 0
         _active_file_store['is_personale'] = False
 
         if cr is not None:
