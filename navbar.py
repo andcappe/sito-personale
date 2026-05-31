@@ -18,7 +18,6 @@ _TABS = [
     ("Portafoglio",          "/portafoglio/"),
     ("Frontiera Efficiente", "/frontiera/"),
     ("Rendimenti Storici",   "/rendimenti/"),
-    ("Style Analysis",       "/style-analysis/"),
     ("Strategie Opzioni",    "/opzioni/"),
     ("Macro Economia",       "/macro/"),
 ]

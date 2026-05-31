@@ -44,12 +44,11 @@ def _safe_load(module_name, folder):
         _tb.print_exc()
         return None
 
-portafoglio_srv  = _safe_load("_app_portafoglio",  "portafoglio")
-macro_srv        = _safe_load("_app_macro",        "macro")
-frontiera_srv    = _safe_load("_app_frontiera",    "frontiera-efficiente")
-rendimenti_srv   = _safe_load("_app_rendimenti",   "rendimenti")
-opzioni_srv      = _safe_load("_app_opzioni",      "opzioni")
-styleanalysis_srv = _safe_load("_app_styleanalysis", "style-analysis")
+portafoglio_srv = _safe_load("_app_portafoglio", "portafoglio")
+macro_srv       = _safe_load("_app_macro",       "macro")
+frontiera_srv   = _safe_load("_app_frontiera",   "frontiera-efficiente")
+rendimenti_srv  = _safe_load("_app_rendimenti",  "rendimenti")
+opzioni_srv     = _safe_load("_app_opzioni",     "opzioni")
 
 # ─── Autenticazione ───────────────────────────────────────────────────────────
 from auth import (check_credentials, register_user, register_oauth_user,
@@ -73,7 +72,7 @@ FACEBOOK_APP_SECRET  = os.environ.get('FACEBOOK_APP_SECRET', '')
 ADMIN_EMAIL          = os.environ.get('ADMIN_EMAIL', 'admin@dashboard.local')
 ADMIN_PASSWORD       = os.environ.get('ADMIN_PASSWORD', 'Cambia.Subito.123')
 
-for _srv in (portafoglio_srv, macro_srv, frontiera_srv, rendimenti_srv, opzioni_srv, styleanalysis_srv):
+for _srv in (portafoglio_srv, macro_srv, frontiera_srv, rendimenti_srv, opzioni_srv):
     if _srv:
         _srv.secret_key = SECRET_KEY
 
@@ -91,8 +90,8 @@ _PUBLIC_VERIFY_PREFIX = '/verify-email/'
 # Prefissi che non richiedono autenticazione
 _PUBLIC_PREFIXES = (
     '/_dash', '/assets/', '/_reload',
-    '/portafoglio/_dash', '/frontiera/_dash', '/macro/_dash', '/rendimenti/_dash', '/opzioni/_dash', '/style-analysis/_dash',
-    '/portafoglio/assets', '/frontiera/assets', '/macro/assets', '/rendimenti/assets', '/opzioni/assets', '/style-analysis/assets',
+    '/portafoglio/_dash', '/frontiera/_dash', '/macro/_dash', '/rendimenti/_dash', '/opzioni/_dash',
+    '/portafoglio/assets', '/frontiera/assets', '/macro/assets', '/rendimenti/assets', '/opzioni/assets',
 )
 
 # ─── Template HTML comune ─────────────────────────────────────────────────────
@@ -915,8 +914,6 @@ if rendimenti_srv:
     _register_auth(rendimenti_srv)
 if opzioni_srv:
     _register_auth(opzioni_srv)
-if styleanalysis_srv:
-    _register_auth(styleanalysis_srv)
 
 # ─── Bootstrap admin di default ───────────────────────────────────────────────
 from auth import add_user as _add_user, update_user as _upd_user, list_users as _list_users, get_user as _get_user
@@ -930,12 +927,11 @@ if not _has_admin:
 from werkzeug.exceptions import NotFound
 
 _ROUTES = [
-    *([("/portafoglio",    portafoglio_srv)]   if portafoglio_srv   else []),
-    *([("/macro",          macro_srv)]         if macro_srv         else []),
-    *([("/frontiera",      frontiera_srv)]     if frontiera_srv     else []),
-    *([("/rendimenti",     rendimenti_srv)]    if rendimenti_srv    else []),
-    *([("/opzioni",        opzioni_srv)]       if opzioni_srv       else []),
-    *([("/style-analysis", styleanalysis_srv)] if styleanalysis_srv else []),
+    *([("/portafoglio", portafoglio_srv)] if portafoglio_srv else []),
+    *([("/macro",       macro_srv)]       if macro_srv       else []),
+    *([("/frontiera",   frontiera_srv)]   if frontiera_srv   else []),
+    *([("/rendimenti",  rendimenti_srv)]  if rendimenti_srv  else []),
+    *([("/opzioni",     opzioni_srv)]     if opzioni_srv     else []),
     ("/",  portafoglio_srv or macro_srv or frontiera_srv),  # catch-all
 ]
 
