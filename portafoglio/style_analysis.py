@@ -32,7 +32,13 @@ def _get_df(json_str):
 def _returns_monthly(close_returns: pd.DataFrame) -> pd.DataFrame:
     cr = close_returns.copy()
     cr.index = pd.to_datetime(cr.index)
-    return (1 + cr).resample('ME').prod() - 1
+    if hasattr(cr.index, 'tz') and cr.index.tz is not None:
+        cr.index = cr.index.tz_localize(None)
+    # 'ME' = pandas ≥2.2, 'M' = pandas <2.2
+    try:
+        return (1 + cr).resample('ME').prod() - 1
+    except ValueError:
+        return (1 + cr).resample('M').prod() - 1
 
 
 def _make_stat_table_sa(rows, header_bg='#1a3a5c'):
