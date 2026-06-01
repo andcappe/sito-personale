@@ -2205,6 +2205,12 @@ app.layout = html.Div([
 
         # ── GRUPPO 3 · SCAMBIA ────────────────────────────────────────────────
         html.Span('Scambia', style=_GRP_LABEL),
+        html.Button('🔄 Importa/Esporta Portafoglio', id='port-io-btn', n_clicks=0,
+                    title='Salva i portafogli P1/P2/P3 in un profilo o importane di salvati',
+                    style={'font-size': '11px', 'padding': '5px 12px',
+                           'border-radius': '4px', 'cursor': 'pointer',
+                           'background': '#eafaf1', 'border': '1px solid #1a7a4a',
+                           'color': '#1a7a4a', 'font-weight': 'bold', 'margin-right': '4px'}),
         html.Button('📥 Esporta prezzi', id='save-data-button', n_clicks=0,
                     title='Scarica i prezzi correnti come file Excel (date + prezzi per asset)',
                     style={'font-size': '11px', 'padding': '5px 12px',
@@ -2225,6 +2231,110 @@ app.layout = html.Div([
     ], style={'display': 'flex', 'align-items': 'center',
               'font-size': '10px', 'position': 'relative',
               'padding': '6px 0', 'flex-wrap': 'wrap', 'gap': '2px'}),
+
+    # ── Modal Importa/Esporta Portafoglio ─────────────────────────────────────
+    html.Div(id='pio-overlay',
+             style={'display': 'none', 'position': 'fixed', 'top': '0', 'left': '0',
+                    'width': '100%', 'height': '100%', 'z-index': '9000',
+                    'background': 'rgba(0,0,0,0.45)', 'align-items': 'center',
+                    'justify-content': 'center'},
+             children=[
+        html.Div([
+            html.Div([
+                html.Span('🔄 Importa / Esporta Portafoglio',
+                          style={'font-weight': '700', 'font-size': '14px', 'color': '#1a3a5c'}),
+                html.Button('✕', id='pio-close', n_clicks=0,
+                            style={'background': 'none', 'border': 'none', 'font-size': '18px',
+                                   'cursor': 'pointer', 'color': '#666', 'float': 'right'}),
+            ], style={'display': 'flex', 'justify-content': 'space-between',
+                      'align-items': 'center', 'margin-bottom': '12px'}),
+
+            dcc.RadioItems(id='pio-mode',
+                           options=[{'label': ' 📤 Esporta', 'value': 'export'},
+                                    {'label': ' 📥 Importa', 'value': 'import'}],
+                           value='export', inline=True,
+                           inputStyle={'margin-right': '4px'},
+                           labelStyle={'margin-right': '18px', 'font-size': '12px',
+                                       'font-weight': '600'},
+                           style={'margin-bottom': '14px', 'padding-bottom': '10px',
+                                  'border-bottom': '1px solid #eee'}),
+
+            # ── ESPORTA ───────────────────────────────────────────────────────
+            html.Div(id='pio-export-view', children=[
+                html.Div('Quali portafogli esportare:',
+                         style={'font-size': '11px', 'font-weight': '600',
+                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
+                dcc.Checklist(id='pio-exp-slots',
+                              options=[{'label': f' {s}', 'value': s} for s in ('P1', 'P2', 'P3')],
+                              value=['P1', 'P2', 'P3'], inline=True,
+                              inputStyle={'margin-right': '4px'},
+                              labelStyle={'margin-right': '16px', 'font-size': '11px'},
+                              style={'margin-bottom': '8px'}),
+                html.Div([
+                    html.Span('Nomi:', style={'font-size': '10px', 'color': '#666',
+                                              'margin-right': '6px'}),
+                    dcc.Input(id='pio-exp-name-P1', value='P1', placeholder='nome P1',
+                              style={'width': '90px', 'font-size': '11px', 'margin-right': '4px'}),
+                    dcc.Input(id='pio-exp-name-P2', value='P2', placeholder='nome P2',
+                              style={'width': '90px', 'font-size': '11px', 'margin-right': '4px'}),
+                    dcc.Input(id='pio-exp-name-P3', value='P3', placeholder='nome P3',
+                              style={'width': '90px', 'font-size': '11px'}),
+                ], style={'margin-bottom': '12px'}),
+
+                html.Div('Salva nel profilo:',
+                         style={'font-size': '11px', 'font-weight': '600',
+                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
+                dcc.Dropdown(id='pio-exp-profile', placeholder='Profilo esistente…',
+                             style={'font-size': '11px', 'margin-bottom': '6px'}),
+                dcc.Input(id='pio-exp-new', placeholder='…oppure nuovo profilo',
+                          style={'width': '100%', 'font-size': '11px', 'margin-bottom': '8px',
+                                 'padding': '5px 8px', 'border': '1px solid #aaa',
+                                 'border-radius': '4px'}),
+                dcc.RadioItems(id='pio-exp-mode',
+                               options=[{'label': ' Aggiungi al profilo', 'value': 'merge'},
+                                        {'label': ' Sostituisci profilo', 'value': 'replace'}],
+                               value='merge', inline=True,
+                               inputStyle={'margin-right': '4px'},
+                               labelStyle={'margin-right': '14px', 'font-size': '10px'},
+                               style={'margin-bottom': '12px'}),
+                html.Button('📤 Esporta', id='pio-exp-btn', n_clicks=0,
+                            style={'background': '#1b7a34', 'color': 'white', 'border': 'none',
+                                   'padding': '7px 16px', 'border-radius': '4px',
+                                   'cursor': 'pointer', 'font-size': '12px', 'font-weight': 'bold'}),
+                html.Div(id='pio-exp-status',
+                         style={'font-size': '11px', 'margin-top': '8px', 'min-height': '16px'}),
+            ]),
+
+            # ── IMPORTA ────────────────────────────────────────────────────────
+            html.Div(id='pio-import-view', style={'display': 'none'}, children=[
+                html.Div('Profilo:', style={'font-size': '11px', 'font-weight': '600',
+                                            'color': '#1a3a5c', 'margin-bottom': '6px'}),
+                dcc.Dropdown(id='pio-imp-profile', placeholder='Scegli un profilo…',
+                             style={'font-size': '11px', 'margin-bottom': '10px'}),
+                html.Div('Portafogli da importare:',
+                         style={'font-size': '11px', 'font-weight': '600',
+                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
+                dcc.Checklist(id='pio-imp-list', options=[], value=[],
+                              inputStyle={'margin-right': '6px'},
+                              labelStyle={'display': 'block', 'font-size': '11px',
+                                          'margin-bottom': '3px'},
+                              style={'margin-bottom': '8px', 'max-height': '160px',
+                                     'overflow-y': 'auto'}),
+                html.Div('I selezionati riempiranno P1, P2, P3 nell\'ordine di selezione (max 3).',
+                         style={'font-size': '10px', 'color': '#888', 'font-style': 'italic',
+                                'margin-bottom': '10px'}),
+                html.Button('📥 Importa', id='pio-imp-btn', n_clicks=0,
+                            style={'background': '#1a3a5c', 'color': 'white', 'border': 'none',
+                                   'padding': '7px 16px', 'border-radius': '4px',
+                                   'cursor': 'pointer', 'font-size': '12px', 'font-weight': 'bold'}),
+                html.Div(id='pio-imp-status',
+                         style={'font-size': '11px', 'margin-top': '8px', 'min-height': '16px'}),
+            ]),
+
+        ], style={'background': 'white', 'border-radius': '10px', 'padding': '20px 24px',
+                  'width': '460px', 'box-shadow': '0 4px 24px rgba(0,0,0,0.18)',
+                  'position': 'relative'}),
+    ]),
 
     # ── Modal Gestione Lista ──────────────────────────────────────────────────
     html.Div(id='file-editor-overlay', style=_EDITOR_HIDDEN, children=[
@@ -3514,6 +3624,154 @@ def do_import_frontier(submit, all_ids, all_vals):
         return w1 or no_update, w2 or no_update, w3 or no_update, new_vals, f'✓ Importato: {", ".join(imported)}'
     except Exception as e:
         return no_update, no_update, no_update, all_vals, f'⚠ Errore: {e}'
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# IMPORTA / ESPORTA PORTAFOGLIO — profili condivisi (sessions_manager)
+# ═════════════════════════════════════════════════════════════════════════════
+_PIO_OVERLAY = {'position': 'fixed', 'top': '0', 'left': '0', 'width': '100%',
+                'height': '100%', 'z-index': '9000', 'background': 'rgba(0,0,0,0.45)',
+                'align-items': 'center', 'justify-content': 'center'}
+
+@app.callback(
+    Output('pio-overlay',     'style'),
+    Output('pio-exp-profile', 'options'),
+    Output('pio-imp-profile', 'options'),
+    Input('port-io-btn', 'n_clicks'),
+    Input('pio-close',   'n_clicks'),
+    prevent_initial_call=True,
+)
+def toggle_pio(open_n, close_n):
+    if callback_context.triggered_id == 'port-io-btn':
+        profs = _sm.list_profiles(_get_username())
+        opts = [{'label': p, 'value': p} for p in profs]
+        return {**_PIO_OVERLAY, 'display': 'flex'}, opts, opts
+    return {**_PIO_OVERLAY, 'display': 'none'}, no_update, no_update
+
+
+@app.callback(
+    Output('pio-export-view', 'style'),
+    Output('pio-import-view', 'style'),
+    Input('pio-mode', 'value'),
+)
+def pio_switch_view(mode):
+    if mode == 'import':
+        return {'display': 'none'}, {'display': 'block'}
+    return {'display': 'block'}, {'display': 'none'}
+
+
+@app.callback(
+    Output('pio-exp-status',  'children'),
+    Output('pio-exp-profile', 'options', allow_duplicate=True),
+    Output('pio-imp-profile', 'options', allow_duplicate=True),
+    Output('pio-exp-new',     'value'),
+    Input('pio-exp-btn', 'n_clicks'),
+    State('pio-exp-slots',    'value'),
+    State('pio-exp-name-P1',  'value'),
+    State('pio-exp-name-P2',  'value'),
+    State('pio-exp-name-P3',  'value'),
+    State({'type': 'weight-input', 'index': ALL}, 'id'),
+    State({'type': 'weight-input', 'index': ALL}, 'value'),
+    State('pio-exp-profile', 'value'),
+    State('pio-exp-new',     'value'),
+    State('pio-exp-mode',    'value'),
+    prevent_initial_call=True,
+)
+def pio_export(n, slots, n1, n2, n3, all_ids, all_vals, prof_sel, prof_new, mode):
+    if not n:
+        raise PreventUpdate
+    _u = _get_username()
+    profile = (prof_new or '').strip() or (prof_sel or '').strip()
+    if not profile:
+        return '⚠ Scegli un profilo esistente o scrivi un nuovo nome', no_update, no_update, no_update
+
+    slots = slots or []
+    names = {'P1': (n1 or 'P1').strip(), 'P2': (n2 or 'P2').strip(), 'P3': (n3 or 'P3').strip()}
+    # Leggi i pesi correnti dalla griglia (fonte di verità)
+    cur = {'P1': {}, 'P2': {}, 'P3': {}}
+    for inp_id, val in zip(all_ids or [], all_vals or []):
+        idx = inp_id['index']
+        for s in ('P1', 'P2', 'P3'):
+            if idx.startswith(s + '-') and val:
+                try:
+                    cur[s][idx[3:]] = float(val)
+                except (TypeError, ValueError):
+                    pass
+
+    portfolios = {}
+    for s in ('P1', 'P2', 'P3'):
+        if s in slots and cur[s]:
+            portfolios[names[s]] = cur[s]
+    if not portfolios:
+        return '⚠ Nessun peso da esportare negli slot selezionati', no_update, no_update, no_update
+
+    ok = _sm.export_portfolios(_u, profile, portfolios, mode=mode)
+    opts = [{'label': p, 'value': p} for p in _sm.list_profiles(_u)]
+    if ok:
+        return (f'✅ Esportato in "{profile}": {", ".join(portfolios.keys())}', opts, opts, '')
+    return '⚠ Errore durante l\'esportazione', no_update, no_update, no_update
+
+
+@app.callback(
+    Output('pio-imp-list', 'options'),
+    Output('pio-imp-list', 'value'),
+    Input('pio-imp-profile', 'value'),
+    prevent_initial_call=True,
+)
+def pio_populate_import_list(profile):
+    if not profile:
+        return [], []
+    prof = _sm.get_profile(_get_username(), profile)
+    names = list((prof.get('portfolios') or {}).keys())
+    return [{'label': f' {nm}', 'value': nm} for nm in names], []
+
+
+@app.callback(
+    Output('weights-store-P1', 'data', allow_duplicate=True),
+    Output('weights-store-P2', 'data', allow_duplicate=True),
+    Output('weights-store-P3', 'data', allow_duplicate=True),
+    Output({'type': 'weight-input', 'index': ALL}, 'value', allow_duplicate=True),
+    Output('update-portfolio-button', 'n_clicks', allow_duplicate=True),
+    Output('pio-imp-status', 'children'),
+    Output('pio-overlay', 'style', allow_duplicate=True),
+    Input('pio-imp-btn', 'n_clicks'),
+    State('pio-imp-profile', 'value'),
+    State('pio-imp-list',    'value'),
+    State({'type': 'weight-input', 'index': ALL}, 'id'),
+    State({'type': 'weight-input', 'index': ALL}, 'value'),
+    State('update-portfolio-button', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def pio_import(n, profile, selected, all_ids, all_vals, cur_clicks):
+    if not n:
+        raise PreventUpdate
+    if not profile or not selected:
+        return (no_update, no_update, no_update, no_update, no_update,
+                '⚠ Scegli un profilo e almeno un portafoglio', no_update)
+    ports = (_sm.get_profile(_get_username(), profile).get('portfolios') or {})
+    chosen = list(selected)[:3]
+    slots = ['P1', 'P2', 'P3']
+    slot_w = {'P1': {}, 'P2': {}, 'P3': {}}
+    for i, pname in enumerate(chosen):
+        slot_w[slots[i]] = {a: float(v) for a, v in (ports.get(pname) or {}).items()}
+    w1, w2, w3 = slot_w['P1'], slot_w['P2'], slot_w['P3']
+
+    new_vals = []
+    for inp_id, curv in zip(all_ids or [], all_vals or []):
+        idx = inp_id['index']
+        if idx.startswith('P1-'):
+            new_vals.append(w1.get(idx[3:], 0) if w1 else curv)
+        elif idx.startswith('P2-'):
+            new_vals.append(w2.get(idx[3:], 0) if w2 else curv)
+        elif idx.startswith('P3-'):
+            new_vals.append(w3.get(idx[3:], 0) if w3 else curv)
+        else:
+            new_vals.append(curv)
+
+    _update_user_json(weights={'P1': w1, 'P2': w2, 'P3': w3}, username=_get_username())
+    msg = f'✓ Importati in P1/P2/P3: {", ".join(chosen)}'
+    return (w1 or no_update, w2 or no_update, w3 or no_update, new_vals,
+            (cur_clicks or 0) + 1, msg, {**_PIO_OVERLAY, 'display': 'none'})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

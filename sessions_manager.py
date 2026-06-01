@@ -19,6 +19,7 @@ Flusso:
 """
 
 import os
+import json
 import pickle
 import threading
 from datetime import datetime
@@ -283,3 +284,85 @@ def load_user_as_admin(username: str, filename: str = 'working.pkl'):
     """
     path = user_dir(username) / filename
     return _load_pkl(path)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PROFILI PORTAFOGLIO — archivio condiviso tra tutte le dashboard
+# ═════════════════════════════════════════════════════════════════════════════
+# File: sessions/{username}/portfolios.json
+# Struttura:
+#   { "<nomeProfilo>": {
+#        "saved_at": "2026-06-01T...",
+#        "portfolios": { "<nomePortafoglio>": {"<asset>": peso, ...}, ... }
+#     }, ... }
+# Un "portafoglio" è una mappa asset→peso (in %); un "profilo" ne contiene
+# quanti se ne vogliono. È il formato scambiato dal dialogo Importa/Esporta.
+
+def _profiles_path(username: str) -> Path:
+    return user_dir(username) / 'portfolios.json'
+
+
+def load_profiles(username: str) -> dict:
+    """Tutti i profili dell'utente. {} se non esistono."""
+    path = _profiles_path(username)
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠ [sessions_manager] load_profiles {username}: {e}")
+        return {}
+
+
+def save_profiles(username: str, data: dict) -> bool:
+    path = _profiles_path(username)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix('.tmp')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(path)
+        return True
+    except Exception as e:
+        print(f"⚠ [sessions_manager] save_profiles {username}: {e}")
+        return False
+
+
+def list_profiles(username: str) -> list:
+    """Nomi dei profili salvati, ordinati per ultimo salvataggio."""
+    data = load_profiles(username)
+    return sorted(data.keys(),
+                  key=lambda k: data[k].get('saved_at', ''), reverse=True)
+
+
+def get_profile(username: str, profile_name: str) -> dict:
+    """{'saved_at':..., 'portfolios': {nome: {asset: peso}}} o {}."""
+    return load_profiles(username).get(profile_name, {})
+
+
+def export_portfolios(username: str, profile_name: str,
+                      portfolios: dict, mode: str = 'replace') -> bool:
+    """
+    Esporta dei portafogli in un profilo.
+    portfolios = {nomePortafoglio: {asset: peso}}
+    mode: 'replace' azzera i portafogli del profilo, 'merge' aggiunge/aggiorna.
+    """
+    profile_name = (profile_name or '').strip()
+    if not profile_name or not portfolios:
+        return False
+    data = load_profiles(username)
+    if mode == 'replace' or profile_name not in data:
+        data[profile_name] = {'portfolios': {}}
+    data[profile_name].setdefault('portfolios', {})
+    data[profile_name]['portfolios'].update(portfolios)
+    data[profile_name]['saved_at'] = datetime.now().isoformat()
+    return save_profiles(username, data)
+
+
+def delete_profile(username: str, profile_name: str) -> bool:
+    data = load_profiles(username)
+    if profile_name in data:
+        del data[profile_name]
+        return save_profiles(username, data)
+    return False
