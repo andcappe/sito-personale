@@ -2459,7 +2459,9 @@ _FPIO_OVERLAY = {'position':'fixed','top':'0','left':'0','width':'100%','height'
 )
 def fpio_toggle(open_n, close_n):
     if callback_context.triggered_id == 'fpio-btn':
-        opts = [{'label': p, 'value': p} for p in _sm.list_profiles(_get_username())]
+        profs = _sm.list_profiles(_get_username())
+        print(f"[FPIO-OPEN] user={_get_username()} profili={profs}", flush=True)
+        opts = [{'label': p, 'value': p} for p in profs]
         return {**_FPIO_OVERLAY, 'display': 'flex'}, opts, opts
     return {**_FPIO_OVERLAY, 'display': 'none'}, no_update, no_update
 
@@ -2578,6 +2580,8 @@ def fpio_populate_import(profile):
 def fpio_import(n, profile, selected, ids1, ids2, ids3):
     if not n:
         raise PreventUpdate
+    print(f"[FPIO-IMPORT] FIRED n={n} profile={profile!r} selected={selected!r} "
+          f"grid_assets={len(ids1 or [])}", flush=True)
     ids1, ids2, ids3 = ids1 or [], ids2 or [], ids3 or []
     if not profile or not selected:
         return (no_update, no_update, no_update,

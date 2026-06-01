@@ -2595,14 +2595,16 @@ app.layout = html.Div([
     html.Div(id='tab-sa-content',
              children=get_style_analysis_tab([]),
              style={'display': 'none'}),
-    # Frontiera e Rendimenti incorporate via iframe (app standalone, navbar nascosta)
+    # Frontiera e Rendimenti incorporate via iframe (app standalone, navbar nascosta).
+    # src impostato dinamicamente al click del tab con timestamp anti-cache,
+    # così l'iframe si ricarica fresco e i callback colpiscono il server corrente.
     html.Div(id='tab-frontiera-content', style={'display': 'none'}, children=[
-        html.Iframe(src='/frontiera/?embed=1',
+        html.Iframe(id='iframe-frontiera', src='',
                     style={'width': '100%', 'height': 'calc(100vh - 150px)',
                            'border': 'none'}),
     ]),
     html.Div(id='tab-rendimenti-content', style={'display': 'none'}, children=[
-        html.Iframe(src='/rendimenti/?embed=1',
+        html.Iframe(id='iframe-rendimenti', src='',
                     style={'width': '100%', 'height': 'calc(100vh - 150px)',
                            'border': 'none'}),
     ]),
@@ -2924,6 +2926,22 @@ def render_tab1(active_tab, options_tickers):
     if active_tab == 'tab-rendimenti':
         return no_update, hide, hide, hide, show
     return get_portfolio_analysis_tab(options_tickers), show, hide, hide, hide
+
+
+# Carica/ricarica l'iframe (fresco, anti-cache) quando si apre il relativo tab
+@app.callback(
+    Output('iframe-frontiera',  'src'),
+    Output('iframe-rendimenti', 'src'),
+    Input('main-tabs', 'value'),
+    prevent_initial_call=True,
+)
+def _load_tab_iframe(active_tab):
+    ts = int(time.time() * 1000)
+    if active_tab == 'tab-frontiera':
+        return f'/frontiera/?embed=1&t={ts}', no_update
+    if active_tab == 'tab-rendimenti':
+        return no_update, f'/rendimenti/?embed=1&t={ts}'
+    raise PreventUpdate
 
 
 # ─────────────────────────────────────────────────────────────────────────────
