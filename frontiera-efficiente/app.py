@@ -2583,7 +2583,26 @@ def fpio_import(n, profile, selected, ids1, ids2, ids3):
     chk1 = _checks(ids1, w1) if w1 else [no_update] * len(ids1)
     chk2 = _checks(ids2, w2) if w2 else [no_update] * len(ids2)
     chk3 = _checks(ids3, w3) if w3 else [no_update] * len(ids3)
-    msg  = f'✓ Importati in F1/F2/F3: {", ".join(chosen)}'
+
+    # Diagnostica: quanti asset del profilo coincidono con la griglia di Frontiera
+    grid_assets = {d['index'] for d in ids1}
+    prof_assets = set(w1) | set(w2) | set(w3)
+    matched = len(prof_assets & grid_assets)
+
+    if not grid_assets:
+        # Nessuna riga in griglia → non chiudere, avvisa
+        return (no_update, no_update, no_update,
+                [no_update] * len(ids1), [no_update] * len(ids2), [no_update] * len(ids3),
+                '⚠ Nessun asset in griglia: attendi il caricamento dati in Frontiera e riprova',
+                no_update)
+    if matched == 0:
+        return (no_update, no_update, no_update,
+                [no_update] * len(ids1), [no_update] * len(ids2), [no_update] * len(ids3),
+                f'⚠ Gli asset del profilo non coincidono con quelli caricati '
+                f'({len(prof_assets)} attesi, 0 trovati in griglia)',
+                no_update)
+
+    msg = f'✓ Importati in F1/F2/F3: {", ".join(chosen)} — {matched}/{len(prof_assets)} asset abbinati'
     return (out1, out2, out3, chk1, chk2, chk3, msg,
             {**_FPIO_OVERLAY, 'display': 'none'})
 
