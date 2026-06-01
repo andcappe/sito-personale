@@ -2104,6 +2104,13 @@ _STATUS_GREY  = {'fontSize': '0.78rem', 'color': '#6b7a99',
 _STATUS_GREEN = {**_STATUS_GREY, 'color': '#007755', 'fontWeight': '600'}
 _STATUS_RED   = {**_STATUS_GREY, 'color': '#c0392b', 'fontWeight': '600'}
 
+# Etichetta gruppo + separatore verticale per la barra comandi
+_GRP_LABEL = {'font-size': '9px', 'font-weight': '700', 'color': '#8a96a8',
+              'letter-spacing': '0.05em', 'text-transform': 'uppercase',
+              'margin': '0 6px 0 2px'}
+_GRP_SEP   = {'width': '1px', 'height': '26px', 'background': '#d0d8e4',
+              'margin': '0 10px'}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout principale
@@ -2143,7 +2150,7 @@ app.layout = html.Div([
 
     # ── Barra comandi ─────────────────────────────────────────────────────────
     html.Div([
-        # 1. Aggiorna dati — nascosto, i callback sono ancora attivi
+        # ── Controlli legacy nascosti (callback ancora attivi) ────────────────
         html.Div([
             dcc.Loading(type='circle', color='#007755', children=[
                 html.Button('⟳ Aggiorna', id='refresh-data-btn', n_clicks=0,
@@ -2151,70 +2158,70 @@ app.layout = html.Div([
                             style={'background-color': '#007755', 'color': 'white',
                                    'border': 'none', 'padding': '7px 16px',
                                    'border-radius': '4px', 'cursor': 'pointer',
-                                   'font-weight': 'bold', 'font-size': '12px',
-                                   'margin-right': '6px'}),
+                                   'font-weight': 'bold', 'font-size': '12px'}),
             ]),
-            html.Span(id='data-last-updated', style={'display': 'none'}),
+            html.Span(id='data-last-updated'),
+            dcc.Dropdown(id='file-selector', options=_list_files(),
+                         value='ETF.xlsx', clearable=False,
+                         style={'width': '160px'}, optionHeight=28),
+            html.Button('✏️ Gestisci', id='gestisci-btn', n_clicks=0),
+            get_session_panel_layout(),
+            html.Button(id='delete-column-button', n_clicks=0),
+            html.Div(id='upload-status'),
         ], style={'display': 'none'}),
-        # 1a. File panel
+
+        # ── GRUPPO 1 · DATI ───────────────────────────────────────────────────
+        html.Span('Dati', style=_GRP_LABEL),
         get_file_panel_layout(),
-        # 1b. Converti ISIN
+
+        html.Div(style=_GRP_SEP),
+
+        # ── GRUPPO 2 · IMPORTA ────────────────────────────────────────────────
+        html.Span('Importa', style=_GRP_LABEL),
+        dcc.Upload(
+            id='upload-data',
+            children=html.Div(['⬆ Carica file']),
+            style={'height': '30px', 'lineHeight': '30px', 'padding': '0 12px',
+                   'borderWidth': '1px', 'borderStyle': 'dashed', 'borderColor': '#9bb0cc',
+                   'borderRadius': '4px', 'textAlign': 'center', 'fontSize': '11px',
+                   'color': '#1a3a5c', 'background': '#f5f8fc', 'cursor': 'pointer',
+                   'margin-right': '4px', 'display': 'inline-block'},
+            multiple=False,
+        ),
         html.Button('🔀 Converti ISIN', id='isin-open-btn', n_clicks=0,
                     title='Carica un file con ISIN e converti in ticker Yahoo Finance',
                     style={'font-size': '11px', 'padding': '5px 12px', 'border-radius': '4px',
                            'cursor': 'pointer', 'background': '#fff3e0',
                            'border': '1px solid #ffb74d', 'color': '#e65100',
                            'font-weight': 'bold', 'margin-right': '4px'}),
-        # 2. Sessioni
-        get_session_panel_layout(),
-        # 3. Selettore file dataset
-        dcc.Dropdown(
-            id='file-selector',
-            options=_list_files(),
-            value='ETF.xlsx',
-            clearable=False,
-            style={'width': '160px', 'fontSize': '11px', 'display': 'inline-block'},
-            optionHeight=28,
-        ),
-        html.Button('✏️ Gestisci', id='gestisci-btn', n_clicks=0,
-                    style={'display': 'none'}),
-        # 4. Scarica template ticker
         html.Button('📋 Template', id='btn-download-template', n_clicks=0,
                     title='Scarica il file Excel template da compilare con i tuoi titoli',
                     style={'font-size': '11px', 'padding': '5px 12px',
                            'border-radius': '4px', 'cursor': 'pointer',
                            'background': '#e8f5e9', 'border': '1px solid #a5d6a7',
-                           'color': '#1b5e20', 'margin-right': '4px'}),
-        # 4. Upload file custom
-        dcc.Upload(
-            id='upload-data',
-            children=html.Div(['Trascina il tuo file']),
-            style={'width': '150px', 'height': '32px', 'lineHeight': '32px',
-                   'borderWidth': '1px', 'borderStyle': 'dashed', 'borderRadius': '5px',
-                   'textAlign': 'center', 'margin': '0 8px', 'font-size': '11px',
-                   'color': '#555', 'cursor': 'pointer'},
-            multiple=False,
-        ),
-        # 4. Scarica prezzi
-        html.Button('📥 Scarica', id='save-data-button', n_clicks=0,
+                           'color': '#1b5e20'}),
+
+        html.Div(style=_GRP_SEP),
+
+        # ── GRUPPO 3 · SCAMBIA ────────────────────────────────────────────────
+        html.Span('Scambia', style=_GRP_LABEL),
+        html.Button('📥 Esporta prezzi', id='save-data-button', n_clicks=0,
                     title='Scarica i prezzi correnti come file Excel (date + prezzi per asset)',
                     style={'font-size': '11px', 'padding': '5px 12px',
                            'border-radius': '4px', 'cursor': 'pointer',
                            'background': '#f0f4fb', 'border': '1px solid #c0d0e8',
-                           'color': '#1a3a5c', 'margin-right': '8px'}),
-        html.Div(id='download-status', style={'font-size': '11px', 'margin-right': '8px'}),
+                           'color': '#1a3a5c', 'margin-right': '4px'}),
         html.Button('📂 Importa Frontiera', id='import-frontier-btn', n_clicks=0,
                     title='Importa i portafogli F1→P1, F2→P2, F3→P3 calcolati nella Frontiera Efficiente',
                     style={'font-size': '11px', 'padding': '5px 12px',
                            'border-radius': '4px', 'cursor': 'pointer',
                            'background': '#eafaf1', 'border': '1px solid #1a7a4a',
                            'color': '#1a7a4a', 'font-weight': 'bold', 'margin-right': '8px'}),
+        html.Div(id='download-status', style={'font-size': '11px', 'margin-right': '8px'}),
         html.Div(id='import-frontier-msg', style={'font-size': '11px', 'color': '#1a7a4a',
                                                    'font-weight': '600', 'margin-right': '8px'}),
         dcc.ConfirmDialog(id='import-frontier-confirm',
                           message='Sei sicuro di voler sovrascrivere i pesi di P1, P2, P3 con quelli della Frontiera Efficiente?'),
-        html.Button(id='delete-column-button', n_clicks=0, style={'display': 'none'}),
-        html.Div(id='upload-status', style={'display': 'none'}),
     ], style={'display': 'flex', 'align-items': 'center',
               'font-size': '10px', 'position': 'relative',
               'padding': '6px 0', 'flex-wrap': 'wrap', 'gap': '2px'}),
