@@ -135,7 +135,7 @@ def make_navbar(current: str = "") -> html.Div:
         "background": "#f8fafd",
     })
 
-    return html.Div([topbar, tabbar], style={
+    return html.Div([topbar, tabbar], id="site-navbar", style={
         "position": "fixed",
         "top": "0", "left": "0", "right": "0",
         "zIndex": "1000",

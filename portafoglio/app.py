@@ -2463,6 +2463,14 @@ app.layout = html.Div([
                 style={'font-size': '12px', 'padding': '8px 18px'},
                 selected_style={'font-size': '12px', 'padding': '8px 18px',
                                 'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
+        dcc.Tab(label='📈 Frontiera Efficiente', value='tab-frontiera',
+                style={'font-size': '12px', 'padding': '8px 18px'},
+                selected_style={'font-size': '12px', 'padding': '8px 18px',
+                                'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
+        dcc.Tab(label='📅 Rendimenti Storici', value='tab-rendimenti',
+                style={'font-size': '12px', 'padding': '8px 18px'},
+                selected_style={'font-size': '12px', 'padding': '8px 18px',
+                                'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
     ]),
     html.Div(id='tab1-content'),
     # SA layout sempre presente nel DOM (nascosto finché non si clicca il tab)
@@ -2470,6 +2478,17 @@ app.layout = html.Div([
     html.Div(id='tab-sa-content',
              children=get_style_analysis_tab([]),
              style={'display': 'none'}),
+    # Frontiera e Rendimenti incorporate via iframe (app standalone, navbar nascosta)
+    html.Div(id='tab-frontiera-content', style={'display': 'none'}, children=[
+        html.Iframe(src='/frontiera/?embed=1',
+                    style={'width': '100%', 'height': 'calc(100vh - 150px)',
+                           'border': 'none'}),
+    ]),
+    html.Div(id='tab-rendimenti-content', style={'display': 'none'}, children=[
+        html.Iframe(src='/rendimenti/?embed=1',
+                    style={'width': '100%', 'height': 'calc(100vh - 150px)',
+                           'border': 'none'}),
+    ]),
 
 ], style={'marginTop': '106px', 'padding': '0 1%'}),
 ])
@@ -2770,9 +2789,11 @@ app.clientside_callback(
 # Callback: renderizza contenuto Tab1 + mostra/nasconde tab SA
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
-    Output('tab1-content',   'children'),
-    Output('tab1-content',   'style'),
-    Output('tab-sa-content', 'style'),
+    Output('tab1-content',           'children'),
+    Output('tab1-content',           'style'),
+    Output('tab-sa-content',         'style'),
+    Output('tab-frontiera-content',  'style'),
+    Output('tab-rendimenti-content', 'style'),
     Input('main-tabs',       'value'),
     Input('asset-checklist', 'data'),
 )
@@ -2780,8 +2801,12 @@ def render_tab1(active_tab, options_tickers):
     show = {'display': 'block'}
     hide = {'display': 'none'}
     if active_tab == 'tab-sa':
-        return no_update, hide, show
-    return get_portfolio_analysis_tab(options_tickers), show, hide
+        return no_update, hide, show, hide, hide
+    if active_tab == 'tab-frontiera':
+        return no_update, hide, hide, show, hide
+    if active_tab == 'tab-rendimenti':
+        return no_update, hide, hide, hide, show
+    return get_portfolio_analysis_tab(options_tickers), show, hide, hide, hide
 
 
 # ─────────────────────────────────────────────────────────────────────────────
