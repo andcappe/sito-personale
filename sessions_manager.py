@@ -110,12 +110,21 @@ def save_working(username: str, data: dict, source: str = None) -> bool:
     """
     Salva la sessione di lavoro corrente.
     Chiamare ogni volta che l'utente carica un file o modifica i dati.
+
+    Propaga il riferimento all'ultimo salvataggio nominato letto dal working
+    esistente e marca lo stato come 'sporco' (_has_unsaved_changes=True): ogni
+    nuovo stato di lavoro non ancora salvato con nome va protetto al prossimo
+    caricamento. has_unsaved_changes() richiede comunque _last_named_save, quindi
+    il warning compare solo se l'utente ha già salvato almeno una volta.
     """
+    existing = load_working(username) or {}
+    data = dict(data)
     if source:
-        data = dict(data)
         data['_source'] = source
-    data.setdefault('_has_unsaved_changes', False)
-    data['_working_saved_at'] = datetime.now().isoformat()
+    data['_has_unsaved_changes']     = True
+    data['_last_named_save']         = existing.get('_last_named_save')
+    data['_last_named_save_name']    = existing.get('_last_named_save_name')
+    data['_working_saved_at']        = datetime.now().isoformat()
     return _save_pkl(working_path(username), data)
 
 

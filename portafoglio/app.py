@@ -1700,6 +1700,68 @@ def get_session_panel_layout():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# File panel — selettore default + file personali + salva con nome
+# ─────────────────────────────────────────────────────────────────────────────
+def get_file_panel_layout():
+    _bb = {'border': 'none', 'border-radius': '4px', 'cursor': 'pointer',
+           'font-size': '11px', 'padding': '4px 10px', 'font-weight': 'bold'}
+    return html.Div([
+        html.Button('📁 File', id='file-panel-btn', n_clicks=0,
+                    style={**_bb, 'background-color': '#5a1a6a', 'color': 'white',
+                           'padding': '6px 14px', 'font-size': '12px'}),
+        html.Div(id='file-panel', style={'display': 'none'}, children=[
+            html.Div([
+                # ── Colonna sinistra: Default + Salva ──────────────────────
+                html.Div([
+                    html.B('📂 File di default',
+                           style={'font-size': '11px', 'color': '#1a3a5c',
+                                  'display': 'block', 'margin-bottom': '8px'}),
+                    *[html.Button(label, id={'type': 'fp-default-btn', 'index': key},
+                                  n_clicks=0,
+                                  style={**_bb, 'background': '#e8f4fb',
+                                         'color': '#1a3a5c', 'width': '100%',
+                                         'margin-bottom': '4px',
+                                         'border': '1px solid #90caf9'})
+                      for key, label in [('ETF', '📊 ETF'),
+                                         ('CRIPTO', '₿ Cripto'),
+                                         ('CURRENCIES', '💱 Valute')]],
+                    html.Hr(style={'margin': '12px 0'}),
+                    html.B('💾 Salva sessione come…',
+                           style={'font-size': '11px', 'color': '#1a3a5c',
+                                  'display': 'block', 'margin-bottom': '8px'}),
+                    dcc.Input(id='fp-save-name', type='text',
+                              placeholder='Es. Mario_Cliente_ABC…',
+                              style={'width': '100%', 'padding': '5px 8px',
+                                     'border': '1px solid #aaa', 'border-radius': '4px',
+                                     'font-size': '11px', 'margin-bottom': '6px'}),
+                    html.Button('💾 Salva', id='fp-save-btn', n_clicks=0,
+                                style={**_bb, 'background': '#1b7a34',
+                                       'color': 'white', 'width': '100%'}),
+                    html.Div(id='fp-save-status',
+                             style={'font-size': '10px', 'margin-top': '5px',
+                                    'color': '#555', 'min-height': '16px'}),
+                ], style={'width': '220px', 'padding-right': '20px',
+                          'border-right': '1px solid #ddd'}),
+                # ── Colonna destra: file personali ────────────────────────
+                html.Div([
+                    html.Div([
+                        html.B('📁 I miei file',
+                               style={'font-size': '11px', 'color': '#1a3a5c'}),
+                        html.Button('🔄', id='fp-refresh-btn', n_clicks=0,
+                                    style={**_bb, 'background': '#e8e8e8',
+                                           'color': '#333', 'margin-left': '8px',
+                                           'padding': '3px 8px'}),
+                    ], style={'display': 'flex', 'align-items': 'center',
+                              'margin-bottom': '8px'}),
+                    html.Div(id='fp-file-list',
+                             style={'max-height': '280px', 'overflow-y': 'auto'}),
+                ], style={'flex': '1', 'padding-left': '20px'}),
+            ], style={'display': 'flex'}),
+        ]),
+    ], style={'display': 'inline-block', 'position': 'relative'})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Date range bar
 # ─────────────────────────────────────────────────────────────────────────────
 def get_date_range_bar(suffix):
@@ -2047,6 +2109,8 @@ app.layout = html.Div([
             ]),
             html.Span(id='data-last-updated', style={'display': 'none'}),
         ], style={'display': 'none'}),
+        # 1a. File panel
+        get_file_panel_layout(),
         # 1b. Converti ISIN
         html.Button('🔀 Converti ISIN', id='isin-open-btn', n_clicks=0,
                     title='Carica un file con ISIN e converti in ticker Yahoo Finance',
@@ -2203,6 +2267,13 @@ app.layout = html.Div([
     dcc.ConfirmDialog(
         id='overwrite-confirm',
         message='Hai una sessione non salvata. Caricare il nuovo file la sovrascriverà.\nContinuare?',
+    ),
+    dcc.Store(id='pending-fileload-store', data=None),
+    dcc.Store(id='fp-delete-trigger', data=None),
+    dcc.Store(id='sm-dirty-sink', data=None),
+    dcc.ConfirmDialog(
+        id='fileload-confirm',
+        message='Hai una sessione non salvata. Caricare questo file la sovrascriverà.\nContinuare?',
     ),
 
     # ── Modale ISIN conversion ────────────────────────────────────────────────
@@ -4491,6 +4562,298 @@ def load_session_cb(session_id):
         raise PreventUpdate
     store_data = load_session(session_id)
     return tuple(store_data.get(sid, no_update) for sid in CLIENT_SESSION_STORES)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PANNELLO 📁 FILE — selettore default + file personali + salva con nome
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _build_fp_row(f):
+    """Riga di un file personale nella lista del pannello File."""
+    fn   = f['filename']
+    name = f.get('saved_name', fn)
+    date = f.get('saved_at', '') or f.get('modified', '')
+    size = f.get('size_kb', '?')
+    btn = {'border': 'none', 'border-radius': '3px', 'cursor': 'pointer',
+           'font-size': '10px', 'padding': '3px 8px', 'font-weight': 'bold'}
+    return html.Div([
+        html.Div([
+            html.Span(name, style={'font-weight': 'bold', 'font-size': '11px',
+                                   'color': '#1a3a5c'}),
+            html.Br(),
+            html.Span(f'🕐 {date}  ·  {size} KB',
+                      style={'font-size': '9px', 'color': '#888'}),
+        ], style={'flex': '1', 'min-width': '0'}),
+        html.Div([
+            html.Button('📂 Carica', id={'type': 'fp-load-btn', 'index': fn},
+                        n_clicks=0,
+                        style={**btn, 'background': '#1a3a5c', 'color': 'white',
+                               'margin-right': '4px'}),
+            html.Button('🗑', id={'type': 'fp-del-btn', 'index': fn}, n_clicks=0,
+                        style={**btn, 'background': '#c0392b', 'color': 'white'}),
+        ], style={'display': 'flex', 'align-items': 'center', 'flex-shrink': '0',
+                  'margin-left': '10px'}),
+    ], style={'display': 'flex', 'align-items': 'center', 'padding': '6px 8px',
+              'border-bottom': '1px solid #eee', 'background': 'white',
+              'border-radius': '3px', 'margin-bottom': '3px'})
+
+
+# ── Toggle pannello ───────────────────────────────────────────────────────────
+@app.callback(
+    Output('file-panel', 'style'),
+    Input('file-panel-btn', 'n_clicks'),
+    State('file-panel', 'style'),
+    prevent_initial_call=True,
+)
+def toggle_file_panel(n, cur):
+    if cur and cur.get('display') == 'none':
+        return {'display': 'block', 'position': 'absolute', 'top': '70px', 'left': '10px',
+                'z-index': '1000', 'background': 'white', 'border': '1px solid #ccc',
+                'border-radius': '8px', 'box-shadow': '0 4px 20px rgba(0,0,0,0.15)',
+                'padding': '16px 20px', 'width': '620px', 'max-width': '95vw'}
+    return {'display': 'none'}
+
+
+# ── Lista file personali ────────────────────────────────────────────────────
+@app.callback(
+    Output('fp-file-list', 'children'),
+    Input('fp-refresh-btn',   'n_clicks'),
+    Input('fp-save-btn',      'n_clicks'),
+    Input('file-panel-btn',   'n_clicks'),
+    Input('fp-delete-trigger', 'data'),
+    prevent_initial_call=False,
+)
+def refresh_fp_list(*_):
+    files = _sm.list_user_files(_get_username())
+    if not files:
+        return html.Div('Nessun file personale salvato.',
+                        style={'font-size': '11px', 'color': '#aaa',
+                               'padding': '10px', 'text-align': 'center'})
+    return [_build_fp_row(f) for f in files]
+
+
+# ── Salva con nome ──────────────────────────────────────────────────────────
+@app.callback(
+    Output('fp-save-status', 'children'),
+    Output('fp-save-status', 'style'),
+    Input('fp-save-btn',     'n_clicks'),
+    State('fp-save-name',    'value'),
+    *[State(sid, 'data') for sid in CLIENT_SESSION_STORES],
+    prevent_initial_call=True,
+)
+def fp_save_named(n, name, *store_values):
+    if not n:
+        raise PreventUpdate
+    _err = {'color': '#e65100', 'font-size': '10px', 'margin-top': '5px'}
+    _ok  = {'color': '#1b7a34', 'font-size': '10px', 'margin-top': '5px'}
+    if not (name and name.strip()):
+        return '⚠ Inserisci un nome per il file.', _err
+
+    _u = _get_username()
+    stores = {sid: val for sid, val in zip(CLIENT_SESSION_STORES, store_values)}
+    with _DL_LOCK:
+        cr       = _DL_BUFFER.get('close_returns')
+        op       = _DL_BUFFER.get('original_prices')
+        tm       = dict(_DL_BUFFER.get('ticker_map', {}))
+        vm       = dict(_DL_BUFFER.get('valuta_map', {}))
+        saved_at = _DL_BUFFER.get('saved_at', '')
+    # Fallback: ricostruisci cr dai 9 store se il buffer è vuoto
+    if cr is None and stores.get('stock-data'):
+        try:
+            cr = pd.read_json(io.StringIO(stores['stock-data']), orient='split')
+        except Exception:
+            cr = None
+    if cr is None:
+        return '⚠ Nessun dato da salvare. Carica prima un file.', _err
+
+    data = {
+        'close_returns':   cr,
+        'original_prices': op,
+        'ticker_map':      tm,
+        'valuta_map':      vm,
+        'saved_at':        saved_at,
+        '_stores':         stores,
+    }
+    path = _sm.save_named(_u, data, name.strip())
+    return f'✅ Salvato: {path.name}', _ok
+
+
+# ── Stage caricamento file (default o personale) con warning ─────────────────
+@app.callback(
+    Output('pending-fileload-store', 'data'),
+    Output('fileload-confirm',       'displayed'),
+    Input({'type': 'fp-default-btn', 'index': ALL}, 'n_clicks'),
+    Input({'type': 'fp-load-btn',    'index': ALL}, 'n_clicks'),
+    prevent_initial_call=True,
+)
+def stage_file_load(default_clicks, load_clicks):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    trig = ctx.triggered[0]
+    if not trig['value']:
+        raise PreventUpdate
+    try:
+        id_dict = json.loads(trig['prop_id'].split('.')[0])
+    except Exception:
+        raise PreventUpdate
+    kind = 'default' if id_dict['type'] == 'fp-default-btn' else 'personal'
+    needs_confirm = _sm.has_unsaved_changes(_get_username())
+    payload = {'kind': kind, 'key': id_dict['index'],
+               'await': needs_confirm, 'ts': time.time()}
+    return payload, needs_confirm
+
+
+@app.callback(
+    Output('pending-fileload-store', 'data', allow_duplicate=True),
+    Input('fileload-confirm', 'cancel_n_clicks'),
+    prevent_initial_call=True,
+)
+def cancel_file_load(n):
+    if not n:
+        raise PreventUpdate
+    return None
+
+
+# ── Esegui caricamento file ──────────────────────────────────────────────────
+@app.callback(
+    Output('stock-data',              'data',     allow_duplicate=True),
+    Output('original-prices-data',    'data',     allow_duplicate=True),
+    Output('asset-checklist',         'data',     allow_duplicate=True),
+    Output('ticker-map-store',        'data',     allow_duplicate=True),
+    Output('data-last-updated',       'children', allow_duplicate=True),
+    Output('upload-status',           'children', allow_duplicate=True),
+    Output('weights-store-P1',        'data',     allow_duplicate=True),
+    Output('weights-store-P2',        'data',     allow_duplicate=True),
+    Output('weights-store-P3',        'data',     allow_duplicate=True),
+    Output('global-assets-selected',  'data',     allow_duplicate=True),
+    Output('insufficient-data-store', 'data',     allow_duplicate=True),
+    Output('update-portfolio-button', 'n_clicks', allow_duplicate=True),
+    Input('pending-fileload-store',   'data'),
+    Input('fileload-confirm',         'submit_n_clicks'),
+    State('update-portfolio-button',  'n_clicks'),
+    prevent_initial_call=True,
+)
+def execute_file_load(pending, submit_n, cur_clicks):
+    ctx = callback_context
+    trig_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ''
+    if not pending:
+        raise PreventUpdate
+    # Serviva conferma: non eseguire sul cambio dello store, attendi il submit
+    if trig_id == 'pending-fileload-store' and pending.get('await'):
+        raise PreventUpdate
+    if trig_id == 'fileload-confirm' and not submit_n:
+        raise PreventUpdate
+
+    _u   = _get_username()
+    kind = pending.get('kind')
+    key  = pending.get('key')
+    _cl_clear(_u)
+    _active_file_store['is_personale'] = (kind == 'personal')
+
+    # ── Carica i dati ─────────────────────────────────────────────────────────
+    if kind == 'default':
+        data = _sm.load_default(key)
+    else:
+        data = _sm.load_named(_u, key)
+    if not data:
+        raise PreventUpdate
+
+    cr     = data.get('close_returns')
+    op     = data.get('original_prices')
+    tm     = dict(data.get('ticker_map', {}))
+    vm     = dict(data.get('valuta_map', {}))
+    sa     = data.get('saved_at', '')
+    stores = data.get('_stores', {}) or {}
+
+    # Ricostruisci cr/op dai 9 store se mancano i DataFrame
+    if cr is None and stores.get('stock-data'):
+        try:
+            cr = pd.read_json(io.StringIO(stores['stock-data']), orient='split')
+        except Exception:
+            cr = None
+    if op is None and stores.get('original-prices-data'):
+        try:
+            op = pd.read_json(io.StringIO(stores['original-prices-data']), orient='split')
+        except Exception:
+            op = None
+    if cr is None:
+        raise PreventUpdate
+
+    # Aggiorna buffer condiviso
+    with _DL_LOCK:
+        _DL_BUFFER.clear()
+        _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
+                           'ticker_map': tm, 'valuta_map': vm, 'saved_at': sa})
+
+    # Output store
+    stock_json = stores.get('stock-data') or cr.to_json(date_format='iso', orient='split')
+    op_json    = (stores.get('original-prices-data')
+                  or (op.to_json(date_format='iso', orient='split') if op is not None else None))
+    options    = stores.get('asset-checklist') or [{'label': c, 'value': c} for c in cr.columns]
+    tmap_out   = stores.get('ticker-map-store') or tm
+
+    if kind == 'personal':
+        p1 = stores.get('weights-store-P1', {}) or {}
+        p2 = stores.get('weights-store-P2', {}) or {}
+        p3 = stores.get('weights-store-P3', {}) or {}
+        gsel  = stores.get('global-assets-selected', []) or []
+        insuf = stores.get('insufficient-data-store', []) or []
+        _write_user_json(cr, op, tm, vm, reset_state=True)
+        _update_user_json(weights={'P1': p1, 'P2': p2, 'P3': p3}, username=_u)
+        label = f'✓ {len(options)} asset — {pending.get("key")}'
+    else:
+        p1, p2, p3 = {}, {}, {}
+        gsel, insuf = [], []
+        _write_user_json(cr, op, tm, vm, reset_state=True)
+        label = f'✓ {len(options)} asset — {key}'
+
+    # Salva la nuova sessione di lavoro condivisa
+    _sm.save_working(_u, {'close_returns': cr, 'original_prices': op,
+                          'ticker_map': tm, 'valuta_map': vm, 'saved_at': sa,
+                          '_stores': stores}, source=key)
+
+    return (
+        stock_json, op_json, options, tmap_out,
+        f'Aggiornati: {sa}' if sa else '',
+        html.Div(label, style={'color': '#007755', 'font-size': '11px'}),
+        p1, p2, p3, gsel, insuf,
+        (cur_clicks or 0) + 1,
+    )
+
+
+@app.callback(
+    Output('fp-delete-trigger', 'data'),
+    Input({'type': 'fp-del-btn', 'index': ALL}, 'n_clicks'),
+    prevent_initial_call=True,
+)
+def delete_fp_file(all_clicks):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    trig = ctx.triggered[0]
+    if not trig['value']:
+        raise PreventUpdate
+    try:
+        id_dict  = json.loads(trig['prop_id'].split('.')[0])
+        filename = id_dict['index']
+    except Exception:
+        raise PreventUpdate
+    _sm.delete_user_file(_get_username(), filename)
+    return f'{filename}:{time.time()}'
+
+
+# ── Marca sessione modificata su cambio pesi (per il warning) ────────────────
+@app.callback(
+    Output('sm-dirty-sink', 'data'),
+    Input('weights-store-P1', 'data'),
+    Input('weights-store-P2', 'data'),
+    Input('weights-store-P3', 'data'),
+    prevent_initial_call=True,
+)
+def mark_session_dirty(p1, p2, p3):
+    _sm.mark_modified(_get_username())
+    return no_update
 
 
 # ─────────────────────────────────────────────────────────────────────────────
