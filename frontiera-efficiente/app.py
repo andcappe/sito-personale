@@ -24,6 +24,7 @@ from dash.exceptions import PreventUpdate
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from settings.browser_css import BROWSER_RESET_CSS, FONT
+import sessions_manager as _sm
 
 # ─────────────────────────────────────────────────────────────────────────────
 # App
@@ -1062,12 +1063,15 @@ app.layout = html.Div([
                                    'padding':'6px 14px','borderRadius':'4px','cursor':'pointer',
                                    'fontWeight':'bold','fontSize':'11px',
                                    'boxShadow':'0 2px 6px rgba(0,102,204,0.35)'}),
-                html.Button('💾 Salva in Portafoglio', id='fe-save-to-port-btn', n_clicks=0,
-                            title='Salva F1→P1, F2→P2, F3→P3 nella dashboard Analisi Portafoglio',
+                html.Button('🔄 Importa/Esporta Portafoglio', id='fpio-btn', n_clicks=0,
+                            title='Importa profili salvati in F1/F2/F3 o esporta gli F1/F2/F3 calcolati',
                             style={'background':'#1a7a4a','color':'white','border':'none',
                                    'padding':'6px 12px','borderRadius':'4px','cursor':'pointer',
                                    'fontWeight':'bold','fontSize':'11px',
                                    'boxShadow':'0 2px 6px rgba(26,122,74,0.35)'}),
+                html.Button('💾 Salva in Portafoglio', id='fe-save-to-port-btn', n_clicks=0,
+                            title='Salva F1→P1, F2→P2, F3→P3 nella dashboard Analisi Portafoglio',
+                            style={'display':'none'}),
                 html.Div(id='fe-save-port-msg', style={'fontSize':'11px','color':'#1a7a4a','fontWeight':'600'}),
             ], style={'width':'65%','display':'flex','alignItems':'center',
                       'flexWrap':'wrap','gap':'4px'}),
@@ -1166,6 +1170,94 @@ app.layout = html.Div([
     dcc.Interval(id='fe-arima-poll',   interval=600, n_intervals=0, disabled=True),
     dcc.Store(id='fe-sync-sig',        data=''),
     dcc.Interval(id='fe-live-sync',    interval=2000, n_intervals=0, disabled=False),
+
+    # ── Modal Importa/Esporta Portafoglio ─────────────────────────────────────
+    html.Div(id='fpio-overlay',
+             style={'display':'none','position':'fixed','top':'0','left':'0',
+                    'width':'100%','height':'100%','zIndex':'9000',
+                    'background':'rgba(0,0,0,0.45)','alignItems':'center',
+                    'justifyContent':'center'},
+             children=[
+        html.Div([
+            html.Div([
+                html.Span('🔄 Importa / Esporta Portafoglio',
+                          style={'fontWeight':'700','fontSize':'14px','color':'#1a3a5c'}),
+                html.Button('✕', id='fpio-close', n_clicks=0,
+                            style={'background':'none','border':'none','fontSize':'18px',
+                                   'cursor':'pointer','color':'#666','float':'right'}),
+            ], style={'display':'flex','justifyContent':'space-between',
+                      'alignItems':'center','marginBottom':'12px'}),
+
+            dcc.RadioItems(id='fpio-mode',
+                           options=[{'label':' 📤 Esporta F1/F2/F3','value':'export'},
+                                    {'label':' 📥 Importa','value':'import'}],
+                           value='export', inline=True,
+                           inputStyle={'marginRight':'4px'},
+                           labelStyle={'marginRight':'18px','fontSize':'12px','fontWeight':'600'},
+                           style={'marginBottom':'14px','paddingBottom':'10px',
+                                  'borderBottom':'1px solid #eee'}),
+
+            # Esporta
+            html.Div(id='fpio-export-view', children=[
+                html.Div('Esporta i portafogli calcolati F1/F2/F3:',
+                         style={'fontSize':'11px','fontWeight':'600','color':'#1a3a5c',
+                                'marginBottom':'6px'}),
+                dcc.Checklist(id='fpio-exp-slots',
+                              options=[{'label':f' {s}','value':s} for s in ('F1','F2','F3')],
+                              value=['F1','F2','F3'], inline=True,
+                              inputStyle={'marginRight':'4px'},
+                              labelStyle={'marginRight':'16px','fontSize':'11px'},
+                              style={'marginBottom':'8px'}),
+                html.Div([
+                    html.Span('Nomi:', style={'fontSize':'10px','color':'#666','marginRight':'6px'}),
+                    dcc.Input(id='fpio-exp-name-F1', value='F1', style={'width':'90px','fontSize':'11px','marginRight':'4px'}),
+                    dcc.Input(id='fpio-exp-name-F2', value='F2', style={'width':'90px','fontSize':'11px','marginRight':'4px'}),
+                    dcc.Input(id='fpio-exp-name-F3', value='F3', style={'width':'90px','fontSize':'11px'}),
+                ], style={'marginBottom':'12px'}),
+                html.Div('Salva nel profilo:', style={'fontSize':'11px','fontWeight':'600',
+                         'color':'#1a3a5c','marginBottom':'6px'}),
+                dcc.Dropdown(id='fpio-exp-profile', placeholder='Profilo esistente…',
+                             style={'fontSize':'11px','marginBottom':'6px'}),
+                dcc.Input(id='fpio-exp-new', placeholder='…oppure nuovo profilo',
+                          style={'width':'100%','fontSize':'11px','marginBottom':'8px',
+                                 'padding':'5px 8px','border':'1px solid #aaa','borderRadius':'4px'}),
+                dcc.RadioItems(id='fpio-exp-mode',
+                               options=[{'label':' Aggiungi al profilo','value':'merge'},
+                                        {'label':' Sostituisci profilo','value':'replace'}],
+                               value='merge', inline=True,
+                               inputStyle={'marginRight':'4px'},
+                               labelStyle={'marginRight':'14px','fontSize':'10px'},
+                               style={'marginBottom':'12px'}),
+                html.Button('📤 Esporta', id='fpio-exp-btn', n_clicks=0,
+                            style={'background':'#1b7a34','color':'white','border':'none',
+                                   'padding':'7px 16px','borderRadius':'4px','cursor':'pointer',
+                                   'fontSize':'12px','fontWeight':'bold'}),
+                html.Div(id='fpio-exp-status', style={'fontSize':'11px','marginTop':'8px','minHeight':'16px'}),
+            ]),
+
+            # Importa
+            html.Div(id='fpio-import-view', style={'display':'none'}, children=[
+                html.Div('Profilo:', style={'fontSize':'11px','fontWeight':'600',
+                         'color':'#1a3a5c','marginBottom':'6px'}),
+                dcc.Dropdown(id='fpio-imp-profile', placeholder='Scegli un profilo…',
+                             style={'fontSize':'11px','marginBottom':'10px'}),
+                html.Div('Portafogli da importare:', style={'fontSize':'11px','fontWeight':'600',
+                         'color':'#1a3a5c','marginBottom':'6px'}),
+                dcc.Checklist(id='fpio-imp-list', options=[], value=[],
+                              inputStyle={'marginRight':'6px'},
+                              labelStyle={'display':'block','fontSize':'11px','marginBottom':'3px'},
+                              style={'marginBottom':'8px','maxHeight':'160px','overflowY':'auto'}),
+                html.Div('I selezionati riempiranno F1, F2, F3 nell\'ordine (max 3) e spunteranno gli asset.',
+                         style={'fontSize':'10px','color':'#888','fontStyle':'italic','marginBottom':'10px'}),
+                html.Button('📥 Importa', id='fpio-imp-btn', n_clicks=0,
+                            style={'background':'#1a3a5c','color':'white','border':'none',
+                                   'padding':'7px 16px','borderRadius':'4px','cursor':'pointer',
+                                   'fontSize':'12px','fontWeight':'bold'}),
+                html.Div(id='fpio-imp-status', style={'fontSize':'11px','marginTop':'8px','minHeight':'16px'}),
+            ]),
+        ], style={'background':'white','borderRadius':'10px','padding':'20px 24px',
+                  'width':'460px','boxShadow':'0 4px 24px rgba(0,0,0,0.18)','position':'relative'}),
+    ]),
 ], style={'minHeight':'100vh'})
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2348,6 +2440,152 @@ def save_to_portafoglio(n, f1j, f2j, f3j):
         return f'✓ Salvato ({labels}) — {data["saved_at"]}'
     except Exception as e:
         return f'⚠ Errore: {e}'
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# IMPORTA / ESPORTA PORTAFOGLIO — profili condivisi (sessions_manager)
+# ═════════════════════════════════════════════════════════════════════════════
+_FPIO_OVERLAY = {'position':'fixed','top':'0','left':'0','width':'100%','height':'100%',
+                 'zIndex':'9000','background':'rgba(0,0,0,0.45)',
+                 'alignItems':'center','justifyContent':'center'}
+
+@app.callback(
+    Output('fpio-overlay',     'style'),
+    Output('fpio-exp-profile', 'options'),
+    Output('fpio-imp-profile', 'options'),
+    Input('fpio-btn',   'n_clicks'),
+    Input('fpio-close', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def fpio_toggle(open_n, close_n):
+    if callback_context.triggered_id == 'fpio-btn':
+        opts = [{'label': p, 'value': p} for p in _sm.list_profiles(_get_username())]
+        return {**_FPIO_OVERLAY, 'display': 'flex'}, opts, opts
+    return {**_FPIO_OVERLAY, 'display': 'none'}, no_update, no_update
+
+
+@app.callback(
+    Output('fpio-export-view', 'style'),
+    Output('fpio-import-view', 'style'),
+    Input('fpio-mode', 'value'),
+)
+def fpio_switch_view(mode):
+    if mode == 'import':
+        return {'display': 'none'}, {'display': 'block'}
+    return {'display': 'block'}, {'display': 'none'}
+
+
+def _fpio_load_w(j):
+    if not j:
+        return {}
+    try:
+        return json.loads(j) if isinstance(j, str) else dict(j)
+    except Exception:
+        return {}
+
+
+@app.callback(
+    Output('fpio-exp-status',  'children'),
+    Output('fpio-exp-profile', 'options', allow_duplicate=True),
+    Output('fpio-imp-profile', 'options', allow_duplicate=True),
+    Output('fpio-exp-new',     'value'),
+    Input('fpio-exp-btn', 'n_clicks'),
+    State('fpio-exp-slots', 'value'),
+    State('fpio-exp-name-F1', 'value'),
+    State('fpio-exp-name-F2', 'value'),
+    State('fpio-exp-name-F3', 'value'),
+    State('fe-f1-weights', 'data'),
+    State('fe-f2-weights', 'data'),
+    State('fe-f3-weights', 'data'),
+    State('fpio-exp-profile', 'value'),
+    State('fpio-exp-new',     'value'),
+    State('fpio-exp-mode',    'value'),
+    prevent_initial_call=True,
+)
+def fpio_export(n, slots, n1, n2, n3, f1j, f2j, f3j, prof_sel, prof_new, mode):
+    if not n:
+        raise PreventUpdate
+    u = _get_username()
+    profile = (prof_new or '').strip() or (prof_sel or '').strip()
+    if not profile:
+        return '⚠ Scegli un profilo o scrivi un nuovo nome', no_update, no_update, no_update
+    wmap  = {'F1': _fpio_load_w(f1j), 'F2': _fpio_load_w(f2j), 'F3': _fpio_load_w(f3j)}
+    names = {'F1': (n1 or 'F1').strip(), 'F2': (n2 or 'F2').strip(), 'F3': (n3 or 'F3').strip()}
+    slots = slots or []
+    portfolios = {}
+    for s in ('F1', 'F2', 'F3'):
+        if s in slots and wmap[s]:
+            w = {a: float(v) for a, v in wmap[s].items() if v}
+            if w:
+                portfolios[names[s]] = w
+    if not portfolios:
+        return '⚠ Nessun peso da esportare (calcola prima le frontiere)', no_update, no_update, no_update
+    ok = _sm.export_portfolios(u, profile, portfolios, mode=mode)
+    opts = [{'label': p, 'value': p} for p in _sm.list_profiles(u)]
+    if ok:
+        return f'✅ Esportato in "{profile}": {", ".join(portfolios.keys())}', opts, opts, ''
+    return '⚠ Errore durante l\'esportazione', no_update, no_update, no_update
+
+
+@app.callback(
+    Output('fpio-imp-list', 'options'),
+    Output('fpio-imp-list', 'value'),
+    Input('fpio-imp-profile', 'value'),
+    prevent_initial_call=True,
+)
+def fpio_populate_import(profile):
+    if not profile:
+        return [], []
+    ports = (_sm.get_profile(_get_username(), profile).get('portfolios') or {})
+    return [{'label': f' {nm}', 'value': nm} for nm in ports.keys()], []
+
+
+@app.callback(
+    Output('fe-f1-weights', 'data', allow_duplicate=True),
+    Output('fe-f2-weights', 'data', allow_duplicate=True),
+    Output('fe-f3-weights', 'data', allow_duplicate=True),
+    Output({'type': 'fe-p1', 'index': ALL}, 'value', allow_duplicate=True),
+    Output({'type': 'fe-p2', 'index': ALL}, 'value', allow_duplicate=True),
+    Output({'type': 'fe-p3', 'index': ALL}, 'value', allow_duplicate=True),
+    Output('fpio-imp-status', 'children'),
+    Output('fpio-overlay',    'style', allow_duplicate=True),
+    Input('fpio-imp-btn', 'n_clicks'),
+    State('fpio-imp-profile', 'value'),
+    State('fpio-imp-list',    'value'),
+    State({'type': 'fe-p1', 'index': ALL}, 'id'),
+    State({'type': 'fe-p2', 'index': ALL}, 'id'),
+    State({'type': 'fe-p3', 'index': ALL}, 'id'),
+    prevent_initial_call=True,
+)
+def fpio_import(n, profile, selected, ids1, ids2, ids3):
+    if not n:
+        raise PreventUpdate
+    ids1, ids2, ids3 = ids1 or [], ids2 or [], ids3 or []
+    if not profile or not selected:
+        return (no_update, no_update, no_update,
+                [no_update] * len(ids1), [no_update] * len(ids2), [no_update] * len(ids3),
+                '⚠ Scegli un profilo e almeno un portafoglio', no_update)
+
+    ports  = (_sm.get_profile(_get_username(), profile).get('portfolios') or {})
+    chosen = list(selected)[:3]
+    slots  = ['F1', 'F2', 'F3']
+    slot_w = {'F1': {}, 'F2': {}, 'F3': {}}
+    for i, pname in enumerate(chosen):
+        slot_w[slots[i]] = {a: float(v) for a, v in (ports.get(pname) or {}).items()}
+    w1, w2, w3 = slot_w['F1'], slot_w['F2'], slot_w['F3']
+
+    def _checks(ids, w):
+        return [[d['index']] if w.get(d['index'], 0) else [] for d in ids]
+
+    out1 = json.dumps(w1) if w1 else no_update
+    out2 = json.dumps(w2) if w2 else no_update
+    out3 = json.dumps(w3) if w3 else no_update
+    chk1 = _checks(ids1, w1) if w1 else [no_update] * len(ids1)
+    chk2 = _checks(ids2, w2) if w2 else [no_update] * len(ids2)
+    chk3 = _checks(ids3, w3) if w3 else [no_update] * len(ids3)
+    msg  = f'✓ Importati in F1/F2/F3: {", ".join(chosen)}'
+    return (out1, out2, out3, chk1, chk2, chk3, msg,
+            {**_FPIO_OVERLAY, 'display': 'none'})
 
 
 @app.callback(
