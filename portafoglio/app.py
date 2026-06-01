@@ -3649,6 +3649,24 @@ def toggle_pio(open_n, close_n):
     return {**_PIO_OVERLAY, 'display': 'none'}, no_update, no_update
 
 
+# Reset dei campi del dialogo ad ogni apertura (evita stato vecchio)
+@app.callback(
+    Output('pio-mode',        'value',    allow_duplicate=True),
+    Output('pio-imp-profile', 'value',    allow_duplicate=True),
+    Output('pio-imp-list',    'options',  allow_duplicate=True),
+    Output('pio-imp-list',    'value',    allow_duplicate=True),
+    Output('pio-imp-status',  'children', allow_duplicate=True),
+    Output('pio-exp-status',  'children', allow_duplicate=True),
+    Output('pio-exp-new',     'value',    allow_duplicate=True),
+    Input('port-io-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def pio_reset(n):
+    if not n:
+        raise PreventUpdate
+    return 'export', None, [], [], '', '', ''
+
+
 @app.callback(
     Output('pio-export-view', 'style'),
     Output('pio-import-view', 'style'),

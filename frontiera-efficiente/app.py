@@ -2464,6 +2464,24 @@ def fpio_toggle(open_n, close_n):
     return {**_FPIO_OVERLAY, 'display': 'none'}, no_update, no_update
 
 
+# Reset dei campi del dialogo ad ogni apertura (evita stato vecchio)
+@app.callback(
+    Output('fpio-mode',        'value',    allow_duplicate=True),
+    Output('fpio-imp-profile', 'value',    allow_duplicate=True),
+    Output('fpio-imp-list',    'options',  allow_duplicate=True),
+    Output('fpio-imp-list',    'value',    allow_duplicate=True),
+    Output('fpio-imp-status',  'children', allow_duplicate=True),
+    Output('fpio-exp-status',  'children', allow_duplicate=True),
+    Output('fpio-exp-new',     'value',    allow_duplicate=True),
+    Input('fpio-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def fpio_reset(n):
+    if not n:
+        raise PreventUpdate
+    return 'export', None, [], [], '', '', ''
+
+
 @app.callback(
     Output('fpio-export-view', 'style'),
     Output('fpio-import-view', 'style'),
