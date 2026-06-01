@@ -2459,9 +2459,7 @@ _FPIO_OVERLAY = {'position':'fixed','top':'0','left':'0','width':'100%','height'
 )
 def fpio_toggle(open_n, close_n):
     if callback_context.triggered_id == 'fpio-btn':
-        profs = _sm.list_profiles(_get_username())
-        print(f"[FPIO-OPEN] user={_get_username()} profili={profs}", flush=True)
-        opts = [{'label': p, 'value': p} for p in profs]
+        opts = [{'label': p, 'value': p} for p in _sm.list_profiles(_get_username())]
         return {**_FPIO_OVERLAY, 'display': 'flex'}, opts, opts
     return {**_FPIO_OVERLAY, 'display': 'none'}, no_update, no_update
 
@@ -2567,6 +2565,7 @@ def fpio_populate_import(profile):
     Output({'type': 'fe-p1', 'index': ALL}, 'value', allow_duplicate=True),
     Output({'type': 'fe-p2', 'index': ALL}, 'value', allow_duplicate=True),
     Output({'type': 'fe-p3', 'index': ALL}, 'value', allow_duplicate=True),
+    Output({'type': 'fe-chart-port', 'index': ALL}, 'value', allow_duplicate=True),
     Output('fpio-imp-status', 'children'),
     Output('fpio-overlay',    'style', allow_duplicate=True),
     Input('fpio-imp-btn', 'n_clicks'),
@@ -2575,17 +2574,19 @@ def fpio_populate_import(profile):
     State({'type': 'fe-p1', 'index': ALL}, 'id'),
     State({'type': 'fe-p2', 'index': ALL}, 'id'),
     State({'type': 'fe-p3', 'index': ALL}, 'id'),
+    State({'type': 'fe-chart-port', 'index': ALL}, 'id'),
     prevent_initial_call=True,
 )
-def fpio_import(n, profile, selected, ids1, ids2, ids3):
+def fpio_import(n, profile, selected, ids1, ids2, ids3, ids_port):
     if not n:
         raise PreventUpdate
-    print(f"[FPIO-IMPORT] FIRED n={n} profile={profile!r} selected={selected!r} "
-          f"grid_assets={len(ids1 or [])}", flush=True)
     ids1, ids2, ids3 = ids1 or [], ids2 or [], ids3 or []
+    ids_port = ids_port or []
+    n_port = len(ids_port)
     if not profile or not selected:
         return (no_update, no_update, no_update,
                 [no_update] * len(ids1), [no_update] * len(ids2), [no_update] * len(ids3),
+                [no_update] * n_port,
                 '⚠ Scegli un profilo e almeno un portafoglio', no_update)
 
     ports  = (_sm.get_profile(_get_username(), profile).get('portfolios') or {})
@@ -2605,6 +2606,9 @@ def fpio_import(n, profile, selected, ids1, ids2, ids3):
     chk1 = _checks(ids1, w1) if w1 else [no_update] * len(ids1)
     chk2 = _checks(ids2, w2) if w2 else [no_update] * len(ids2)
     chk3 = _checks(ids3, w3) if w3 else [no_update] * len(ids3)
+    # Spunta "disegna nel grafico" (fe-chart-port) per gli slot importati
+    filled = {s for s in slots if slot_w[s]}
+    chk_port = [[d['index']] if d['index'] in filled else [] for d in ids_port]
 
     # Diagnostica: quanti asset del profilo coincidono con la griglia di Frontiera
     grid_assets = {d['index'] for d in ids1}
@@ -2615,17 +2619,19 @@ def fpio_import(n, profile, selected, ids1, ids2, ids3):
         # Nessuna riga in griglia → non chiudere, avvisa
         return (no_update, no_update, no_update,
                 [no_update] * len(ids1), [no_update] * len(ids2), [no_update] * len(ids3),
+                [no_update] * n_port,
                 '⚠ Nessun asset in griglia: attendi il caricamento dati in Frontiera e riprova',
                 no_update)
     if matched == 0:
         return (no_update, no_update, no_update,
                 [no_update] * len(ids1), [no_update] * len(ids2), [no_update] * len(ids3),
+                [no_update] * n_port,
                 f'⚠ Gli asset del profilo non coincidono con quelli caricati '
                 f'({len(prof_assets)} attesi, 0 trovati in griglia)',
                 no_update)
 
     msg = f'✓ Importati in F1/F2/F3: {", ".join(chosen)} — {matched}/{len(prof_assets)} asset abbinati'
-    return (out1, out2, out3, chk1, chk2, chk3, msg,
+    return (out1, out2, out3, chk1, chk2, chk3, chk_port, msg,
             {**_FPIO_OVERLAY, 'display': 'none'})
 
 
