@@ -134,6 +134,53 @@ def _xlsx_path(filename='ETF.xlsx'):
         return str(fp)
     return _XLSX  # fallback al file locale
 
+
+_HEADER_KEYS = {'TICKER', 'ISIN', 'SIMBOLO', 'SYMBOL', 'CODICE', 'CODE',
+                'TITOLO', 'CUSIP'}
+
+def _read_asset_excel(source):
+    """
+    Legge un Excel di asset gestendo eventuali righe-titolo sopra le intestazioni.
+    Se le intestazioni reali (TICKER/ISIN/…) non sono nella prima riga ma più sotto
+    (es. una riga 'Tabella 1' iniziale), trova la riga di intestazione corretta e
+    scarta tutto ciò che la precede. Per i file prezzi (date + numeri) o con header
+    già corretto ricade sulla lettura standard.
+    source: bytes/bytearray oppure percorso/file-like.
+    """
+    import io as _io_ra
+
+    def _mk():
+        return _io_ra.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
+
+    try:
+        raw = pd.read_excel(_mk(), header=None)
+    except Exception:
+        return pd.read_excel(_mk())
+
+    hdr_idx = None
+    for i in range(min(6, len(raw))):
+        vals = [str(x).strip().upper() for x in raw.iloc[i].tolist()]
+        if any(v in _HEADER_KEYS for v in vals):
+            hdr_idx = i
+            break
+
+    if hdr_idx is None:
+        # Nessuna intestazione asset riconosciuta → lettura standard (es. file prezzi)
+        return pd.read_excel(_mk())
+
+    cols = [str(x).strip() for x in raw.iloc[hdr_idx].tolist()]
+    df = raw.iloc[hdr_idx + 1:].copy()
+    df.columns = cols
+    df = df.dropna(how='all').reset_index(drop=True)
+    # Scarta colonne senza nome / 'nan'
+    keep = [c for c in df.columns if c and str(c).strip().lower() != 'nan']
+    df = df.loc[:, keep]
+    # Sicurezza: rimuovi eventuali righe-intestazione duplicate tra i dati
+    if len(df.columns):
+        c0 = df[df.columns[0]].astype(str).str.strip().str.upper()
+        df = df[~c0.isin(_HEADER_KEYS)].reset_index(drop=True)
+    return df
+
 # Rotta Flask per servire la pagina profilo
 @app.server.route('/health')
 def health_check():
@@ -1179,7 +1226,7 @@ def _run_isin_conversion(file_bytes, username, req_id):
             return True
 
     try:
-        df = pd.read_excel(_io.BytesIO(file_bytes))
+        df = _read_asset_excel(file_bytes)
     except Exception as e:
         _upd(running=False, done=True, progress=f'⚠ Errore lettura file: {e}')
         return
@@ -2598,7 +2645,7 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
             decoded  = base64.b64decode(content_string)
             done_ts  = _time.time()
 
-            df        = pd.read_excel(io.BytesIO(decoded))
+            df        = _read_asset_excel(decoded)
             col_names = df.columns.tolist()
 
             is_price_file = False
