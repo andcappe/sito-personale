@@ -3698,7 +3698,7 @@ def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
         return '⚠ Scrivi un nome nuovo o scegli un\'analisi da sovrascrivere', no_update, no_update, no_update
 
     col = col if col in ('P1', 'P2', 'P3') else 'P1'
-    # Leggi i pesi della colonna scelta dalla griglia (fonte di verità)
+    # 1) Pesi dalla griglia (immediati ma a volte desincronizzati se la pagina è in cache)
     weights = {}
     for inp_id, val in zip(all_ids or [], all_vals or []):
         idx = inp_id['index']
@@ -3707,6 +3707,13 @@ def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
                 weights[idx[3:]] = float(val)
             except (TypeError, ValueError):
                 pass
+    # 2) Fallback robusto: leggi da current.json (file persistito lato server)
+    if not weights:
+        ns = _read_user_json(_u)
+        weights = {a: float(v.get(col, 0) or 0) for a, v in (ns or {}).items()
+                   if v.get(col, 0)}
+    print(f"[PIO-EXPORT] col={col} | griglia+json={len(weights)} asset "
+          f"{list(weights.items())[:4]}", flush=True)
     if not weights:
         return f'⚠ La colonna {col} non ha pesi da esportare', no_update, no_update, no_update
 
