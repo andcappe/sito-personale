@@ -989,7 +989,7 @@ def update_sort_state(n_clicks_list, current_sort):
     Output('rend-perf-table', 'children'),
     Input('rend-perf-data', 'data'),
     Input('rend-sort-state', 'data'),
-    State('rend-akr-filter-store', 'data'),
+    Input('rend-akr-filter-store', 'data'),
     prevent_initial_call=True,
 )
 def render_table(perf_data, sort_state, akr_filter):
@@ -1006,25 +1006,23 @@ def render_table(perf_data, sort_state, akr_filter):
     benchmark  = perf_data.get('benchmark', '')
     akr_filter = akr_filter or 'all'
 
-    # Applica filtro AKR (solo asset, mai portafogli)
+    # Filtro AKR (solo asset, mai portafogli): NON nasconde le righe, ma
+    # evidenzia in rosso gli asset che soddisfano la soglia (AKR > threshold).
     threshold = None
     if akr_filter == 'gt_minus1':
         threshold = -1.0
     elif akr_filter == 'gt_0':
         threshold = 0.0
 
+    akr_highlight = set()
     if threshold is not None:
-        filtered = []
         for row in rows_data:
             if row.get('is_portfolio'):
-                filtered.append(row)
                 continue
             akr_val = row.get('AKR')
             if akr_val is not None and not (isinstance(akr_val, float) and np.isnan(akr_val)):
-                if akr_val <= threshold:
-                    continue
-            filtered.append(row)
-        rows_data = filtered
+                if akr_val > threshold:
+                    akr_highlight.add(row['name'])
 
     ret_cols = ['YTD', '2025', '2024', '2023', 'T-30', 'T-60', 'T-90', 'T-180', 'T-250', 'T-500', 'T-750']
     ir_cols  = ['IR-30', 'IR-60', 'IR-100', 'IR-250']
@@ -1090,11 +1088,12 @@ def render_table(perf_data, sort_state, akr_filter):
         is_portfolio = row['is_portfolio']
         row_bg = '#dce8ff' if is_portfolio else ('#ffffff' if row_idx % 2 == 0 else '#f8f8f8')
 
+        is_akr_hit = (not is_portfolio) and (item in akr_highlight)
         name_style = {
             'padding': '8px 10px', 'fontSize': '11px',
-            'fontWeight': 'bold' if is_portfolio else 'normal',
-            'color': '#0066cc' if is_portfolio else '#222',
-            'backgroundColor': row_bg,
+            'fontWeight': 'bold' if (is_portfolio or is_akr_hit) else 'normal',
+            'color': '#0066cc' if is_portfolio else ('#c0392b' if is_akr_hit else '#222'),
+            'backgroundColor': '#fdecea' if is_akr_hit else row_bg,
             'position': 'sticky', 'left': '0', 'zIndex': '1',
             'border': '1px solid #ddd', 'whiteSpace': 'nowrap', 'minWidth': '160px',
         }
