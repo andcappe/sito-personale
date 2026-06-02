@@ -2306,18 +2306,23 @@ app.layout = html.Div([
                                             'color': '#1a3a5c', 'margin-bottom': '6px'}),
                 dcc.Dropdown(id='pio-imp-profile', placeholder='Scegli un profilo…',
                              style={'font-size': '11px', 'margin-bottom': '10px'}),
-                html.Div('Portafogli da importare:',
+                html.Div('Portafoglio da importare:',
                          style={'font-size': '11px', 'font-weight': '600',
                                 'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Checklist(id='pio-imp-list', options=[], value=[],
-                              inputStyle={'margin-right': '6px'},
-                              labelStyle={'display': 'block', 'font-size': '11px',
-                                          'margin-bottom': '3px'},
-                              style={'margin-bottom': '8px', 'max-height': '160px',
-                                     'overflow-y': 'auto'}),
-                html.Div('I selezionati riempiranno P1, P2, P3 nell\'ordine di selezione (max 3).',
-                         style={'font-size': '10px', 'color': '#888', 'font-style': 'italic',
-                                'margin-bottom': '10px'}),
+                dcc.Dropdown(id='pio-imp-list', options=[], placeholder='Scegli un portafoglio…',
+                             style={'font-size': '11px', 'margin-bottom': '10px'}),
+                html.Div('Metti nella colonna:',
+                         style={'font-size': '11px', 'font-weight': '600',
+                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
+                dcc.RadioItems(id='pio-imp-target',
+                               options=[{'label': ' P1', 'value': 'P1'},
+                                        {'label': ' P2', 'value': 'P2'},
+                                        {'label': ' P3', 'value': 'P3'}],
+                               value='P1', inline=True,
+                               inputStyle={'margin-right': '4px'},
+                               labelStyle={'margin-right': '16px', 'font-size': '12px',
+                                           'font-weight': '600'},
+                               style={'margin-bottom': '12px'}),
                 html.Button('📥 Importa', id='pio-imp-btn', n_clicks=0,
                             style={'background': '#1a3a5c', 'color': 'white', 'border': 'none',
                                    'padding': '7px 16px', 'border-radius': '4px',
@@ -3677,7 +3682,7 @@ def toggle_pio(open_n, close_n):
 def pio_reset(n):
     if not n:
         raise PreventUpdate
-    return 'export', None, [], [], '', '', ''
+    return 'export', None, [], None, '', '', ''
 
 
 @app.callback(
@@ -3751,10 +3756,10 @@ def pio_export(n, slots, n1, n2, n3, all_ids, all_vals, prof_sel, prof_new, mode
 )
 def pio_populate_import_list(profile):
     if not profile:
-        return [], []
+        return [], None
     prof = _sm.get_profile(_get_username(), profile)
     names = list((prof.get('portfolios') or {}).keys())
-    return [{'label': f' {nm}', 'value': nm} for nm in names], []
+    return [{'label': nm, 'value': nm} for nm in names], None
 
 
 @app.callback(
@@ -3768,40 +3773,46 @@ def pio_populate_import_list(profile):
     Input('pio-imp-btn', 'n_clicks'),
     State('pio-imp-profile', 'value'),
     State('pio-imp-list',    'value'),
+    State('pio-imp-target',  'value'),
+    State('weights-store-P1', 'data'),
+    State('weights-store-P2', 'data'),
+    State('weights-store-P3', 'data'),
     State({'type': 'weight-input', 'index': ALL}, 'id'),
     State({'type': 'weight-input', 'index': ALL}, 'value'),
     State('update-portfolio-button', 'n_clicks'),
     prevent_initial_call=True,
 )
-def pio_import(n, profile, selected, all_ids, all_vals, cur_clicks):
+def pio_import(n, profile, portfolio, target, p1d, p2d, p3d,
+               all_ids, all_vals, cur_clicks):
     if not n:
         raise PreventUpdate
-    if not profile or not selected:
+    if not profile or not portfolio:
         return (no_update, no_update, no_update, no_update, no_update,
-                '⚠ Scegli un profilo e almeno un portafoglio', no_update)
+                '⚠ Scegli un profilo e un portafoglio', no_update)
+    target = target if target in ('P1', 'P2', 'P3') else 'P1'
     ports = (_sm.get_profile(_get_username(), profile).get('portfolios') or {})
-    chosen = list(selected)[:3]
-    slots = ['P1', 'P2', 'P3']
-    slot_w = {'P1': {}, 'P2': {}, 'P3': {}}
-    for i, pname in enumerate(chosen):
-        slot_w[slots[i]] = {a: float(v) for a, v in (ports.get(pname) or {}).items()}
-    w1, w2, w3 = slot_w['P1'], slot_w['P2'], slot_w['P3']
+    imported = {a: float(v) for a, v in (ports.get(portfolio) or {}).items()}
+    if not imported:
+        return (no_update, no_update, no_update, no_update, no_update,
+                '⚠ Portafoglio vuoto', no_update)
 
+    # Pesi correnti delle 3 colonne: si tocca solo la colonna target
+    slot = {'P1': dict(p1d or {}), 'P2': dict(p2d or {}), 'P3': dict(p3d or {})}
+    slot[target] = imported
+
+    # Aggiorna la griglia: solo le celle della colonna target
     new_vals = []
     for inp_id, curv in zip(all_ids or [], all_vals or []):
         idx = inp_id['index']
-        if idx.startswith('P1-'):
-            new_vals.append(w1.get(idx[3:], 0) if w1 else curv)
-        elif idx.startswith('P2-'):
-            new_vals.append(w2.get(idx[3:], 0) if w2 else curv)
-        elif idx.startswith('P3-'):
-            new_vals.append(w3.get(idx[3:], 0) if w3 else curv)
+        if idx.startswith(target + '-'):
+            new_vals.append(imported.get(idx[3:], 0))
         else:
             new_vals.append(curv)
 
-    _update_user_json(weights={'P1': w1, 'P2': w2, 'P3': w3}, username=_get_username())
-    msg = f'✓ Importati in P1/P2/P3: {", ".join(chosen)}'
-    return (w1 or no_update, w2 or no_update, w3 or no_update, new_vals,
+    _update_user_json(weights={'P1': slot['P1'], 'P2': slot['P2'], 'P3': slot['P3']},
+                      username=_get_username())
+    msg = f'✓ "{portfolio}" importato nella colonna {target}'
+    return (slot['P1'], slot['P2'], slot['P3'], new_vals,
             (cur_clicks or 0) + 1, msg, {**_PIO_OVERLAY, 'display': 'none'})
 
 
