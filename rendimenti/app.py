@@ -1092,8 +1092,8 @@ def render_table(perf_data, sort_state, akr_filter):
         name_style = {
             'padding': '8px 10px', 'fontSize': '11px',
             'fontWeight': 'bold' if (is_portfolio or is_akr_hit) else 'normal',
-            'color': '#0066cc' if is_portfolio else ('#c0392b' if is_akr_hit else '#222'),
-            'backgroundColor': '#fdecea' if is_akr_hit else row_bg,
+            'color': '#0066cc' if is_portfolio else ('#ffffff' if is_akr_hit else '#222'),
+            'backgroundColor': '#e53935' if is_akr_hit else row_bg,
             'position': 'sticky', 'left': '0', 'zIndex': '1',
             'border': '1px solid #ddd', 'whiteSpace': 'nowrap', 'minWidth': '160px',
         }
