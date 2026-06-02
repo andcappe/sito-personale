@@ -23,7 +23,6 @@ if _sys_path not in sys.path:
     sys.path.insert(0, _sys_path)
 from settings.browser_css import BROWSER_RESET_CSS
 from navbar import make_navbar
-import sessions_manager as _sm
 
 # ─── App ─────────────────────────────────────────────────────────────────────
 _EXT = [
@@ -291,94 +290,6 @@ app.layout = html.Div([
     dcc.Store(id='rend-sync-sig', data=''),
     dcc.Interval(id='rend-live-sync', interval=2000, n_intervals=0, disabled=False),
 
-    # ── Modal Importa/Esporta Portafoglio ─────────────────────────────────────
-    html.Div(id='rpio-overlay',
-             style={'display': 'none', 'position': 'fixed', 'top': '0', 'left': '0',
-                    'width': '100%', 'height': '100%', 'zIndex': '9000',
-                    'background': 'rgba(0,0,0,0.45)', 'alignItems': 'center',
-                    'justifyContent': 'center'},
-             children=[
-        html.Div([
-            html.Div([
-                html.Span('🔄 Importa / Esporta Portafoglio',
-                          style={'fontWeight': '700', 'fontSize': '14px', 'color': '#1a3a5c'}),
-                html.Button('✕', id='rpio-close', n_clicks=0,
-                            style={'background': 'none', 'border': 'none', 'fontSize': '18px',
-                                   'cursor': 'pointer', 'color': '#666', 'float': 'right'}),
-            ], style={'display': 'flex', 'justifyContent': 'space-between',
-                      'alignItems': 'center', 'marginBottom': '12px'}),
-
-            dcc.RadioItems(id='rpio-mode',
-                           options=[{'label': ' 📤 Esporta P1/P2/P3', 'value': 'export'},
-                                    {'label': ' 📥 Importa', 'value': 'import'}],
-                           value='export', inline=True,
-                           inputStyle={'marginRight': '4px'},
-                           labelStyle={'marginRight': '18px', 'fontSize': '12px', 'fontWeight': '600'},
-                           style={'marginBottom': '14px', 'paddingBottom': '10px',
-                                  'borderBottom': '1px solid #eee'}),
-
-            # Esporta
-            html.Div(id='rpio-export-view', children=[
-                html.Div('Quali portafogli esportare:',
-                         style={'fontSize': '11px', 'fontWeight': '600', 'color': '#1a3a5c',
-                                'marginBottom': '6px'}),
-                dcc.Checklist(id='rpio-exp-slots',
-                              options=[{'label': f' {s}', 'value': s} for s in ('P1', 'P2', 'P3')],
-                              value=['P1', 'P2', 'P3'], inline=True,
-                              inputStyle={'marginRight': '4px'},
-                              labelStyle={'marginRight': '16px', 'fontSize': '11px'},
-                              style={'marginBottom': '8px'}),
-                html.Div([
-                    html.Span('Nomi:', style={'fontSize': '10px', 'color': '#666', 'marginRight': '6px'}),
-                    dcc.Input(id='rpio-exp-name-P1', value='P1', style={'width': '90px', 'fontSize': '11px', 'marginRight': '4px'}),
-                    dcc.Input(id='rpio-exp-name-P2', value='P2', style={'width': '90px', 'fontSize': '11px', 'marginRight': '4px'}),
-                    dcc.Input(id='rpio-exp-name-P3', value='P3', style={'width': '90px', 'fontSize': '11px'}),
-                ], style={'marginBottom': '12px'}),
-                html.Div('Salva nel profilo:', style={'fontSize': '11px', 'fontWeight': '600',
-                         'color': '#1a3a5c', 'marginBottom': '6px'}),
-                dcc.Dropdown(id='rpio-exp-profile', placeholder='Profilo esistente…',
-                             style={'fontSize': '11px', 'marginBottom': '6px'}),
-                dcc.Input(id='rpio-exp-new', placeholder='…oppure nuovo profilo',
-                          style={'width': '100%', 'fontSize': '11px', 'marginBottom': '8px',
-                                 'padding': '5px 8px', 'border': '1px solid #aaa', 'borderRadius': '4px'}),
-                dcc.RadioItems(id='rpio-exp-mode',
-                               options=[{'label': ' Aggiungi al profilo', 'value': 'merge'},
-                                        {'label': ' Sostituisci profilo', 'value': 'replace'}],
-                               value='merge', inline=True,
-                               inputStyle={'marginRight': '4px'},
-                               labelStyle={'marginRight': '14px', 'fontSize': '10px'},
-                               style={'marginBottom': '12px'}),
-                html.Button('📤 Esporta', id='rpio-exp-btn', n_clicks=0,
-                            style={'background': '#1b7a34', 'color': 'white', 'border': 'none',
-                                   'padding': '7px 16px', 'borderRadius': '4px', 'cursor': 'pointer',
-                                   'fontSize': '12px', 'fontWeight': 'bold'}),
-                html.Div(id='rpio-exp-status', style={'fontSize': '11px', 'marginTop': '8px', 'minHeight': '16px'}),
-            ]),
-
-            # Importa
-            html.Div(id='rpio-import-view', style={'display': 'none'}, children=[
-                html.Div('Profilo:', style={'fontSize': '11px', 'fontWeight': '600',
-                         'color': '#1a3a5c', 'marginBottom': '6px'}),
-                dcc.Dropdown(id='rpio-imp-profile', placeholder='Scegli un profilo…',
-                             style={'fontSize': '11px', 'marginBottom': '10px'}),
-                html.Div('Portafogli da importare:', style={'fontSize': '11px', 'fontWeight': '600',
-                         'color': '#1a3a5c', 'marginBottom': '6px'}),
-                dcc.Checklist(id='rpio-imp-list', options=[], value=[],
-                              inputStyle={'marginRight': '6px'},
-                              labelStyle={'display': 'block', 'fontSize': '11px', 'marginBottom': '3px'},
-                              style={'marginBottom': '8px', 'maxHeight': '160px', 'overflowY': 'auto'}),
-                html.Div('I selezionati riempiranno P1, P2, P3 nell\'ordine (max 3).',
-                         style={'fontSize': '10px', 'color': '#888', 'fontStyle': 'italic', 'marginBottom': '10px'}),
-                html.Button('📥 Importa', id='rpio-imp-btn', n_clicks=0,
-                            style={'background': '#1a3a5c', 'color': 'white', 'border': 'none',
-                                   'padding': '7px 16px', 'borderRadius': '4px', 'cursor': 'pointer',
-                                   'fontSize': '12px', 'fontWeight': 'bold'}),
-                html.Div(id='rpio-imp-status', style={'fontSize': '11px', 'marginTop': '8px', 'minHeight': '16px'}),
-            ]),
-        ], style={'background': 'white', 'borderRadius': '10px', 'padding': '20px 24px',
-                  'width': '460px', 'boxShadow': '0 4px 24px rgba(0,0,0,0.18)', 'position': 'relative'}),
-    ]),
-
     html.Div([
 
         # ── Barra controlli — riga 1 ───────────────────────────────────────
@@ -454,17 +365,10 @@ app.layout = html.Div([
                 'border': '1px solid #d0d8e8', 'borderRadius': '5px',
                 'marginRight': '8px',
             }),
-            html.Button('🔄 Importa/Esporta Portafoglio', id='rpio-btn', n_clicks=0,
-                        title='Importa profili salvati in P1/P2/P3 o esportali in un profilo',
-                        style={'background': '#1a7a4a', 'color': 'white', 'border': 'none',
-                               'padding': '4px 12px', 'borderRadius': '4px', 'cursor': 'pointer',
-                               'fontWeight': 'bold', 'fontSize': '10px', 'marginLeft': 'auto',
-                               'whiteSpace': 'nowrap',
-                               'boxShadow': '0 2px 6px rgba(26,122,74,0.35)'}),
             html.Button('Aggiorna Tabella', id='rend-update-btn', n_clicks=0, style={
                 'background': '#c0392b', 'color': 'white', 'border': 'none',
                 'padding': '4px 14px', 'borderRadius': '4px', 'cursor': 'pointer',
-                'fontWeight': 'bold', 'fontSize': '10px',
+                'fontWeight': 'bold', 'fontSize': '10px', 'marginLeft': 'auto',
                 'whiteSpace': 'nowrap',
                 'boxShadow': '0 2px 6px rgba(192,57,43,0.4)',
             }),
@@ -1347,164 +1251,3 @@ def rend_live_sync(_, sig):
     return (op.to_json(orient='split', date_format='iso'),
             cr.to_json(orient='split', date_format='iso'),
             label, new_sig)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# IMPORTA / ESPORTA PORTAFOGLIO — profili condivisi (sessions_manager)
-# ═════════════════════════════════════════════════════════════════════════════
-_RPIO_OVERLAY = {'position': 'fixed', 'top': '0', 'left': '0', 'width': '100%',
-                 'height': '100%', 'zIndex': '9000', 'background': 'rgba(0,0,0,0.45)',
-                 'alignItems': 'center', 'justifyContent': 'center'}
-
-
-@app.callback(
-    Output('rpio-overlay',     'style'),
-    Output('rpio-exp-profile', 'options'),
-    Output('rpio-imp-profile', 'options'),
-    Input('rpio-btn',   'n_clicks'),
-    Input('rpio-close', 'n_clicks'),
-    prevent_initial_call=True,
-)
-def rpio_toggle(open_n, close_n):
-    if callback_context.triggered_id == 'rpio-btn':
-        opts = [{'label': p, 'value': p} for p in _sm.list_profiles(_get_username())]
-        return {**_RPIO_OVERLAY, 'display': 'flex'}, opts, opts
-    return {**_RPIO_OVERLAY, 'display': 'none'}, no_update, no_update
-
-
-@app.callback(
-    Output('rpio-mode',        'value',    allow_duplicate=True),
-    Output('rpio-imp-profile', 'value',    allow_duplicate=True),
-    Output('rpio-imp-list',    'options',  allow_duplicate=True),
-    Output('rpio-imp-list',    'value',    allow_duplicate=True),
-    Output('rpio-imp-status',  'children', allow_duplicate=True),
-    Output('rpio-exp-status',  'children', allow_duplicate=True),
-    Output('rpio-exp-new',     'value',    allow_duplicate=True),
-    Input('rpio-btn', 'n_clicks'),
-    prevent_initial_call=True,
-)
-def rpio_reset(n):
-    if not n:
-        raise PreventUpdate
-    return 'export', None, [], [], '', '', ''
-
-
-@app.callback(
-    Output('rpio-export-view', 'style'),
-    Output('rpio-import-view', 'style'),
-    Input('rpio-mode', 'value'),
-)
-def rpio_switch_view(mode):
-    if mode == 'import':
-        return {'display': 'none'}, {'display': 'block'}
-    return {'display': 'block'}, {'display': 'none'}
-
-
-@app.callback(
-    Output('rpio-exp-status',  'children'),
-    Output('rpio-exp-profile', 'options', allow_duplicate=True),
-    Output('rpio-imp-profile', 'options', allow_duplicate=True),
-    Output('rpio-exp-new',     'value'),
-    Input('rpio-exp-btn', 'n_clicks'),
-    State('rpio-exp-slots', 'value'),
-    State('rpio-exp-name-P1', 'value'),
-    State('rpio-exp-name-P2', 'value'),
-    State('rpio-exp-name-P3', 'value'),
-    State({'type': 'rend-weight', 'index': ALL}, 'id'),
-    State({'type': 'rend-weight', 'index': ALL}, 'value'),
-    State('rpio-exp-profile', 'value'),
-    State('rpio-exp-new',     'value'),
-    State('rpio-exp-mode',    'value'),
-    prevent_initial_call=True,
-)
-def rpio_export(n, slots, n1, n2, n3, all_ids, all_vals, prof_sel, prof_new, mode):
-    if not n:
-        raise PreventUpdate
-    u = _get_username()
-    profile = (prof_new or '').strip() or (prof_sel or '').strip()
-    if not profile:
-        return '⚠ Scegli un profilo o scrivi un nuovo nome', no_update, no_update, no_update
-    slots = slots or []
-    names = {'P1': (n1 or 'P1').strip(), 'P2': (n2 or 'P2').strip(), 'P3': (n3 or 'P3').strip()}
-    cur = {'P1': {}, 'P2': {}, 'P3': {}}
-    for inp_id, val in zip(all_ids or [], all_vals or []):
-        idx = inp_id['index']
-        for s in ('P1', 'P2', 'P3'):
-            if idx.startswith(s + '-') and val:
-                try:
-                    cur[s][idx[3:]] = float(val)
-                except (TypeError, ValueError):
-                    pass
-    portfolios = {}
-    for s in ('P1', 'P2', 'P3'):
-        if s in slots and cur[s]:
-            portfolios[names[s]] = cur[s]
-    if not portfolios:
-        return '⚠ Nessun peso da esportare negli slot selezionati', no_update, no_update, no_update
-    ok = _sm.export_portfolios(u, profile, portfolios, mode=mode)
-    opts = [{'label': p, 'value': p} for p in _sm.list_profiles(u)]
-    if ok:
-        return f'✅ Esportato in "{profile}": {", ".join(portfolios.keys())}', opts, opts, ''
-    return '⚠ Errore durante l\'esportazione', no_update, no_update, no_update
-
-
-@app.callback(
-    Output('rpio-imp-list', 'options'),
-    Output('rpio-imp-list', 'value'),
-    Input('rpio-imp-profile', 'value'),
-    prevent_initial_call=True,
-)
-def rpio_populate_import(profile):
-    if not profile:
-        return [], []
-    ports = (_sm.get_profile(_get_username(), profile).get('portfolios') or {})
-    return [{'label': f' {nm}', 'value': nm} for nm in ports.keys()], []
-
-
-@app.callback(
-    Output('rend-weights-p1', 'data', allow_duplicate=True),
-    Output('rend-weights-p2', 'data', allow_duplicate=True),
-    Output('rend-weights-p3', 'data', allow_duplicate=True),
-    Output({'type': 'rend-weight', 'index': ALL}, 'value', allow_duplicate=True),
-    Output('rend-update-btn', 'n_clicks', allow_duplicate=True),
-    Output('rpio-imp-status', 'children'),
-    Output('rpio-overlay',    'style', allow_duplicate=True),
-    Input('rpio-imp-btn', 'n_clicks'),
-    State('rpio-imp-profile', 'value'),
-    State('rpio-imp-list',    'value'),
-    State({'type': 'rend-weight', 'index': ALL}, 'id'),
-    State({'type': 'rend-weight', 'index': ALL}, 'value'),
-    State('rend-update-btn', 'n_clicks'),
-    prevent_initial_call=True,
-)
-def rpio_import(n, profile, selected, all_ids, all_vals, cur_clicks):
-    if not n:
-        raise PreventUpdate
-    all_ids = all_ids or []
-    if not profile or not selected:
-        return (no_update, no_update, no_update,
-                [no_update] * len(all_ids), no_update,
-                '⚠ Scegli un profilo e almeno un portafoglio', no_update)
-    ports  = (_sm.get_profile(_get_username(), profile).get('portfolios') or {})
-    chosen = list(selected)[:3]
-    slots  = ['P1', 'P2', 'P3']
-    slot_w = {'P1': {}, 'P2': {}, 'P3': {}}
-    for i, pname in enumerate(chosen):
-        slot_w[slots[i]] = {a: float(v) for a, v in (ports.get(pname) or {}).items()}
-    w1, w2, w3 = slot_w['P1'], slot_w['P2'], slot_w['P3']
-
-    new_vals = []
-    for inp_id, curv in zip(all_ids, all_vals or []):
-        idx = inp_id['index']
-        if idx.startswith('P1-'):
-            new_vals.append(w1.get(idx[3:], 0) if w1 else curv)
-        elif idx.startswith('P2-'):
-            new_vals.append(w2.get(idx[3:], 0) if w2 else curv)
-        elif idx.startswith('P3-'):
-            new_vals.append(w3.get(idx[3:], 0) if w3 else curv)
-        else:
-            new_vals.append(curv)
-
-    msg = f'✓ Importati in P1/P2/P3: {", ".join(chosen)}'
-    return (w1 or no_update, w2 or no_update, w3 or no_update, new_vals,
-            (cur_clicks or 0) + 1, msg, {**_RPIO_OVERLAY, 'display': 'none'})
