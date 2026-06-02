@@ -478,6 +478,14 @@ def load_default_data(_):
             html.Span(info_parts), p1, p2, p3)
 
 
+# Stile base del nome asset nella griglia di selezione (sinistra)
+_RASSET_BASE = {
+    'fontWeight': 'bold', 'overflow': 'hidden', 'whiteSpace': 'nowrap',
+    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
+    'fontFamily': 'Inter, sans-serif',
+}
+
+
 # ─── Callback 2: Costruisce la griglia asset ──────────────────────────────────
 @app.callback(
     Output('rend-asset-grid', 'children'),
@@ -580,12 +588,8 @@ def build_asset_grid(stock_json, selected, p1, p2, p3):
 
         row = html.Div([
             html.Div(
-                html.Span(asset, style={
-                    'color': '#1a3a5c', 'fontWeight': 'bold',
-                    'overflow': 'hidden', 'whiteSpace': 'nowrap',
-                    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
-                    'fontFamily': 'Inter, sans-serif',
-                }),
+                html.Span(asset, id={'type': 'rend-asset-name', 'index': asset},
+                          style={**_RASSET_BASE, 'color': '#1a3a5c'}),
                 style={'width': '35%', 'height': '22px', 'display': 'flex',
                        'alignItems': 'center', 'paddingLeft': '4px', 'overflow': 'hidden'},
             ),
@@ -1188,6 +1192,34 @@ def render_table(perf_data, sort_state, akr_filter):
     })
 
     return html.Div([info_bar, table])
+
+
+# ─── Colora di rosso i nomi asset nella griglia di sinistra se passano AKR ───
+@app.callback(
+    Output({'type': 'rend-asset-name', 'index': ALL}, 'style'),
+    Input('rend-perf-data',        'data'),
+    Input('rend-akr-filter-store', 'data'),
+    State({'type': 'rend-asset-name', 'index': ALL}, 'id'),
+    prevent_initial_call=True,
+)
+def color_asset_names(perf_data, akr_filter, ids):
+    ids = ids or []
+    threshold = (-1.0 if akr_filter == 'gt_minus1'
+                 else 0.0 if akr_filter == 'gt_0' else None)
+    akr_map = {}
+    if perf_data and perf_data.get('rows'):
+        for r in perf_data['rows']:
+            if not r.get('is_portfolio'):
+                akr_map[r['name']] = r.get('AKR')
+    out = []
+    for d in ids:
+        hit = False
+        if threshold is not None:
+            v = akr_map.get(d['index'])
+            if v is not None and not (isinstance(v, float) and np.isnan(v)) and v > threshold:
+                hit = True
+        out.append({**_RASSET_BASE, 'color': '#e53935' if hit else '#1a3a5c'})
+    return out
 
 
 # ─── Sync live con portafoglio: aggiorna dati quando la lista asset cambia ───
