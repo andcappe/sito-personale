@@ -2256,25 +2256,25 @@ app.layout = html.Div([
 
             # ── ESPORTA ───────────────────────────────────────────────────────
             html.Div(id='pio-export-view', children=[
-                html.Div('Quali portafogli esportare:',
+                html.Div('Colonna da esportare:',
                          style={'font-size': '11px', 'font-weight': '600',
                                 'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Checklist(id='pio-exp-slots',
-                              options=[{'label': f' {s}', 'value': s} for s in ('P1', 'P2', 'P3')],
-                              value=['P1', 'P2', 'P3'], inline=True,
-                              inputStyle={'margin-right': '4px'},
-                              labelStyle={'margin-right': '16px', 'font-size': '11px'},
-                              style={'margin-bottom': '8px'}),
-                html.Div([
-                    html.Span('Nomi:', style={'font-size': '10px', 'color': '#666',
-                                              'margin-right': '6px'}),
-                    dcc.Input(id='pio-exp-name-P1', value='P1', placeholder='nome P1',
-                              style={'width': '90px', 'font-size': '11px', 'margin-right': '4px'}),
-                    dcc.Input(id='pio-exp-name-P2', value='P2', placeholder='nome P2',
-                              style={'width': '90px', 'font-size': '11px', 'margin-right': '4px'}),
-                    dcc.Input(id='pio-exp-name-P3', value='P3', placeholder='nome P3',
-                              style={'width': '90px', 'font-size': '11px'}),
-                ], style={'margin-bottom': '12px'}),
+                dcc.RadioItems(id='pio-exp-col',
+                               options=[{'label': ' P1', 'value': 'P1'},
+                                        {'label': ' P2', 'value': 'P2'},
+                                        {'label': ' P3', 'value': 'P3'}],
+                               value='P1', inline=True,
+                               inputStyle={'margin-right': '4px'},
+                               labelStyle={'margin-right': '16px', 'font-size': '12px',
+                                           'font-weight': '600'},
+                               style={'margin-bottom': '10px'}),
+                html.Div('Nome portafoglio:',
+                         style={'font-size': '11px', 'font-weight': '600',
+                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
+                dcc.Input(id='pio-exp-pname', placeholder='Es. Difensivo',
+                          style={'width': '100%', 'font-size': '11px', 'margin-bottom': '10px',
+                                 'padding': '5px 8px', 'border': '1px solid #aaa',
+                                 'border-radius': '4px'}),
 
                 html.Div('Salva nel profilo:',
                          style={'font-size': '11px', 'font-weight': '600',
@@ -3702,10 +3702,8 @@ def pio_switch_view(mode):
     Output('pio-imp-profile', 'options', allow_duplicate=True),
     Output('pio-exp-new',     'value'),
     Input('pio-exp-btn', 'n_clicks'),
-    State('pio-exp-slots',    'value'),
-    State('pio-exp-name-P1',  'value'),
-    State('pio-exp-name-P2',  'value'),
-    State('pio-exp-name-P3',  'value'),
+    State('pio-exp-col',     'value'),
+    State('pio-exp-pname',   'value'),
     State({'type': 'weight-input', 'index': ALL}, 'id'),
     State({'type': 'weight-input', 'index': ALL}, 'value'),
     State('pio-exp-profile', 'value'),
@@ -3713,38 +3711,33 @@ def pio_switch_view(mode):
     State('pio-exp-mode',    'value'),
     prevent_initial_call=True,
 )
-def pio_export(n, slots, n1, n2, n3, all_ids, all_vals, prof_sel, prof_new, mode):
+def pio_export(n, col, pname, all_ids, all_vals, prof_sel, prof_new, mode):
     if not n:
         raise PreventUpdate
     _u = _get_username()
     profile = (prof_new or '').strip() or (prof_sel or '').strip()
     if not profile:
-        return '⚠ Scegli un profilo esistente o scrivi un nuovo nome', no_update, no_update, no_update
+        return '⚠ Scegli un profilo o scrivi un nuovo nome', no_update, no_update, no_update
 
-    slots = slots or []
-    names = {'P1': (n1 or 'P1').strip(), 'P2': (n2 or 'P2').strip(), 'P3': (n3 or 'P3').strip()}
-    # Leggi i pesi correnti dalla griglia (fonte di verità)
-    cur = {'P1': {}, 'P2': {}, 'P3': {}}
+    col = col if col in ('P1', 'P2', 'P3') else 'P1'
+    pname = (pname or col).strip() or col
+
+    # Leggi i pesi della colonna scelta dalla griglia (fonte di verità)
+    weights = {}
     for inp_id, val in zip(all_ids or [], all_vals or []):
         idx = inp_id['index']
-        for s in ('P1', 'P2', 'P3'):
-            if idx.startswith(s + '-') and val:
-                try:
-                    cur[s][idx[3:]] = float(val)
-                except (TypeError, ValueError):
-                    pass
+        if idx.startswith(col + '-') and val:
+            try:
+                weights[idx[3:]] = float(val)
+            except (TypeError, ValueError):
+                pass
+    if not weights:
+        return f'⚠ La colonna {col} non ha pesi da esportare', no_update, no_update, no_update
 
-    portfolios = {}
-    for s in ('P1', 'P2', 'P3'):
-        if s in slots and cur[s]:
-            portfolios[names[s]] = cur[s]
-    if not portfolios:
-        return '⚠ Nessun peso da esportare negli slot selezionati', no_update, no_update, no_update
-
-    ok = _sm.export_portfolios(_u, profile, portfolios, mode=mode)
+    ok = _sm.export_portfolios(_u, profile, {pname: weights}, mode=mode)
     opts = [{'label': p, 'value': p} for p in _sm.list_profiles(_u)]
     if ok:
-        return (f'✅ Esportato in "{profile}": {", ".join(portfolios.keys())}', opts, opts, '')
+        return (f'✅ {col} salvato come "{pname}" nel profilo "{profile}"', opts, opts, '')
     return '⚠ Errore durante l\'esportazione', no_update, no_update, no_update
 
 
