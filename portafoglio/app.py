@@ -2256,7 +2256,7 @@ app.layout = html.Div([
 
             # ── ESPORTA ───────────────────────────────────────────────────────
             html.Div(id='pio-export-view', children=[
-                html.Div('Colonna da esportare:',
+                html.Div('1. Colonna da esportare:',
                          style={'font-size': '11px', 'font-weight': '600',
                                 'color': '#1a3a5c', 'margin-bottom': '6px'}),
                 dcc.RadioItems(id='pio-exp-col',
@@ -2267,31 +2267,16 @@ app.layout = html.Div([
                                inputStyle={'margin-right': '4px'},
                                labelStyle={'margin-right': '16px', 'font-size': '12px',
                                            'font-weight': '600'},
-                               style={'margin-bottom': '10px'}),
-                html.Div('Nome Analisi:',
-                         style={'font-size': '11px', 'font-weight': '600',
-                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Input(id='pio-exp-pname', placeholder='Es. Difensivo',
-                          style={'width': '100%', 'font-size': '11px', 'margin-bottom': '10px',
-                                 'padding': '5px 8px', 'border': '1px solid #aaa',
-                                 'border-radius': '4px'}),
-
-                html.Div('Salva nel portafoglio:',
-                         style={'font-size': '11px', 'font-weight': '600',
-                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Dropdown(id='pio-exp-profile', placeholder='Portafoglio esistente…',
-                             style={'font-size': '11px', 'margin-bottom': '6px'}),
-                dcc.Input(id='pio-exp-new', placeholder='…oppure nuovo portafoglio',
-                          style={'width': '100%', 'font-size': '11px', 'margin-bottom': '8px',
-                                 'padding': '5px 8px', 'border': '1px solid #aaa',
-                                 'border-radius': '4px'}),
-                dcc.RadioItems(id='pio-exp-mode',
-                               options=[{'label': ' Modifica portafoglio', 'value': 'merge'},
-                                        {'label': ' Nuovo portafoglio',    'value': 'replace'}],
-                               value='merge', inline=True,
-                               inputStyle={'margin-right': '4px'},
-                               labelStyle={'margin-right': '14px', 'font-size': '10px'},
                                style={'margin-bottom': '12px'}),
+                html.Div('2. Salva come Analisi (nuova o sovrascrivi esistente):',
+                         style={'font-size': '11px', 'font-weight': '600',
+                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
+                dcc.Dropdown(id='pio-exp-profile', placeholder='Sovrascrivi un\'analisi esistente…',
+                             style={'font-size': '11px', 'margin-bottom': '6px'}),
+                dcc.Input(id='pio-exp-new', placeholder='…oppure scrivi una nuova analisi',
+                          style={'width': '100%', 'font-size': '11px', 'margin-bottom': '12px',
+                                 'padding': '5px 8px', 'border': '1px solid #aaa',
+                                 'border-radius': '4px'}),
                 html.Button('📤 Esporta', id='pio-exp-btn', n_clicks=0,
                             style={'background': '#1b7a34', 'color': 'white', 'border': 'none',
                                    'padding': '7px 16px', 'border-radius': '4px',
@@ -2302,16 +2287,12 @@ app.layout = html.Div([
 
             # ── IMPORTA ────────────────────────────────────────────────────────
             html.Div(id='pio-import-view', style={'display': 'none'}, children=[
-                html.Div('Portafoglio:', style={'font-size': '11px', 'font-weight': '600',
-                                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Dropdown(id='pio-imp-profile', placeholder='Scegli un portafoglio…',
-                             style={'font-size': '11px', 'margin-bottom': '10px'}),
-                html.Div('Analisi da importare:',
+                html.Div('1. Analisi da importare:',
                          style={'font-size': '11px', 'font-weight': '600',
                                 'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Dropdown(id='pio-imp-list', options=[], placeholder="Scegli un'analisi…",
-                             style={'font-size': '11px', 'margin-bottom': '10px'}),
-                html.Div('Metti nella colonna:',
+                dcc.Dropdown(id='pio-imp-profile', placeholder="Scegli un'analisi…",
+                             style={'font-size': '11px', 'margin-bottom': '12px'}),
+                html.Div('2. Metti nella colonna:',
                          style={'font-size': '11px', 'font-weight': '600',
                                 'color': '#1a3a5c', 'margin-bottom': '6px'}),
                 dcc.RadioItems(id='pio-imp-target',
@@ -3661,8 +3642,7 @@ _PIO_OVERLAY = {'position': 'fixed', 'top': '0', 'left': '0', 'width': '100%',
 )
 def toggle_pio(open_n, close_n):
     if callback_context.triggered_id == 'port-io-btn':
-        profs = _sm.list_profiles(_get_username())
-        opts = [{'label': p, 'value': p} for p in profs]
+        opts = [{'label': a, 'value': a} for a in _sm.list_analyses(_get_username())]
         return {**_PIO_OVERLAY, 'display': 'flex'}, opts, opts
     return {**_PIO_OVERLAY, 'display': 'none'}, no_update, no_update
 
@@ -3671,18 +3651,17 @@ def toggle_pio(open_n, close_n):
 @app.callback(
     Output('pio-mode',        'value',    allow_duplicate=True),
     Output('pio-imp-profile', 'value',    allow_duplicate=True),
-    Output('pio-imp-list',    'options',  allow_duplicate=True),
-    Output('pio-imp-list',    'value',    allow_duplicate=True),
     Output('pio-imp-status',  'children', allow_duplicate=True),
     Output('pio-exp-status',  'children', allow_duplicate=True),
     Output('pio-exp-new',     'value',    allow_duplicate=True),
+    Output('pio-exp-profile', 'value',    allow_duplicate=True),
     Input('port-io-btn', 'n_clicks'),
     prevent_initial_call=True,
 )
 def pio_reset(n):
     if not n:
         raise PreventUpdate
-    return 'export', None, [], None, '', '', ''
+    return 'export', None, '', '', '', None
 
 
 @app.callback(
@@ -3703,25 +3682,22 @@ def pio_switch_view(mode):
     Output('pio-exp-new',     'value'),
     Input('pio-exp-btn', 'n_clicks'),
     State('pio-exp-col',     'value'),
-    State('pio-exp-pname',   'value'),
     State({'type': 'weight-input', 'index': ALL}, 'id'),
     State({'type': 'weight-input', 'index': ALL}, 'value'),
     State('pio-exp-profile', 'value'),
     State('pio-exp-new',     'value'),
-    State('pio-exp-mode',    'value'),
     prevent_initial_call=True,
 )
-def pio_export(n, col, pname, all_ids, all_vals, prof_sel, prof_new, mode):
+def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
     if not n:
         raise PreventUpdate
     _u = _get_username()
-    profile = (prof_new or '').strip() or (prof_sel or '').strip()
-    if not profile:
-        return '⚠ Scegli un portafoglio o scrivi un nuovo nome', no_update, no_update, no_update
+    # Nome analisi: nuovo (prevale) o esistente da sovrascrivere
+    name = (ana_new or '').strip() or (ana_sel or '').strip()
+    if not name:
+        return '⚠ Scrivi un nome nuovo o scegli un\'analisi da sovrascrivere', no_update, no_update, no_update
 
     col = col if col in ('P1', 'P2', 'P3') else 'P1'
-    pname = (pname or col).strip() or col
-
     # Leggi i pesi della colonna scelta dalla griglia (fonte di verità)
     weights = {}
     for inp_id, val in zip(all_ids or [], all_vals or []):
@@ -3734,25 +3710,12 @@ def pio_export(n, col, pname, all_ids, all_vals, prof_sel, prof_new, mode):
     if not weights:
         return f'⚠ La colonna {col} non ha pesi da esportare', no_update, no_update, no_update
 
-    ok = _sm.export_portfolios(_u, profile, {pname: weights}, mode=mode)
-    opts = [{'label': p, 'value': p} for p in _sm.list_profiles(_u)]
+    ok = _sm.save_analysis(_u, name, weights)
+    opts = [{'label': a, 'value': a} for a in _sm.list_analyses(_u)]
     if ok:
-        return (f'✅ {col} salvato come Analisi "{pname}" nel portafoglio "{profile}"', opts, opts, '')
+        return (f'✅ Colonna {col} salvata nell\'analisi "{name}" ({len(weights)} asset)',
+                opts, opts, '')
     return '⚠ Errore durante l\'esportazione', no_update, no_update, no_update
-
-
-@app.callback(
-    Output('pio-imp-list', 'options'),
-    Output('pio-imp-list', 'value'),
-    Input('pio-imp-profile', 'value'),
-    prevent_initial_call=True,
-)
-def pio_populate_import_list(profile):
-    if not profile:
-        return [], None
-    prof = _sm.get_profile(_get_username(), profile)
-    names = list((prof.get('portfolios') or {}).keys())
-    return [{'label': nm, 'value': nm} for nm in names], None
 
 
 @app.callback(
@@ -3765,7 +3728,6 @@ def pio_populate_import_list(profile):
     Output('pio-overlay', 'style', allow_duplicate=True),
     Input('pio-imp-btn', 'n_clicks'),
     State('pio-imp-profile', 'value'),
-    State('pio-imp-list',    'value'),
     State('pio-imp-target',  'value'),
     State('weights-store-P1', 'data'),
     State('weights-store-P2', 'data'),
@@ -3775,19 +3737,18 @@ def pio_populate_import_list(profile):
     State('update-portfolio-button', 'n_clicks'),
     prevent_initial_call=True,
 )
-def pio_import(n, profile, portfolio, target, p1d, p2d, p3d,
+def pio_import(n, analysis, target, p1d, p2d, p3d,
                all_ids, all_vals, cur_clicks):
     if not n:
         raise PreventUpdate
-    if not profile or not portfolio:
+    if not analysis:
         return (no_update, no_update, no_update, no_update, no_update,
-                "⚠ Scegli un portafoglio e un'analisi", no_update)
+                "⚠ Scegli un'analisi da importare", no_update)
     target = target if target in ('P1', 'P2', 'P3') else 'P1'
-    ports = (_sm.get_profile(_get_username(), profile).get('portfolios') or {})
-    imported = {a: float(v) for a, v in (ports.get(portfolio) or {}).items()}
+    imported = {a: float(v) for a, v in (_sm.get_analysis(_get_username(), analysis) or {}).items()}
     if not imported:
         return (no_update, no_update, no_update, no_update, no_update,
-                '⚠ Portafoglio vuoto', no_update)
+                '⚠ Analisi vuota', no_update)
 
     # Pesi correnti delle 3 colonne: si tocca solo la colonna target
     slot = {'P1': dict(p1d or {}), 'P2': dict(p2d or {}), 'P3': dict(p3d or {})}
@@ -3804,7 +3765,7 @@ def pio_import(n, profile, portfolio, target, p1d, p2d, p3d,
 
     _update_user_json(weights={'P1': slot['P1'], 'P2': slot['P2'], 'P3': slot['P3']},
                       username=_get_username())
-    msg = f'✓ "{portfolio}" importato nella colonna {target}'
+    msg = f'✓ Analisi "{analysis}" importata nella colonna {target}'
     return (slot['P1'], slot['P2'], slot['P3'], new_vals,
             (cur_clicks or 0) + 1, msg, {**_PIO_OVERLAY, 'display': 'none'})
 

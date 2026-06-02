@@ -366,3 +366,69 @@ def delete_profile(username: str, profile_name: str) -> bool:
         del data[profile_name]
         return save_profiles(username, data)
     return False
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ANALISI — modello piatto: un'Analisi = un portafoglio (mappa asset→peso)
+# File: sessions/{username}/analyses.json
+#   { "<nomeAnalisi>": {"weights": {"<asset>": peso, ...}, "saved_at": iso} }
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _analyses_path(username: str) -> Path:
+    return user_dir(username) / 'analyses.json'
+
+
+def load_analyses(username: str) -> dict:
+    path = _analyses_path(username)
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠ [sessions_manager] load_analyses {username}: {e}")
+        return {}
+
+
+def _save_analyses(username: str, data: dict) -> bool:
+    path = _analyses_path(username)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix('.tmp')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(path)
+        return True
+    except Exception as e:
+        print(f"⚠ [sessions_manager] save_analyses {username}: {e}")
+        return False
+
+
+def list_analyses(username: str) -> list:
+    """Nomi delle analisi salvate, ultima salvata per prima."""
+    data = load_analyses(username)
+    return sorted(data.keys(),
+                  key=lambda k: data[k].get('saved_at', ''), reverse=True)
+
+
+def get_analysis(username: str, name: str) -> dict:
+    """Pesi {asset: peso} dell'analisi, {} se non esiste."""
+    return (load_analyses(username).get(name) or {}).get('weights', {})
+
+
+def save_analysis(username: str, name: str, weights: dict) -> bool:
+    """Crea o sovrascrive un'analisi (un solo portafoglio per analisi)."""
+    name = (name or '').strip()
+    if not name or not weights:
+        return False
+    data = load_analyses(username)
+    data[name] = {'weights': dict(weights), 'saved_at': datetime.now().isoformat()}
+    return _save_analyses(username, data)
+
+
+def delete_analysis(username: str, name: str) -> bool:
+    data = load_analyses(username)
+    if name in data:
+        del data[name]
+        return _save_analyses(username, data)
+    return False
