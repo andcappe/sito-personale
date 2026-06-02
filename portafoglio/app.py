@@ -2268,7 +2268,7 @@ app.layout = html.Div([
                                labelStyle={'margin-right': '16px', 'font-size': '12px',
                                            'font-weight': '600'},
                                style={'margin-bottom': '10px'}),
-                html.Div('Nome portafoglio:',
+                html.Div('Nome Analisi:',
                          style={'font-size': '11px', 'font-weight': '600',
                                 'color': '#1a3a5c', 'margin-bottom': '6px'}),
                 dcc.Input(id='pio-exp-pname', placeholder='Es. Difensivo',
@@ -2276,18 +2276,18 @@ app.layout = html.Div([
                                  'padding': '5px 8px', 'border': '1px solid #aaa',
                                  'border-radius': '4px'}),
 
-                html.Div('Salva nel profilo:',
+                html.Div('Salva nel portafoglio:',
                          style={'font-size': '11px', 'font-weight': '600',
                                 'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Dropdown(id='pio-exp-profile', placeholder='Profilo esistente…',
+                dcc.Dropdown(id='pio-exp-profile', placeholder='Portafoglio esistente…',
                              style={'font-size': '11px', 'margin-bottom': '6px'}),
-                dcc.Input(id='pio-exp-new', placeholder='…oppure nuovo profilo',
+                dcc.Input(id='pio-exp-new', placeholder='…oppure nuovo portafoglio',
                           style={'width': '100%', 'font-size': '11px', 'margin-bottom': '8px',
                                  'padding': '5px 8px', 'border': '1px solid #aaa',
                                  'border-radius': '4px'}),
                 dcc.RadioItems(id='pio-exp-mode',
-                               options=[{'label': ' Modifica profilo', 'value': 'merge'},
-                                        {'label': ' Nuovo profilo',    'value': 'replace'}],
+                               options=[{'label': ' Modifica portafoglio', 'value': 'merge'},
+                                        {'label': ' Nuovo portafoglio',    'value': 'replace'}],
                                value='merge', inline=True,
                                inputStyle={'margin-right': '4px'},
                                labelStyle={'margin-right': '14px', 'font-size': '10px'},
@@ -2302,14 +2302,14 @@ app.layout = html.Div([
 
             # ── IMPORTA ────────────────────────────────────────────────────────
             html.Div(id='pio-import-view', style={'display': 'none'}, children=[
-                html.Div('Profilo:', style={'font-size': '11px', 'font-weight': '600',
-                                            'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Dropdown(id='pio-imp-profile', placeholder='Scegli un profilo…',
+                html.Div('Portafoglio:', style={'font-size': '11px', 'font-weight': '600',
+                                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
+                dcc.Dropdown(id='pio-imp-profile', placeholder='Scegli un portafoglio…',
                              style={'font-size': '11px', 'margin-bottom': '10px'}),
-                html.Div('Portafoglio da importare:',
+                html.Div('Analisi da importare:',
                          style={'font-size': '11px', 'font-weight': '600',
                                 'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Dropdown(id='pio-imp-list', options=[], placeholder='Scegli un portafoglio…',
+                dcc.Dropdown(id='pio-imp-list', options=[], placeholder="Scegli un'analisi…",
                              style={'font-size': '11px', 'margin-bottom': '10px'}),
                 html.Div('Metti nella colonna:',
                          style={'font-size': '11px', 'font-weight': '600',
@@ -3717,7 +3717,7 @@ def pio_export(n, col, pname, all_ids, all_vals, prof_sel, prof_new, mode):
     _u = _get_username()
     profile = (prof_new or '').strip() or (prof_sel or '').strip()
     if not profile:
-        return '⚠ Scegli un profilo o scrivi un nuovo nome', no_update, no_update, no_update
+        return '⚠ Scegli un portafoglio o scrivi un nuovo nome', no_update, no_update, no_update
 
     col = col if col in ('P1', 'P2', 'P3') else 'P1'
     pname = (pname or col).strip() or col
@@ -3737,7 +3737,7 @@ def pio_export(n, col, pname, all_ids, all_vals, prof_sel, prof_new, mode):
     ok = _sm.export_portfolios(_u, profile, {pname: weights}, mode=mode)
     opts = [{'label': p, 'value': p} for p in _sm.list_profiles(_u)]
     if ok:
-        return (f'✅ {col} salvato come "{pname}" nel profilo "{profile}"', opts, opts, '')
+        return (f'✅ {col} salvato come Analisi "{pname}" nel portafoglio "{profile}"', opts, opts, '')
     return '⚠ Errore durante l\'esportazione', no_update, no_update, no_update
 
 
@@ -3781,7 +3781,7 @@ def pio_import(n, profile, portfolio, target, p1d, p2d, p3d,
         raise PreventUpdate
     if not profile or not portfolio:
         return (no_update, no_update, no_update, no_update, no_update,
-                '⚠ Scegli un profilo e un portafoglio', no_update)
+                "⚠ Scegli un portafoglio e un'analisi", no_update)
     target = target if target in ('P1', 'P2', 'P3') else 'P1'
     ports = (_sm.get_profile(_get_username(), profile).get('portfolios') or {})
     imported = {a: float(v) for a, v in (ports.get(portfolio) or {}).items()}
