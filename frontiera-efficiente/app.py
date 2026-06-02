@@ -2515,8 +2515,21 @@ def fpio_export(n, col, f1j, f2j, f3j, ana_sel, ana_new):
     if not name:
         return "⚠ Scrivi un nome nuovo o scegli un'analisi da sovrascrivere", no_update, no_update, no_update
     col = col if col in ('F1', 'F2', 'F3') else 'F1'
+    pcol = {'F1': 'P1', 'F2': 'P2', 'F3': 'P3'}[col]
+
+    # 1) Pesi dallo store del browser (immediati ma a volte desincronizzati)
     wmap = {'F1': _fpio_load_w(f1j), 'F2': _fpio_load_w(f2j), 'F3': _fpio_load_w(f3j)}
     weights = {a: float(v) for a, v in (wmap[col] or {}).items() if v}
+
+    # 2) Fallback robusto: leggi da current.json (persistito lato server,
+    #    aggiornato da _fe_sync_weights ad ogni calcolo/clic sulla frontiera).
+    if not weights:
+        ns = _read_user_json()
+        weights = {a: float(v.get(pcol, 0) or 0) for a, v in (ns or {}).items()
+                   if v.get(pcol, 0)}
+
+    print(f"[FPIO-EXPORT] col={col} | store={len(wmap[col])} | "
+          f"finale={len(weights)} asset {list(weights.items())[:4]}", flush=True)
     if not weights:
         return f'⚠ La colonna {col} non ha pesi (calcola prima le frontiere)', no_update, no_update, no_update
     ok = _sm.save_analysis(u, name, weights)
