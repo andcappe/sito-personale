@@ -2149,7 +2149,7 @@ app.layout = html.Div([
     }),
 
     # ── Barra comandi ─────────────────────────────────────────────────────────
-    html.Div([
+    html.Div(id='cmd-bar', children=[
         # ── Controlli legacy nascosti (callback ancora attivi) ────────────────
         html.Div([
             dcc.Loading(type='circle', color='#007755', children=[
