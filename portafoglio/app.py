@@ -3723,7 +3723,6 @@ def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
     Output('weights-store-P2', 'data', allow_duplicate=True),
     Output('weights-store-P3', 'data', allow_duplicate=True),
     Output({'type': 'weight-input', 'index': ALL}, 'value', allow_duplicate=True),
-    Output('update-portfolio-button', 'n_clicks', allow_duplicate=True),
     Output('pio-imp-status', 'children'),
     Output('pio-overlay', 'style', allow_duplicate=True),
     Input('pio-imp-btn', 'n_clicks'),
@@ -3734,27 +3733,27 @@ def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
     State('weights-store-P3', 'data'),
     State({'type': 'weight-input', 'index': ALL}, 'id'),
     State({'type': 'weight-input', 'index': ALL}, 'value'),
-    State('update-portfolio-button', 'n_clicks'),
     prevent_initial_call=True,
 )
-def pio_import(n, analysis, target, p1d, p2d, p3d,
-               all_ids, all_vals, cur_clicks):
+def pio_import(n, analysis, target, p1d, p2d, p3d, all_ids, all_vals):
     if not n:
         raise PreventUpdate
     if not analysis:
-        return (no_update, no_update, no_update, no_update, no_update,
+        return (no_update, no_update, no_update, no_update,
                 "⚠ Scegli un'analisi da importare", no_update)
     target = target if target in ('P1', 'P2', 'P3') else 'P1'
     imported = {a: float(v) for a, v in (_sm.get_analysis(_get_username(), analysis) or {}).items()}
     if not imported:
-        return (no_update, no_update, no_update, no_update, no_update,
+        return (no_update, no_update, no_update, no_update,
                 '⚠ Analisi vuota', no_update)
 
-    # Pesi correnti delle 3 colonne: si tocca solo la colonna target
+    # Sostituisce SOLO la colonna target: asset dell'analisi → peso, gli altri → 0
     slot = {'P1': dict(p1d or {}), 'P2': dict(p2d or {}), 'P3': dict(p3d or {})}
     slot[target] = imported
 
-    # Aggiorna la griglia: solo le celle della colonna target
+    # Imposta direttamente i valori delle celle della griglia (NIENTE rebuild:
+    # il bump di update-portfolio-button ricostruiva la griglia sovrascrivendo i pesi).
+    # Colonna target → peso importato (0 se l'asset non è nell'analisi); altre colonne invariate.
     new_vals = []
     for inp_id, curv in zip(all_ids or [], all_vals or []):
         idx = inp_id['index']
@@ -3765,9 +3764,9 @@ def pio_import(n, analysis, target, p1d, p2d, p3d,
 
     _update_user_json(weights={'P1': slot['P1'], 'P2': slot['P2'], 'P3': slot['P3']},
                       username=_get_username())
-    msg = f'✓ Analisi "{analysis}" importata nella colonna {target}'
+    msg = f'✓ Analisi "{analysis}" importata nella colonna {target} ({len(imported)} asset)'
     return (slot['P1'], slot['P2'], slot['P3'], new_vals,
-            (cur_clicks or 0) + 1, msg, {**_PIO_OVERLAY, 'display': 'none'})
+            msg, {**_PIO_OVERLAY, 'display': 'none'})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
