@@ -3727,21 +3727,20 @@ def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
         return '⚠ Scrivi un nome nuovo o scegli un\'analisi da sovrascrivere', no_update, no_update, no_update
 
     col = col if col in ('P1', 'P2', 'P3') else 'P1'
-    # 1) Pesi dalla griglia (immediati ma a volte desincronizzati se la pagina è in cache)
-    weights = {}
-    for inp_id, val in zip(all_ids or [], all_vals or []):
-        idx = inp_id['index']
-        if idx.startswith(col + '-') and val:
-            try:
-                weights[idx[3:]] = float(val)
-            except (TypeError, ValueError):
-                pass
-    # 2) Fallback robusto: leggi da current.json (file persistito lato server)
+    # 1) FONTE DI VERITÀ: current.json — sincronizzato da tutte le tab
+    #    (la griglia del Portafoglio è obsoleta se hai calcolato in Frontiera).
+    ns = _read_user_json(_u) or {}
+    weights = {a: float(v.get(col, 0) or 0) for a, v in ns.items() if v.get(col, 0)}
+    # 2) Fallback: griglia corrente (se current.json non ha pesi per quella colonna)
     if not weights:
-        ns = _read_user_json(_u)
-        weights = {a: float(v.get(col, 0) or 0) for a, v in (ns or {}).items()
-                   if v.get(col, 0)}
-    print(f"[PIO-EXPORT] col={col} | griglia+json={len(weights)} asset "
+        for inp_id, val in zip(all_ids or [], all_vals or []):
+            idx = inp_id['index']
+            if idx.startswith(col + '-') and val:
+                try:
+                    weights[idx[3:]] = float(val)
+                except (TypeError, ValueError):
+                    pass
+    print(f"[PIO-EXPORT] col={col} | current.json+griglia={len(weights)} asset "
           f"{list(weights.items())[:4]}", flush=True)
     if not weights:
         return f'⚠ La colonna {col} non ha pesi da esportare', no_update, no_update, no_update
@@ -3814,8 +3813,11 @@ def pio_import(n, analysis, target, p1d, p2d, p3d, all_ids, all_vals):
         return (no_update, no_update, no_update, no_update,
                 '⚠ Analisi vuota', no_update, *_NU4)
 
-    # Asset attualmente nel dataset (dalle celle griglia colonna P1)
-    current_assets = {d['index'][3:] for d in (all_ids or []) if d['index'].startswith('P1-')}
+    # Asset attualmente nel dataset: fonte di verità current.json (la griglia può
+    # essere obsoleta se hai lavorato in un altro tab). Fallback sulle celle griglia.
+    current_assets = set((_read_user_json(_u) or {}).keys())
+    if not current_assets:
+        current_assets = {d['index'][3:] for d in (all_ids or []) if d['index'].startswith('P1-')}
     missing = [a for a in imported if a not in current_assets]
 
     # ── CASO 1: tutti gli asset sono presenti → carica subito ─────────────────
