@@ -3760,6 +3760,25 @@ def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
     return '⚠ Errore durante l\'esportazione', no_update, no_update, no_update
 
 
+def _import_add_missing_thread(username, dl_tickers, dl_descr, dl_valuta,
+                               all_descr, target, full_weights, keep):
+    """Thread: scarica+merge gli asset mancanti, poi applica i pesi alla colonna target."""
+    start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+    try:
+        if dl_tickers:
+            _do_gestisci_download(dl_tickers, dl_descr, dl_valuta, start,
+                                  username, 'ETF.xlsx', all_descr=all_descr)
+        w = {'P1': dict(keep.get('P1', {})), 'P2': dict(keep.get('P2', {})),
+             'P3': dict(keep.get('P3', {}))}
+        w[target] = full_weights
+        _update_user_json(weights=w, username=username)
+        print(f"✓ Import con download: +{len(dl_tickers)} asset, pesi su {target}")
+    except Exception as e:
+        print(f"⚠ Import add-missing fallito: {e}")
+        with _DL_LOCK:
+            _DL_STATE['status'] = 'error'
+
+
 @app.callback(
     Output('weights-store-P1', 'data', allow_duplicate=True),
     Output('weights-store-P2', 'data', allow_duplicate=True),
@@ -3767,6 +3786,10 @@ def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
     Output({'type': 'weight-input', 'index': ALL}, 'value', allow_duplicate=True),
     Output('pio-imp-status', 'children'),
     Output('pio-overlay', 'style', allow_duplicate=True),
+    Output('refresh-poll-interval',  'disabled',    allow_duplicate=True),
+    Output('refresh-poll-interval',  'n_intervals', allow_duplicate=True),
+    Output('progress-modal-overlay', 'style',       allow_duplicate=True),
+    Output('refresh-data-btn',       'disabled',    allow_duplicate=True),
     Input('pio-imp-btn', 'n_clicks'),
     State('pio-imp-profile', 'value'),
     State('pio-imp-target',  'value'),
@@ -3778,37 +3801,82 @@ def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
     prevent_initial_call=True,
 )
 def pio_import(n, analysis, target, p1d, p2d, p3d, all_ids, all_vals):
+    _NU4 = (no_update, no_update, no_update, no_update)  # poll/progress (caso immediato)
     if not n:
         raise PreventUpdate
     if not analysis:
         return (no_update, no_update, no_update, no_update,
-                "⚠ Scegli un'analisi da importare", no_update)
+                "⚠ Scegli un'analisi da importare", no_update, *_NU4)
+    _u = _get_username()
     target = target if target in ('P1', 'P2', 'P3') else 'P1'
-    imported = {a: float(v) for a, v in (_sm.get_analysis(_get_username(), analysis) or {}).items()}
+    imported = {a: float(v) for a, v in (_sm.get_analysis(_u, analysis) or {}).items()}
     if not imported:
         return (no_update, no_update, no_update, no_update,
-                '⚠ Analisi vuota', no_update)
+                '⚠ Analisi vuota', no_update, *_NU4)
 
-    # Sostituisce SOLO la colonna target: asset dell'analisi → peso, gli altri → 0
-    slot = {'P1': dict(p1d or {}), 'P2': dict(p2d or {}), 'P3': dict(p3d or {})}
-    slot[target] = imported
+    # Asset attualmente nel dataset (dalle celle griglia colonna P1)
+    current_assets = {d['index'][3:] for d in (all_ids or []) if d['index'].startswith('P1-')}
+    missing = [a for a in imported if a not in current_assets]
 
-    # Imposta direttamente i valori delle celle della griglia (NIENTE rebuild:
-    # il bump di update-portfolio-button ricostruiva la griglia sovrascrivendo i pesi).
-    # Colonna target → peso importato (0 se l'asset non è nell'analisi); altre colonne invariate.
-    new_vals = []
-    for inp_id, curv in zip(all_ids or [], all_vals or []):
-        idx = inp_id['index']
-        if idx.startswith(target + '-'):
-            new_vals.append(imported.get(idx[3:], 0))
-        else:
-            new_vals.append(curv)
+    # ── CASO 1: tutti gli asset sono presenti → carica subito ─────────────────
+    if not missing:
+        slot = {'P1': dict(p1d or {}), 'P2': dict(p2d or {}), 'P3': dict(p3d or {})}
+        slot[target] = imported
+        new_vals = []
+        for inp_id, curv in zip(all_ids or [], all_vals or []):
+            idx = inp_id['index']
+            if idx.startswith(target + '-'):
+                new_vals.append(imported.get(idx[3:], 0))
+            else:
+                new_vals.append(curv)
+        _update_user_json(weights={'P1': slot['P1'], 'P2': slot['P2'], 'P3': slot['P3']},
+                          username=_u)
+        msg = f'✓ Analisi "{analysis}" importata in {target} ({len(imported)} asset)'
+        return (slot['P1'], slot['P2'], slot['P3'], new_vals, msg,
+                {**_PIO_OVERLAY, 'display': 'none'}, *_NU4)
 
-    _update_user_json(weights={'P1': slot['P1'], 'P2': slot['P2'], 'P3': slot['P3']},
-                      username=_get_username())
-    msg = f'✓ Analisi "{analysis}" importata nella colonna {target} ({len(imported)} asset)'
-    return (slot['P1'], slot['P2'], slot['P3'], new_vals,
-            msg, {**_PIO_OVERLAY, 'display': 'none'})
+    # ── CASO 2: alcuni asset mancano dal dataset → ri-aggiungili e scaricali ──
+    meta = _sm.get_analysis_meta(_u, analysis) or {}
+    dl_descr   = [a for a in missing if (meta.get(a) or {}).get('ticker')]
+    dl_tickers = [meta[a]['ticker'] for a in dl_descr]
+    dl_valuta  = [(meta.get(a) or {}).get('valuta', 'EUR') for a in dl_descr]
+    no_ticker  = [a for a in missing if not (meta.get(a) or {}).get('ticker')]
+
+    if not dl_tickers:
+        # Nessun ticker disponibile (analisi vecchia senza meta): carica solo i presenti
+        present = {a: w for a, w in imported.items() if a in current_assets}
+        slot = {'P1': dict(p1d or {}), 'P2': dict(p2d or {}), 'P3': dict(p3d or {})}
+        slot[target] = present
+        new_vals = [present.get(d['index'][3:], 0) if d['index'].startswith(target + '-')
+                    else cv for d, cv in zip(all_ids or [], all_vals or [])]
+        _update_user_json(weights={'P1': slot['P1'], 'P2': slot['P2'], 'P3': slot['P3']},
+                          username=_u)
+        msg = (f'⚠ {len(missing)} asset non nel portafoglio e senza ticker salvato: '
+               f'caricati solo i {len(present)} presenti. Ri-esporta l\'analisi per includerli.')
+        return (slot['P1'], slot['P2'], slot['P3'], new_vals, msg,
+                {**_PIO_OVERLAY, 'display': 'none'}, *_NU4)
+
+    # Mantieni le altre colonne; la target verrà riempita coi pesi completi dopo il download
+    keep = {'P1': dict(p1d or {}), 'P2': dict(p2d or {}), 'P3': dict(p3d or {})}
+    keep[target] = {}
+    all_descr = list(dict.fromkeys(list(current_assets) + dl_descr))
+
+    _cl_clear(_u)  # così il poll usa _DL_STATE (non il buffer cliente)
+    with _DL_LOCK:
+        _DL_STATE.update({'status': 'running', 'current': 0,
+                          'total': len(dl_tickers), 'errors': []})
+    threading.Thread(
+        target=_import_add_missing_thread,
+        args=(_u, dl_tickers, dl_descr, dl_valuta, all_descr, target, imported, keep),
+        daemon=True,
+    ).start()
+
+    extra = f' ({len(no_ticker)} senza ticker, esclusi)' if no_ticker else ''
+    msg = f'⏳ Aggiungo {len(dl_tickers)} asset mancanti e scarico i dati…{extra}'
+    # Non imposto i pesi ora: il download + poll aggiornano griglia e pesi al termine
+    return (no_update, no_update, no_update, no_update, msg,
+            {**_PIO_OVERLAY, 'display': 'none'},
+            False, 0, _MODAL_SHOWN, True)
 
 
 # ── Rinomina l'analisi selezionata ───────────────────────────────────────────
