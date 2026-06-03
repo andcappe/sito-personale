@@ -432,3 +432,15 @@ def delete_analysis(username: str, name: str) -> bool:
         del data[name]
         return _save_analyses(username, data)
     return False
+
+
+def rename_analysis(username: str, old: str, new: str) -> bool:
+    new = (new or '').strip()
+    if not old or not new or old == new:
+        return False
+    data = load_analyses(username)
+    if old not in data:
+        return False
+    data[new] = data.pop(old)
+    data[new]['saved_at'] = datetime.now().isoformat()
+    return _save_analyses(username, data)

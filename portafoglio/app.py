@@ -2310,6 +2310,35 @@ app.layout = html.Div([
                                    'cursor': 'pointer', 'font-size': '12px', 'font-weight': 'bold'}),
                 html.Div(id='pio-imp-status',
                          style={'font-size': '11px', 'margin-top': '8px', 'min-height': '16px'}),
+
+                # ── Gestione dell'analisi selezionata sopra ──────────────────
+                html.Hr(style={'margin': '14px 0 10px'}),
+                html.Div('Gestisci l\'analisi selezionata sopra:',
+                         style={'font-size': '11px', 'font-weight': '600',
+                                'color': '#1a3a5c', 'margin-bottom': '6px'}),
+                html.Div([
+                    dcc.Input(id='pio-rename-input', placeholder='Nuovo nome…',
+                              style={'flex': '1', 'font-size': '11px', 'padding': '5px 8px',
+                                     'border': '1px solid #aaa', 'border-radius': '4px',
+                                     'margin-right': '4px'}),
+                    html.Button('✏️ Rinomina', id='pio-rename-btn', n_clicks=0,
+                                style={'background': '#2e6da4', 'color': 'white', 'border': 'none',
+                                       'padding': '6px 10px', 'border-radius': '4px',
+                                       'cursor': 'pointer', 'font-size': '11px', 'margin-right': '4px'}),
+                    html.Button('🗑 Cancella', id='pio-del-btn', n_clicks=0,
+                                style={'background': '#c0392b', 'color': 'white', 'border': 'none',
+                                       'padding': '6px 10px', 'border-radius': '4px',
+                                       'cursor': 'pointer', 'font-size': '11px'}),
+                ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '10px'}),
+                html.Button('🧹 Azzera P1/P2/P3 (svuota i portafogli)',
+                            id='pio-reset-cols-btn', n_clicks=0,
+                            style={'background': '#fff3e0', 'color': '#e65100',
+                                   'border': '1px solid #ffb74d', 'padding': '6px 12px',
+                                   'border-radius': '4px', 'cursor': 'pointer', 'font-size': '11px',
+                                   'font-weight': 'bold'}),
+                html.Div(id='pio-manage-status',
+                         style={'font-size': '11px', 'margin-top': '8px', 'min-height': '16px',
+                                'color': '#555'}),
             ]),
 
         ], style={'background': 'white', 'border-radius': '10px', 'padding': '20px 24px',
@@ -3774,6 +3803,79 @@ def pio_import(n, analysis, target, p1d, p2d, p3d, all_ids, all_vals):
     msg = f'✓ Analisi "{analysis}" importata nella colonna {target} ({len(imported)} asset)'
     return (slot['P1'], slot['P2'], slot['P3'], new_vals,
             msg, {**_PIO_OVERLAY, 'display': 'none'})
+
+
+# ── Rinomina l'analisi selezionata ───────────────────────────────────────────
+@app.callback(
+    Output('pio-exp-profile', 'options', allow_duplicate=True),
+    Output('pio-imp-profile', 'options', allow_duplicate=True),
+    Output('pio-imp-profile', 'value',   allow_duplicate=True),
+    Output('pio-rename-input', 'value'),
+    Output('pio-manage-status', 'children'),
+    Input('pio-rename-btn', 'n_clicks'),
+    State('pio-imp-profile', 'value'),
+    State('pio-rename-input', 'value'),
+    prevent_initial_call=True,
+)
+def pio_rename(n, old, new):
+    if not n:
+        raise PreventUpdate
+    if not old:
+        return no_update, no_update, no_update, no_update, "⚠ Seleziona prima un'analisi da rinominare"
+    new = (new or '').strip()
+    if not new:
+        return no_update, no_update, no_update, no_update, '⚠ Scrivi il nuovo nome'
+    _u = _get_username()
+    ok = _sm.rename_analysis(_u, old, new)
+    opts = [{'label': a, 'value': a} for a in _sm.list_analyses(_u)]
+    if ok:
+        return opts, opts, new, '', f'✏️ "{old}" rinominata in "{new}"'
+    return no_update, no_update, no_update, no_update, '⚠ Rinomina non riuscita'
+
+
+# ── Cancella l'analisi selezionata ───────────────────────────────────────────
+@app.callback(
+    Output('pio-exp-profile', 'options', allow_duplicate=True),
+    Output('pio-imp-profile', 'options', allow_duplicate=True),
+    Output('pio-imp-profile', 'value',   allow_duplicate=True),
+    Output('pio-manage-status', 'children', allow_duplicate=True),
+    Input('pio-del-btn', 'n_clicks'),
+    State('pio-imp-profile', 'value'),
+    prevent_initial_call=True,
+)
+def pio_delete(n, name):
+    if not n:
+        raise PreventUpdate
+    if not name:
+        return no_update, no_update, no_update, "⚠ Seleziona prima un'analisi da cancellare"
+    _u = _get_username()
+    ok = _sm.delete_analysis(_u, name)
+    opts = [{'label': a, 'value': a} for a in _sm.list_analyses(_u)]
+    if ok:
+        return opts, opts, None, f'🗑 Analisi "{name}" cancellata'
+    return no_update, no_update, no_update, '⚠ Cancellazione non riuscita'
+
+
+# ── Azzera i pesi P1/P2/P3 (svuota i portafogli correnti) ─────────────────────
+@app.callback(
+    Output('weights-store-P1', 'data', allow_duplicate=True),
+    Output('weights-store-P2', 'data', allow_duplicate=True),
+    Output('weights-store-P3', 'data', allow_duplicate=True),
+    Output({'type': 'weight-input', 'index': ALL}, 'value', allow_duplicate=True),
+    Output('pio-manage-status', 'children', allow_duplicate=True),
+    Output('pio-overlay', 'style', allow_duplicate=True),
+    Input('pio-reset-cols-btn', 'n_clicks'),
+    State({'type': 'weight-input', 'index': ALL}, 'id'),
+    prevent_initial_call=True,
+)
+def pio_reset_cols(n, all_ids):
+    if not n:
+        raise PreventUpdate
+    all_ids = all_ids or []
+    new_vals = [0 for _ in all_ids]  # azzera tutte le celle P1/P2/P3
+    _update_user_json(weights={'P1': {}, 'P2': {}, 'P3': {}}, username=_get_username())
+    return ({}, {}, {}, new_vals, '🧹 P1/P2/P3 azzerati',
+            {**_PIO_OVERLAY, 'display': 'none'})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
