@@ -416,13 +416,24 @@ def get_analysis(username: str, name: str) -> dict:
     return (load_analyses(username).get(name) or {}).get('weights', {})
 
 
-def save_analysis(username: str, name: str, weights: dict) -> bool:
-    """Crea o sovrascrive un'analisi (un solo portafoglio per analisi)."""
+def get_analysis_meta(username: str, name: str) -> dict:
+    """Metadati {asset: {'ticker':…, 'valuta':…}} per ri-aggiungere asset mancanti."""
+    return (load_analyses(username).get(name) or {}).get('meta', {})
+
+
+def save_analysis(username: str, name: str, weights: dict, meta: dict = None) -> bool:
+    """
+    Crea o sovrascrive un'analisi (un solo portafoglio per analisi).
+    meta: {asset: {'ticker':…, 'valuta':…}} per rendere l'analisi autosufficiente
+          (così all'import si possono ri-aggiungere e riscaricare gli asset mancanti).
+    """
     name = (name or '').strip()
     if not name or not weights:
         return False
     data = load_analyses(username)
-    data[name] = {'weights': dict(weights), 'saved_at': datetime.now().isoformat()}
+    data[name] = {'weights': dict(weights),
+                  'meta': dict(meta or {}),
+                  'saved_at': datetime.now().isoformat()}
     return _save_analyses(username, data)
 
 

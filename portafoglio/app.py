@@ -3746,7 +3746,13 @@ def pio_export(n, col, all_ids, all_vals, ana_sel, ana_new):
     if not weights:
         return f'⚠ La colonna {col} non ha pesi da esportare', no_update, no_update, no_update
 
-    ok = _sm.save_analysis(_u, name, weights)
+    # Meta autosufficiente: ticker+valuta di ogni asset (da current.json) per poter
+    # ri-aggiungere/riscaricare gli asset mancanti al momento dell'import.
+    ns = _read_user_json(_u) or {}
+    meta = {a: {'ticker': (ns.get(a, {}) or {}).get('ticker', ''),
+                'valuta': (ns.get(a, {}) or {}).get('currency', 'EUR')}
+            for a in weights}
+    ok = _sm.save_analysis(_u, name, weights, meta=meta)
     opts = [{'label': a, 'value': a} for a in _sm.list_analyses(_u)]
     if ok:
         return (f'✅ Colonna {col} salvata nell\'analisi "{name}" ({len(weights)} asset)',

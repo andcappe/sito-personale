@@ -2530,7 +2530,12 @@ def fpio_export(n, col, f1j, f2j, f3j, ana_sel, ana_new):
           f"finale={len(weights)} asset {list(weights.items())[:4]}", flush=True)
     if not weights:
         return f'⚠ La colonna {col} non ha pesi (calcola prima le frontiere)', no_update, no_update, no_update
-    ok = _sm.save_analysis(u, name, weights)
+    # Meta autosufficiente: ticker+valuta da current.json (per ri-aggiungere i mancanti all'import)
+    ns = _read_user_json() or {}
+    meta = {a: {'ticker': (ns.get(a, {}) or {}).get('ticker', ''),
+                'valuta': (ns.get(a, {}) or {}).get('currency', 'EUR')}
+            for a in weights}
+    ok = _sm.save_analysis(u, name, weights, meta=meta)
     opts = [{'label': a, 'value': a} for a in _sm.list_analyses(u)]
     if ok:
         return (f'✅ Colonna {col} salvata nell\'analisi "{name}" ({len(weights)} asset)',
