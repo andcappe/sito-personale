@@ -395,6 +395,73 @@ def _user_json_path(username=None):
     d.mkdir(parents=True, exist_ok=True)
     return d / 'current.json'
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAPPA 1 — Scrittura unica, ATOMICA e COERENTE del file dati (current.json)
+# Garanzia: il file non resta mai scritto a metà (temp+rename) e non viene
+# committato se incoerente → se un processo non si chiude, i dati restano
+# allineati all'ultimo stato buono.
+# ─────────────────────────────────────────────────────────────────────────────
+def _profile_consistency(data):
+    """Verifica la coerenza del profilo. Ritorna (ok, lista_errori)."""
+    errs = []
+    if not isinstance(data, dict):
+        return False, ['struttura non valida']
+    if not data:
+        return True, []  # vuoto = lecito (default non ancora caricato)
+    for desc, v in data.items():
+        if not isinstance(v, dict):
+            errs.append(f'{desc}: voce non valida'); continue
+        dates = v.get('dates'); rets = v.get('returns')
+        if not dates or not rets:
+            errs.append(f'{desc}: senza prezzi/rendimenti')
+        elif len(dates) != len(rets):
+            errs.append(f'{desc}: dates({len(dates)})≠returns({len(rets)})')
+    return (len(errs) == 0), errs
+
+
+def _atomic_json_write(path, data, *, validate=True):
+    """
+    Scrive il JSON in modo atomico (temp+rename). Se validate=True e i dati sono
+    incoerenti NON sovrascrive il file (resta l'ultimo stato buono) e ritorna False.
+    """
+    if validate:
+        ok, errs = _profile_consistency(data)
+        if not ok:
+            print(f"⚠ profilo INCOERENTE — non salvato. Esempi: {errs[:3]}")
+            return False
+    try:
+        tmp = Path(str(path) + '.tmp')
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, path)   # atomico sullo stesso filesystem
+        return True
+    except Exception as e:
+        print(f'⚠ _atomic_json_write: {e}')
+        return False
+
+
+def profile_report(username=None):
+    """Report ispezionabile dello stato del file (per verifica oggettiva)."""
+    try:
+        data = json.load(open(_user_json_path(username)))
+    except Exception:
+        return {'asset': 0, 'tutti_con_prezzi': True, 'incoerenze': [], 'esiste': False}
+    ok, errs = _profile_consistency(data)
+    con_prezzi = sum(1 for v in data.values() if v.get('returns'))
+    return {
+        'esiste': True,
+        'asset': len(data),
+        'con_prezzi': con_prezzi,
+        'tutti_con_prezzi': (con_prezzi == len(data)),
+        'pesi_P1': sum(1 for v in data.values() if v.get('P1', 0)),
+        'pesi_P2': sum(1 for v in data.values() if v.get('P2', 0)),
+        'pesi_P3': sum(1 for v in data.values() if v.get('P3', 0)),
+        'coerente': ok,
+        'incoerenze': errs[:10],
+    }
+
+
 def _write_user_json(cr, op, tm, vm=None, username=None, reset_state=False):
     if cr is None or op is None:
         return
@@ -423,10 +490,7 @@ def _write_user_json(cr, op, tm, vm=None, username=None, reset_state=False):
             'P2':       0     if reset_state else ex.get('P2', 0),
             'P3':       0     if reset_state else ex.get('P3', 0),
         }
-    try:
-        json.dump(result, open(path, 'w'))
-    except Exception as e:
-        print(f'⚠ write_user_json: {e}')
+    _atomic_json_write(path, result)
 
 def _update_user_json(checked=None, weights=None, username=None):
     path = _user_json_path(username)
@@ -450,10 +514,7 @@ def _update_user_json(checked=None, weights=None, username=None):
                     data[desc][k] = v
                     changed = True
     if changed:
-        try:
-            json.dump(data, open(path, 'w'))
-        except Exception:
-            pass
+        _atomic_json_write(path, data)
 
 def _read_user_json(username=None):
     try:
