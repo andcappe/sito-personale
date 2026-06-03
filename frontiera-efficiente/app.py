@@ -1837,7 +1837,7 @@ def calc_and_render(n, stock_data, prices_data,
         pt_idx = ex.get('pt_idx', -1)
         ex_label = ex.get('label', '')
         if pt_idx >= 0 and pt_idx < len(df_f):
-            label = ex_label if ex_label == 'Sharpe' else f'P({pt_idx + 1})'
+            label = ex_label or f'P{pt_idx + 1}'
         else:
             label = 'Sharpe'
         sel_pt[fname] = {'label': label, 'pt_idx': pt_idx}
@@ -1960,7 +1960,9 @@ def on_frontier_click(click_data, sel_pt_json, rawdata_json):
     fname, pt_idx = cd[0], int(cd[1])
     is_sharpe = len(cd) >= 3 and cd[2] == 'sharpe'
     sel_pt = json.loads(sel_pt_json) if sel_pt_json else {}
-    sel_pt[fname] = {'label': 'Sharpe' if is_sharpe else f'P({pt_idx + 1})', 'pt_idx': pt_idx}
+    # Mostra sempre il numero del portafoglio; segna quello Max-Sharpe con ★
+    label = f'P{pt_idx + 1}' + (' ★Sharpe' if is_sharpe else '')
+    sel_pt[fname] = {'label': label, 'pt_idx': pt_idx}
 
     # Aggiorna i pesi della frontiera cliccata
     w_out = {k: no_update for k in ('F1', 'F2', 'F3')}
@@ -1993,7 +1995,7 @@ def update_sel_info(sel_pt_json, ids):
         fname = d['index']
         info  = sel_pt.get(fname, {})
         label = info.get('label', '') if info else ''
-        color = 'red' if label == 'Sharpe' else (_FC.get(fname, '#888') if label else '#bbb')
+        color = 'red' if 'Sharpe' in label else (_FC.get(fname, '#888') if label else '#bbb')
         result.append(
             html.Span(label or '—',
                       style={'fontSize':'9px','fontWeight':'700', 'color': color})
@@ -2339,7 +2341,8 @@ def on_arima_done(req_id, stock_data, prices_data,
     for fname, (df_f, ms, _mv, _names) in frontier_res.items():
         ex = _existing_sel.get(fname, {})
         pt_idx = ex.get('pt_idx', -1)
-        label = f'P({pt_idx+1})' if pt_idx >= 0 and pt_idx < len(df_f) else 'Sharpe'
+        ex_label = ex.get('label', '')
+        label = (ex_label or f'P{pt_idx+1}') if (pt_idx >= 0 and pt_idx < len(df_f)) else 'Sharpe'
         sel_pt[fname] = {'label': label, 'pt_idx': pt_idx}
 
     def _sel_cell_local(fname):
