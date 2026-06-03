@@ -4737,6 +4737,16 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
     else:
         df_final = df_with_portfolios
 
+    # Guardia: nessun dato nell'intervallo → grafico vuoto invece di errore
+    if df_final is None or len(df_final.index) == 0:
+        empty = go.Figure()
+        empty.add_annotation(text='Nessun dato nell\'intervallo selezionato',
+                             xref='paper', yref='paper', x=0.5, y=0.5,
+                             showarrow=False, font=dict(size=13, color='#888'))
+        empty.update_layout(paper_bgcolor='white', plot_bgcolor='#f8faff',
+                            margin=dict(t=30, b=20, l=40, r=20))
+        return empty
+
     # Versione ridotta per il rendering (max 500 punti per trace)
     df_plot = _thin(df_final)
     benchmark_cumulative_returns = _thin(benchmark_cumulative_returns)

@@ -1,4 +1,6 @@
 """Style Analysis — estratto da ir_fe_14.py e adattato per portafoglio."""
+import os
+import json as _json
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -8,6 +10,28 @@ from scipy.optimize import minimize
 from dash import html, dcc, callback_context, no_update, ALL
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
+
+import sessions_manager as _sm
+
+_SA_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Sito personale
+
+
+def _sa_username():
+    try:
+        from flask import session as _fs
+        return _fs.get('username') or 'anon'
+    except Exception:
+        return 'anon'
+
+
+def _sa_current_json(username):
+    """Legge current.json dell'utente (per ticker/valuta degli asset)."""
+    try:
+        path = os.path.join(_SA_ROOT, 'sessions', username, 'current.json')
+        with open(path) as f:
+            return _json.load(f)
+    except Exception:
+        return {}
 
 # ─── palette colori ───────────────────────────────────────────────────────────
 _COLORS = [
@@ -351,6 +375,26 @@ def get_style_analysis_tab(options_tickers):
                              style={'padding': '8px 16px 4px', 'background': '#1a2a1a',
                                     'border': '1px solid #2a4a2a', 'border-radius': '6px',
                                     'margin': '6px 4px 10px'}),
+
+                    # ── Esporta il portafoglio target come Analisi ───────────
+                    html.Div([
+                        html.Span('📤 Esporta portafoglio target:',
+                                  style={'font-size': '11px', 'font-weight': '600',
+                                         'color': '#1a3a5c', 'margin-right': '8px'}),
+                        dcc.Input(id='sa-export-name', placeholder='Nome analisi…',
+                                  style={'font-size': '11px', 'padding': '4px 8px',
+                                         'border': '1px solid #aaa', 'border-radius': '4px',
+                                         'margin-right': '6px', 'width': '180px'}),
+                        html.Button('Esporta come Analisi', id='sa-export-btn', n_clicks=0,
+                                    style={'background': '#1b7a34', 'color': 'white',
+                                           'border': 'none', 'padding': '5px 12px',
+                                           'border-radius': '4px', 'cursor': 'pointer',
+                                           'font-size': '11px', 'font-weight': 'bold'}),
+                        html.Span(id='sa-export-status',
+                                  style={'font-size': '11px', 'margin-left': '10px',
+                                         'color': '#1b5e20', 'font-weight': '600'}),
+                    ], style={'padding': '6px 14px 10px', 'display': 'flex',
+                              'align-items': 'center', 'flex-wrap': 'wrap'}),
 
                     html.Div([
                         html.B("📈  R² rolling", style={'font-size': '11px', 'color': '#1a3a5c'}),
@@ -820,9 +864,42 @@ def register_style_analysis_callbacks(app):
         status = (f'✅ Style Analysis | {n_obs} mesi | {len(x_selected)} fattori | '
                   f'R²={g_r2:.4f} | α={mean_alpha:+.2f}%/anno | rolling={W}m')
 
-        store_data = {'eq_text': eq_text, 'g_r2': g_r2, 'g_r2_adj': g_r2_adj, 'status': status}
+        # Portafoglio target = pesi ultima finestra rolling, normalizzati a 100 e in %
+        target = {c: float(last_weights[c]) for c in x_selected if last_weights.get(c, 0) > 0.0001}
+        tot = sum(target.values())
+        if tot > 0:
+            target = {c: round(w / tot * 100, 2) for c, w in target.items()}
+        store_data = {'eq_text': eq_text, 'g_r2': g_r2, 'g_r2_adj': g_r2_adj,
+                      'status': status, 'target': target, 'y': y_col}
 
         return (eq_text, stat_table, coef_table,
                 fig_w, suggest_block,
                 fig_r2, fig_fit, fig_alpha, fig_decomp,
                 status, store_data)
+
+    # ── Esporta il portafoglio target come Analisi (stesso archivio analyses.json) ──
+    @app.callback(
+        Output('sa-export-status', 'children'),
+        Input('sa-export-btn', 'n_clicks'),
+        State('style-analysis-store', 'data'),
+        State('sa-export-name', 'value'),
+        prevent_initial_call=True,
+    )
+    def sa_export(n, store, name):
+        if not n:
+            raise PreventUpdate
+        target = (store or {}).get('target') or {}
+        if not target:
+            return '⚠ Esegui prima la Style Analysis'
+        name = (name or '').strip()
+        if not name:
+            return '⚠ Scrivi un nome per l\'analisi'
+        u = _sa_username()
+        ns = _sa_current_json(u)
+        meta = {a: {'ticker': (ns.get(a, {}) or {}).get('ticker', ''),
+                    'valuta': (ns.get(a, {}) or {}).get('currency', 'EUR')}
+                for a in target}
+        ok = _sm.save_analysis(u, name, target, meta=meta)
+        if ok:
+            return f'✅ Salvata analisi "{name}" ({len(target)} asset) — importabile dal pulsante generale'
+        return '⚠ Errore durante il salvataggio'
