@@ -54,6 +54,36 @@ def _read_user_json():
     except Exception:
         return {}
 
+
+def _fe_consistency(data):
+    """Coerenza profilo: ogni asset ha dates+returns della stessa lunghezza."""
+    if not isinstance(data, dict):
+        return False
+    for v in data.values():
+        if not isinstance(v, dict):
+            return False
+        d, r = v.get('dates'), v.get('returns')
+        if not d or not r or len(d) != len(r):
+            return False
+    return True
+
+
+def _fe_atomic_json_write(path, data):
+    """Scrittura atomica (temp+rename) + validazione: mai file a metà o incoerente."""
+    if not _fe_consistency(data):
+        print("⚠ [frontiera] profilo incoerente — non salvato")
+        return False
+    try:
+        tmp = str(path) + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        print(f"⚠ [frontiera] scrittura current.json fallita: {e}")
+        return False
+
+
 def _update_user_json_fe(checked=None, weights=None):
     try:
         u = _get_username()
@@ -77,11 +107,7 @@ def _update_user_json_fe(checked=None, weights=None):
                     data[desc][k] = v
                     changed = True
     if changed:
-        try:
-            u = _get_username()
-            json.dump(data, open(_ROOT_DIR / 'sessions' / u / 'current.json', 'w'))
-        except Exception:
-            pass
+        _fe_atomic_json_write(_ROOT_DIR / 'sessions' / _get_username() / 'current.json', data)
 
 app.index_string = '''
 <!DOCTYPE html><html>
