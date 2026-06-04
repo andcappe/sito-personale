@@ -47,7 +47,36 @@ def _get_df(json_str):
     if not json_str:
         return None
     try:
-        return pd.read_json(json_str, orient='split')
+        import io
+        df = pd.read_json(io.StringIO(json_str), orient='split')
+        df.index = pd.to_datetime(df.index)
+        return df
+    except Exception:
+        return None
+
+
+def _sa_build_cr_from_current(username=None):
+    """Ricostruisce il DataFrame dei rendimenti da current.json (la fonte di
+    verità UNICA, persistita lato server). È il fallback quando lo store
+    'stock-data' del browser è vuoto — tipico nella sessione online."""
+    data = _sa_current_json(username or _sa_username())
+    if not data:
+        return None
+    cols = {}
+    for asset, v in data.items():
+        if not isinstance(v, dict):
+            continue
+        dates, rets = v.get('dates'), v.get('returns')
+        if not dates or not rets or len(dates) != len(rets):
+            continue
+        try:
+            cols[asset] = pd.Series(rets, index=pd.to_datetime(dates))
+        except Exception:
+            continue
+    if not cols:
+        return None
+    try:
+        return pd.DataFrame(cols).sort_index()
     except Exception:
         return None
 
@@ -459,6 +488,10 @@ def register_style_analysis_callbacks(app):
     )
     def sa_populate_y(options_tickers, current):
         if not options_tickers:
+            cr = _sa_build_cr_from_current()   # fonte unica: current.json
+            if cr is not None and not cr.empty:
+                options_tickers = [{'label': c, 'value': c} for c in cr.columns]
+        if not options_tickers:
             return [], None
         if current and any(o['value'] == current for o in options_tickers):
             return options_tickers, current
@@ -472,9 +505,9 @@ def register_style_analysis_callbacks(app):
         prevent_initial_call=False,
     )
     def sa_populate_x(stock_data):
-        if not stock_data:
-            return [], None, None
         cr = _get_df(stock_data)
+        if cr is None or cr.empty:
+            cr = _sa_build_cr_from_current()   # fonte unica: current.json
         if cr is None or cr.empty:
             return [], None, None
         checks = [
@@ -544,7 +577,6 @@ def register_style_analysis_callbacks(app):
                           _empty_fig(''), _empty_fig(''),
                           f'❌ {msg}', None)
 
-        if not stock_data:       return _e('Nessun dato caricato')
         if not y_col:            return _e('Seleziona la variabile Y')
 
         x_selected = [ids['index'] for vals, ids in zip(x_vals, x_ids) if vals]
@@ -552,7 +584,9 @@ def register_style_analysis_callbacks(app):
         if y_col in x_selected:  return _e('Y non può essere tra gli X')
 
         cr = _get_df(stock_data)
-        if cr is None:           return _e('Errore lettura dati')
+        if cr is None or cr.empty:
+            cr = _sa_build_cr_from_current()   # fonte unica: current.json
+        if cr is None or cr.empty:  return _e('Nessun dato caricato')
 
         if date_start: cr = cr.loc[pd.Timestamp(date_start):]
         if date_end:   cr = cr.loc[:pd.Timestamp(date_end)]
