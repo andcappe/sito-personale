@@ -2343,8 +2343,15 @@ app.layout = html.Div([
                 html.Div('2. Salva come Analisi (nuova o sovrascrivi esistente):',
                          style={'font-size': '11px', 'font-weight': '600',
                                 'color': '#1a3a5c', 'margin-bottom': '6px'}),
-                dcc.Dropdown(id='pio-exp-profile', placeholder='Sovrascrivi un\'analisi esistente…',
-                             style={'font-size': '11px', 'margin-bottom': '6px'}),
+                html.Div([
+                    dcc.Dropdown(id='pio-exp-profile', placeholder='Sovrascrivi un\'analisi esistente…',
+                                 style={'font-size': '11px', 'flex': '1'}),
+                    html.Button('🗑', id='pio-exp-del-btn', n_clicks=0,
+                                title="Cancella l'analisi selezionata",
+                                style={'background': '#c0392b', 'color': 'white', 'border': 'none',
+                                       'padding': '6px 10px', 'border-radius': '4px',
+                                       'cursor': 'pointer', 'font-size': '12px', 'margin-left': '6px'}),
+                ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '6px'}),
                 dcc.Input(id='pio-exp-new', placeholder='…oppure scrivi una nuova analisi',
                           style={'width': '100%', 'font-size': '11px', 'margin-bottom': '12px',
                                  'padding': '5px 8px', 'border': '1px solid #aaa',
@@ -3996,6 +4003,29 @@ def pio_delete(n, name):
         raise PreventUpdate
     if not name:
         return no_update, no_update, no_update, "⚠ Seleziona prima un'analisi da cancellare"
+    _u = _get_username()
+    ok = _sm.delete_analysis(_u, name)
+    opts = [{'label': a, 'value': a} for a in _sm.list_analyses(_u)]
+    if ok:
+        return opts, opts, None, f'🗑 Analisi "{name}" cancellata'
+    return no_update, no_update, no_update, '⚠ Cancellazione non riuscita'
+
+
+# ── Cancella l'analisi selezionata DALLA VISTA ESPORTA ───────────────────────
+@app.callback(
+    Output('pio-exp-profile', 'options', allow_duplicate=True),
+    Output('pio-imp-profile', 'options', allow_duplicate=True),
+    Output('pio-exp-profile', 'value',   allow_duplicate=True),
+    Output('pio-exp-status',  'children', allow_duplicate=True),
+    Input('pio-exp-del-btn', 'n_clicks'),
+    State('pio-exp-profile', 'value'),
+    prevent_initial_call=True,
+)
+def pio_export_delete(n, name):
+    if not n:
+        raise PreventUpdate
+    if not name:
+        return no_update, no_update, no_update, "⚠ Seleziona prima un'analisi da cancellare nel menu sopra"
     _u = _get_username()
     ok = _sm.delete_analysis(_u, name)
     opts = [{'label': a, 'value': a} for a in _sm.list_analyses(_u)]
