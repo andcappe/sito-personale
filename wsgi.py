@@ -21,6 +21,18 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# ─── Storage persistente (S3/R2): scarica i dati dal bucket PRIMA di montare le
+#     app, così sopravvivono ai deploy/restart del filesystem effimero di DO.
+#     No-op se le env vars S3_* non sono presenti (es. sviluppo locale).
+try:
+    import cloud_storage
+    if cloud_storage.enabled():
+        cloud_storage.pull_all()
+    else:
+        print("• [cloud] storage persistente disattivato (nessuna env var S3_*) — uso disco locale", flush=True)
+except Exception as _e:
+    print(f"⚠ [cloud] init fallito (uso disco locale): {_e}", flush=True)
+
 
 def _load(module_name, folder):
     folder_path = os.path.join(ROOT, folder)

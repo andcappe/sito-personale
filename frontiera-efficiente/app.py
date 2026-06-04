@@ -40,6 +40,17 @@ app.server.config['MAX_CONTENT_LENGTH'] = 64 * 1024 * 1024
 
 _ROOT_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent
 
+def _cloud_push(path):
+    """Replica il file su storage persistente (S3/R2) se configurato. Best-effort."""
+    try:
+        import sys as _sys
+        if str(_ROOT_DIR) not in _sys.path:
+            _sys.path.insert(0, str(_ROOT_DIR))
+        import cloud_storage
+        cloud_storage.push(path)
+    except Exception:
+        pass
+
 def _get_username():
     try:
         from flask import session as _fs
@@ -78,6 +89,7 @@ def _fe_atomic_json_write(path, data):
         with open(tmp, 'w') as f:
             json.dump(data, f)
         os.replace(tmp, path)
+        _cloud_push(path)       # replica su storage persistente (S3/R2)
         return True
     except Exception as e:
         print(f"⚠ [frontiera] scrittura current.json fallita: {e}")

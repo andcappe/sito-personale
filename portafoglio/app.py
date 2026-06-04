@@ -389,6 +389,15 @@ _ISIN_STATE: dict = {
 
 _ROOT_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent
 
+def _cloud_push(path):
+    """Replica il file su storage persistente (S3/R2) se configurato. Best-effort."""
+    try:
+        import cloud_storage
+        cloud_storage.push(path)
+    except Exception:
+        pass
+
+
 def _user_json_path(username=None):
     u = username or _get_username()
     d = _ROOT_DIR / 'sessions' / u
@@ -435,6 +444,7 @@ def _atomic_json_write(path, data, *, validate=True):
         with open(tmp, 'w') as f:
             json.dump(data, f)
         os.replace(tmp, path)   # atomico sullo stesso filesystem
+        _cloud_push(path)       # replica su storage persistente (S3/R2)
         return True
     except Exception as e:
         print(f'⚠ _atomic_json_write: {e}')
@@ -601,6 +611,7 @@ def _atomic_pkl_write(path: Path, data: dict):
     with open(tmp, 'wb') as f:
         pickle.dump(data, f)
     os.replace(tmp, path)
+    _cloud_push(path)           # replica su storage persistente (S3/R2)
 
 
 def _do_add_tickers(new_tickers, new_descr, new_valuta, start_date, cache_file):

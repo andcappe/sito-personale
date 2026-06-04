@@ -67,6 +67,15 @@ def _load_pkl(path: Path):
         return None
 
 
+def _cloud_push(path):
+    """Replica il file su storage persistente (S3/R2) se configurato. Best-effort."""
+    try:
+        import cloud_storage
+        cloud_storage.push(path)
+    except Exception:
+        pass
+
+
 def _save_pkl(path: Path, data: dict) -> bool:
     """Salva pkl in modo atomico (write-rename)."""
     try:
@@ -75,6 +84,7 @@ def _save_pkl(path: Path, data: dict) -> bool:
         with open(tmp, 'wb') as f:
             pickle.dump(data, f, protocol=4)
         tmp.replace(path)
+        _cloud_push(path)
         return True
     except Exception as e:
         print(f"⚠ [sessions_manager] save error {path.name}: {e}")
@@ -398,6 +408,7 @@ def _save_analyses(username: str, data: dict) -> bool:
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         tmp.replace(path)
+        _cloud_push(path)
         return True
     except Exception as e:
         print(f"⚠ [sessions_manager] save_analyses {username}: {e}")
