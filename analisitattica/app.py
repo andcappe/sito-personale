@@ -389,6 +389,14 @@ def _file_modal():
                              style={'max-height': '280px', 'overflow-y': 'auto'}),
                 ], style={'flex': '1', 'padding-left': '20px'}),
             ], style={'display': 'flex'}),
+            # Footer: pulsante Chiudi in basso a destra
+            html.Div([
+                html.Button('Chiudi', id='at-file-close-btn', n_clicks=0,
+                            style={'border': 'none', 'border-radius': '4px', 'cursor': 'pointer',
+                                   'font-weight': 'bold', 'font-size': '12px', 'padding': '7px 20px',
+                                   'background': '#5a1a6a', 'color': 'white'}),
+            ], style={'display': 'flex', 'justify-content': 'flex-end', 'margin-top': '14px',
+                      'border-top': '1px solid #eee', 'padding-top': '10px'}),
         ], style={'position': 'relative'}),
     ])
 
@@ -874,16 +882,17 @@ def at_export(n):
     Output('at-file-panel', 'style'),
     Input('at-file-btn', 'n_clicks'),
     Input('at-file-close', 'n_clicks'),
+    Input('at-file-close-btn', 'n_clicks'),
     State('at-file-panel', 'style'),
     prevent_initial_call=True,
 )
-def at_toggle_file_panel(n_open, n_close, st):
+def at_toggle_file_panel(n_open, n_close, n_close2, st):
     # position:fixed + z-index altissimo + montato alla radice → SOPRA tutto
     base = {'position': 'fixed', 'top': '150px', 'left': '1.5%', 'background': 'white',
             'border': '1px solid #ccc', 'border-radius': '8px',
             'box-shadow': '0 8px 30px rgba(0,0,0,0.28)', 'padding': '16px',
             'z-index': 5000, 'min-width': '480px', 'max-width': '95vw'}
-    if callback_context.triggered_id == 'at-file-close':
+    if callback_context.triggered_id in ('at-file-close', 'at-file-close-btn'):
         return {**base, 'display': 'none'}
     if st and st.get('display') != 'none':
         return {**base, 'display': 'none'}
