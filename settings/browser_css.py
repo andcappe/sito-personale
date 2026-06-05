@@ -47,3 +47,21 @@ BROWSER_RESET_CSS = f"""
     font-size: inherit;
   }}
 """
+
+
+# ─── CSS PAGINA UNIFICATO PER TUTTO IL SITO ──────────────────────────────────
+# Reset + layout pagina identico ad Analisi di Portafoglio (font, sfondo,
+# contenitore "spazio pagina" sotto la navbar fissa, intestazione pagina).
+# Le app lo iniettano nel <style> del loro index_string al posto del solo reset.
+SITE_CSS = BROWSER_RESET_CSS + """
+  /* ── Layout pagina unificato (identico ad Analisi di Portafoglio) ── */
+  body { background: #ffffff; color: #1a2a4a; }
+  .page-wrap  { margin-top: 106px; padding: 0 1%; }
+  .page-head  { padding: 14px 20px 12px; border-bottom: 2px solid #e2e8f0;
+                background: linear-gradient(90deg, #f0f4fb 0%, #ffffff 100%);
+                margin-bottom: 10px; }
+  .page-head h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #1a3a6b;
+                  font-family: 'Playfair Display', serif; letter-spacing: 0.02em; }
+  .page-head .sub { font-size: 1.1rem; font-weight: 400; color: #4a5d7a; }
+  @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+"""

@@ -22,6 +22,7 @@ if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
 import sessions_manager as _sm
+import data_core as dc          # logica dati condivisa (un solo posto)
 
 from style_analysis import get_style_analysis_tab, register_style_analysis_callbacks
 
@@ -2247,14 +2248,9 @@ app.layout = html.Div([
                               message='Sovrascrivere i pesi P1/P2/P3 con quelli della Frontiera?'),
         ], style={'display': 'none'}),
 
-        # ── GRUPPO 1 · DATI ───────────────────────────────────────────────────
-        html.Span('Dati', style=_GRP_LABEL),
+        # ── Pulsanti (etichette/separatori rimossi; ordine da definire) ───────
         get_file_panel_layout(),
 
-        html.Div(style=_GRP_SEP),
-
-        # ── GRUPPO 2 · IMPORTA ────────────────────────────────────────────────
-        html.Span('Importa', style=_GRP_LABEL),
         dcc.Upload(
             id='upload-data',
             children=html.Div(['⬆ Carica file']),
@@ -2278,10 +2274,6 @@ app.layout = html.Div([
                            'background': '#e8f5e9', 'border': '1px solid #a5d6a7',
                            'color': '#1b5e20'}),
 
-        html.Div(style=_GRP_SEP),
-
-        # ── GRUPPO 3 · SCAMBIA ────────────────────────────────────────────────
-        html.Span('Scambia', style=_GRP_LABEL),
         html.Button('🔄 Importa/Esporta Portafoglio', id='port-io-btn', n_clicks=0,
                     title='Salva i portafogli P1/P2/P3 in un profilo o importane di salvati',
                     style={'font-size': '11px', 'padding': '5px 12px',
@@ -3628,34 +3620,16 @@ app.clientside_callback(
 def salva_dati(n_clicks, original_prices_data):
     if not n_clicks or n_clicks == 0:
         raise PreventUpdate
-
-    # Legge dal buffer cliente (per-utente) se attivo, altrimenti da ETF
-    with _CL_LOCK:
-        cl_prices = _cl_buf(_get_username()).get('original_prices')
-    if cl_prices is not None and not cl_prices.empty:
-        df_prices = cl_prices
-    else:
-        with _DL_LOCK:
-            df_prices = _DL_BUFFER.get('original_prices')
-    if df_prices is None or df_prices.empty:
-        if original_prices_data:
-            df_prices = pd.read_json(io.StringIO(original_prices_data), orient='split')
-            df_prices.index = pd.to_datetime(df_prices.index)
-
-    if df_prices is None or df_prices.empty:
-        return (no_update,
-                html.Div('⚠ Nessun dato disponibile — clicca prima ⟳ Aggiorna',
-                         style={'color': '#e67e22', 'font-size': '11px'}),
-                _MODAL_HIDDEN)
     try:
-        df_prices.index = pd.to_datetime(df_prices.index).strftime('%Y-%m-%d')
-        df_prices.index.name = 'Data'
-        out = io.BytesIO()
-        with pd.ExcelWriter(out, engine='openpyxl') as writer:
-            df_prices.to_excel(writer, sheet_name='Prezzi')
-        out.seek(0)
+        if not dc.read_current(_get_username()):
+            return (no_update,
+                    html.Div('⚠ Nessun dato disponibile — clicca prima ⟳ Aggiorna',
+                             style={'color': '#e67e22', 'font-size': '11px'}),
+                    _MODAL_HIDDEN)
+        # Esporta dal file UNICO current.json (fogli Asset + Prezzi) via modulo condiviso
         return (
-            dcc.send_bytes(out.read(), 'prezzi_asset.xlsx'),
+            dcc.send_bytes(lambda b: b.write(dc.export_bytes(_get_username())),
+                           'dati_portafoglio.xlsx'),
             html.Div('✓ File scaricato', style={'color': 'green', 'font-size': '11px'}),
             _MODAL_HIDDEN,
         )
@@ -4065,48 +4039,8 @@ def pio_reset_cols(n, all_ids):
     prevent_initial_call=True,
 )
 def download_template(n_clicks):
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = 'Portafoglio'
-
-    headers   = ['TICKER', 'DESCRIZIONE', 'VALUTA', 'Peso %']
-    col_widths = [14, 32, 10, 10]
-    examples  = [
-        ['ISAC.L',   'Az. ACWI',                    'USD', ''],
-        ['SWDA.MI',  'Az. World',                    'EUR', ''],
-        ['CSSPX.MI', 'Az. USA SP500',                'EUR', ''],
-        ['EIMI.MI',  'Az. Emerging Market',          'EUR', ''],
-        ['NVDA',     'NVIDIA Corporation',           'USD', ''],
-    ]
-
-    hdr_fill  = PatternFill('solid', fgColor='1A3A5C')
-    hdr_font  = Font(bold=True, color='FFFFFF', size=10)
-    hdr_aln   = Alignment(horizontal='center', vertical='center')
-    alt_fill  = PatternFill('solid', fgColor='EEF4FF')
-    whi_fill  = PatternFill('solid', fgColor='FFFFFF')
-    thin      = Side(style='thin', color='C0D0E8')
-    border    = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    for ci, (h, w) in enumerate(zip(headers, col_widths), 1):
-        c = ws.cell(row=1, column=ci, value=h)
-        c.font, c.fill, c.alignment, c.border = hdr_font, hdr_fill, hdr_aln, border
-        ws.column_dimensions[c.column_letter].width = w
-    ws.row_dimensions[1].height = 18
-
-    for ri, row_data in enumerate(examples, 2):
-        fill = alt_fill if ri % 2 == 0 else whi_fill
-        for ci, val in enumerate(row_data, 1):
-            c = ws.cell(row=ri, column=ci, value=val)
-            c.fill, c.border = fill, border
-            c.alignment = Alignment(horizontal='left', vertical='center')
-        ws.row_dimensions[ri].height = 16
-
-    out = io.BytesIO()
-    wb.save(out)
-    out.seek(0)
-    return dcc.send_bytes(out.read(), 'template_portafoglio.xlsx')
+    # Template generato dal modulo condiviso data_core (uguale in Analisi Tattica)
+    return dcc.send_bytes(lambda b: b.write(dc.template_bytes()), 'template_portafoglio.xlsx')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
