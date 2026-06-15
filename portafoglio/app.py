@@ -803,7 +803,13 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
 
     _dl_kwargs = dict(auto_adjust=True, progress=False)
     if _proxy:
-        _dl_kwargs['proxy'] = _proxy
+        # yfinance recente NON accetta proxy= in download() (TypeError). requests
+        # usa già HTTPS_PROXY/https_proxy dall'ambiente; in più lo impostiamo via
+        # set_config quando disponibile. NON passare proxy nei kwargs di download.
+        try:
+            yf.set_config(proxy=_proxy)
+        except Exception:
+            pass
         print(f"▶ Download via proxy: {_proxy.split('@')[-1]}")
 
     # Patch User-Agent sulla sessione requests usata da yfinance
@@ -918,7 +924,12 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
               'Chrome/124.0.0.0 Safari/537.36')
     _dl_kwargs = dict(auto_adjust=True, progress=False)
     if _proxy:
-        _dl_kwargs['proxy'] = _proxy
+        # yfinance recente non accetta proxy= in download(): requests usa già
+        # HTTPS_PROXY dall'ambiente; lo impostiamo anche via set_config se c'è.
+        try:
+            yf.set_config(proxy=_proxy)
+        except Exception:
+            pass
 
     try:
         import yfinance.data as _yfd
@@ -1052,7 +1063,12 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
     _dl_kwargs = dict(auto_adjust=True, progress=False)
     if _proxy:
-        _dl_kwargs['proxy'] = _proxy
+        # yfinance recente non accetta proxy= in download(): requests usa già
+        # HTTPS_PROXY dall'ambiente; lo impostiamo anche via set_config se c'è.
+        try:
+            yf.set_config(proxy=_proxy)
+        except Exception:
+            pass
     try:
         import yfinance.data as _yfd
         if hasattr(_yfd, 'YfData'):
