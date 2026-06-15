@@ -406,6 +406,24 @@ def _user_json_path(username=None):
     return d / 'current.json'
 
 
+def _personale_path(username=None):
+    """File personale PERSISTENTE (copia di current.json) per tornarci dopo i default."""
+    u = username or _get_username()
+    d = _ROOT_DIR / 'sessions' / u
+    d.mkdir(parents=True, exist_ok=True)
+    return d / 'personale.json'
+
+
+def _mark_personale(username=None):
+    """Marca il file di lavoro come Personale. UN SOLO file: scrive il tipo dentro
+    current.json (nessuna copia/altro file). Al rientro current.json viene
+    ricaricato così com'è (è già il file personale)."""
+    u = username or _get_username()
+    _active_file_store['is_personale'] = True
+    _active_file_store['filename'] = '__personale__'
+    _set_tipo('personale', username=u)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TAPPA 1 — Scrittura unica, ATOMICA e COERENTE del file dati (current.json)
 # Garanzia: il file non resta mai scritto a metà (temp+rename) e non viene
@@ -421,7 +439,7 @@ def _profile_consistency(data):
         return True, []  # vuoto = lecito (default non ancora caricato)
     for desc, v in data.items():
         if not isinstance(v, dict):
-            errs.append(f'{desc}: voce non valida'); continue
+            continue  # chiavi meta (es. "_tipo": "personale") — non sono asset, si ignorano
         dates = v.get('dates'); rets = v.get('returns')
         if not dates or not rets:
             errs.append(f'{desc}: senza prezzi/rendimenti')
@@ -430,25 +448,39 @@ def _profile_consistency(data):
     return (len(errs) == 0), errs
 
 
+_JSON_WRITE_LOCK = threading.Lock()
+
+
 def _atomic_json_write(path, data, *, validate=True):
     """
     Scrive il JSON in modo atomico (temp+rename). Se validate=True e i dati sono
     incoerenti NON sovrascrive il file (resta l'ultimo stato buono) e ritorna False.
+
+    Temp file con nome UNIVOCO (pid+thread+counter): con gunicorn multi-thread (e
+    la Frontiera nello stesso processo) due scritture concorrenti NON devono mai
+    condividere lo stesso .tmp, altrimenti si sovrappongono e corrompono il JSON
+    (es. virgole doppie). Un lock serializza inoltre le scritture nel processo.
     """
     if validate:
         ok, errs = _profile_consistency(data)
         if not ok:
             print(f"⚠ profilo INCOERENTE — non salvato. Esempi: {errs[:3]}")
             return False
+    tmp = Path(f'{path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp')
     try:
-        tmp = Path(str(path) + '.tmp')
-        with open(tmp, 'w') as f:
-            json.dump(data, f)
-        os.replace(tmp, path)   # atomico sullo stesso filesystem
-        _cloud_push(path)       # replica su storage persistente (S3/R2)
+        with _JSON_WRITE_LOCK:
+            with open(tmp, 'w') as f:
+                json.dump(data, f)
+            os.replace(tmp, path)   # atomico sullo stesso filesystem
+        _cloud_push(path)           # replica su storage persistente (S3/R2)
         return True
     except Exception as e:
         print(f'⚠ _atomic_json_write: {e}')
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
         return False
 
 
@@ -473,23 +505,24 @@ def profile_report(username=None):
     }
 
 
-def _write_user_json(cr, op, tm, vm=None, username=None, reset_state=False):
+def _write_user_json(cr, op, tm, vm=None, username=None, reset_state=False, tipo=None):
     if cr is None or op is None:
         return
     vm = vm or {}
     path = _user_json_path(username)
     existing = {}
-    if not reset_state:
-        try:
-            existing = json.load(open(path))
-        except Exception:
-            pass
+    try:
+        existing = json.load(open(path))   # serve sempre per conservare _tipo
+    except Exception:
+        pass
     dates = [d.strftime('%Y-%m-%d') for d in op.index]
     result = {}
     for desc in cr.columns:
         if desc not in op.columns:
             continue
-        ex = existing.get(desc, {})
+        ex = existing.get(desc, {}) if not reset_state else {}
+        if not isinstance(ex, dict):
+            ex = {}
         result[desc] = {
             'ticker':   tm.get(desc, desc),
             'currency': vm.get(desc, ex.get('currency', 'EUR')),
@@ -501,6 +534,11 @@ def _write_user_json(cr, op, tm, vm=None, username=None, reset_state=False):
             'P2':       0     if reset_state else ex.get('P2', 0),
             'P3':       0     if reset_state else ex.get('P3', 0),
         }
+    # Tipo del file di lavoro (unica fonte: current.json). Se non passato, conserva
+    # quello esistente.
+    _tipo = tipo if tipo is not None else existing.get('_tipo')
+    if _tipo:
+        result['_tipo'] = _tipo
     _atomic_json_write(path, result)
 
 def _update_user_json(checked=None, weights=None, username=None):
@@ -513,12 +551,16 @@ def _update_user_json(checked=None, weights=None, username=None):
     if checked is not None:
         s = set(checked)
         for desc in data:
+            if not isinstance(data[desc], dict):
+                continue
             v = desc in s
             if data[desc].get('checked') != v:
                 data[desc]['checked'] = v
                 changed = True
     if weights is not None:
         for desc in data:
+            if not isinstance(data[desc], dict):
+                continue
             for k in ('P1', 'P2', 'P3'):
                 v = float(weights.get(k, {}).get(desc, 0) or 0)
                 if data[desc].get(k) != v:
@@ -528,10 +570,33 @@ def _update_user_json(checked=None, weights=None, username=None):
         _atomic_json_write(path, data)
 
 def _read_user_json(username=None):
+    """Solo voci-asset di current.json (le chiavi meta tipo _tipo sono escluse)."""
     try:
-        return json.load(open(_user_json_path(username)))
+        raw = json.load(open(_user_json_path(username)))
+        return {k: v for k, v in raw.items() if isinstance(v, dict)}
     except Exception:
         return {}
+
+
+def _read_tipo(username=None):
+    """Tipo del file di lavoro: 'personale' oppure 'default:ETF.xlsx' ('' se assente)."""
+    try:
+        raw = json.load(open(_user_json_path(username)))
+        return raw.get('_tipo', '') or ''
+    except Exception:
+        return ''
+
+
+def _set_tipo(tipo, username=None):
+    """Imposta il tipo dentro current.json (nessun file separato)."""
+    path = _user_json_path(username)
+    try:
+        raw = json.load(open(path))
+    except Exception:
+        return
+    if raw.get('_tipo') != tipo:
+        raw['_tipo'] = tipo
+        _atomic_json_write(path, raw)
 
 
 def _get_username() -> str:
@@ -720,8 +785,10 @@ def _do_full_update(tickers, descr, valuta, start_date, cache_file, incremental=
         _do_download(tickers, descr, valuta, start_date, cache_file=cache_file, update_buffer=True)
 
 
-def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True):
-    """Scarica da Yahoo Finance e salva nella cache; cache_file=None usa market_data.pkl."""
+def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True, username=None, tipo=None):
+    """Scarica da Yahoo Finance e salva nella cache; cache_file=None usa market_data.pkl.
+    Se username è dato e update_buffer, scrive anche current.json (fonte unica).
+    tipo: imposta '_tipo' in current.json (es. 'default:CRIPTO.xlsx')."""
     global _DL_STATE, _DL_BUFFER
     total = len(tickers)
     with _DL_LOCK:
@@ -828,6 +895,13 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
             _DL_BUFFER.update(data)
             _DL_STATE['status'] = 'done'
         _DL_STATE['current'] = total
+    # Fonte unica: scrivi current.json per l'utente (così il polling lo legge)
+    if username and update_buffer:
+        try:
+            _write_user_json(close_returns, original_prices, ticker_map,
+                             username=username, reset_state=True, tipo=tipo)
+        except Exception as e:
+            print(f"⚠ _do_download current.json fallito: {e}", flush=True)
 
 
 def _do_download_client(tickers, descrizione, valuta, start_date, username='anon', pesi_p1=None):
@@ -950,10 +1024,12 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
     })
     with _CL_LOCK:
         _CL_STATES[username]['status'] = 'done'
+    # Caricare un file ticker da zero → file di lavoro Personale (persistito).
+    _mark_personale(username)
     print(f"✓ Download cliente [{username}]: {len(all_prices)} asset isolati")
 
 
-def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, username, filename, all_descr=None):
+def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, username, filename, all_descr=None, persist_personale=False):
     """Scarica nuovi ticker da Gestisci, merge con i dati correnti (_DL_BUFFER), salva pkl utente.
     all_descr: lista completa delle descrizioni desiderate — filtra il merged result a questi soli."""
     import shutil as _shutil
@@ -962,6 +1038,10 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
 
     with _DL_LOCK:
         _DL_STATE.update({'status': 'running', 'current': 0, 'total': total, 'errors': []})
+    # Su file personale il polling legge il buffer CLIENT: tienilo allineato (running)
+    with _CL_LOCK:
+        _CL_STATES.setdefault(username, {}).update(
+            {'status': 'running', 'current': 0, 'total': total, 'errors': []})
 
     # Non copiare il pkl esistente: partiamo sempre da zero per non includere ticker non voluti.
     # Se l'utente non ha un pkl, non creiamone uno adesso — lo creiamo dopo il merge.
@@ -1042,6 +1122,8 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     if not all_prices:
         with _DL_LOCK:
             _DL_STATE['status'] = 'error'
+        with _CL_LOCK:
+            _CL_STATES.setdefault(username, {})['status'] = 'error'
         print(f"❌ Gestisci [{username}]: nessun dato scaricato")
         return
 
@@ -1054,9 +1136,24 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     merged_op  = new_prices.copy()
     merged_tm  = dict(new_tm)
 
-    # Merge con i dati esistenti: prima pkl utente, poi fallback su _DL_BUFFER
+    # Merge con i dati esistenti. FONTE PRIMARIA: current.json (sempre la lista
+    # corrente completa) → l'accodo non perde mai gli asset esistenti.
+    # Fallback: pkl utente, poi _DL_BUFFER.
     ex_op, ex_tm = None, {}
-    if user_pkl.exists():
+    try:
+        _cur = json.load(open(_user_json_path(username)))
+        _cols = {}
+        for _a, _v in _cur.items():
+            if isinstance(_v, dict) and _v.get('prices') and _v.get('dates'):
+                _cols[_a] = pd.Series(_v['prices'], index=pd.to_datetime(_v['dates']))
+                ex_tm[_a] = _v.get('ticker') or _a
+        if _cols:
+            ex_op = pd.DataFrame(_cols).sort_index()
+            print(f"✓ Merge gestisci da current.json — {len(ex_op.columns)} asset esistenti")
+    except Exception as _e:
+        ex_op, ex_tm = None, {}
+
+    if (ex_op is None or ex_op.empty) and user_pkl.exists():
         try:
             with open(user_pkl, 'rb') as f:
                 ex = pickle.load(f)
@@ -1106,7 +1203,15 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
         _DL_STATE['status']  = 'done'
         _DL_STATE['current'] = total
     _write_user_json(merged_cr, merged_op, merged_tm, username=username)
+    # Stato client 'done': il polling (su file personale) legge current.json aggiornato
+    with _CL_LOCK:
+        _CL_STATES.setdefault(username, {}).update({'status': 'done', 'current': total})
     print(f"✓ Gestisci [{username}]: {user_pkl.name} — {len(merged_op.columns)} asset")
+
+    # L'accodo modifica il file → tipo "personale" dentro current.json (un solo
+    # file, nessuna copia). Così al rientro current.json viene ricaricato com'è.
+    if persist_personale:
+        _set_tipo('personale', username=username)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1831,21 +1936,8 @@ def get_file_panel_layout():
                            'padding': '6px 14px', 'font-size': '12px'}),
         html.Div(id='file-panel', style={'display': 'none'}, children=[
             html.Div([
-                # ── Colonna sinistra: Default + Salva ──────────────────────
+                # ── Colonna sinistra: Salva (i default sono nel selettore esterno) ──
                 html.Div([
-                    html.B('📂 File di default',
-                           style={'font-size': '11px', 'color': '#1a3a5c',
-                                  'display': 'block', 'margin-bottom': '8px'}),
-                    *[html.Button(label, id={'type': 'fp-default-btn', 'index': key},
-                                  n_clicks=0,
-                                  style={**_bb, 'background': '#e8f4fb',
-                                         'color': '#1a3a5c', 'width': '100%',
-                                         'margin-bottom': '4px',
-                                         'border': '1px solid #90caf9'})
-                      for key, label in [('ETF', '📊 ETF'),
-                                         ('CRIPTO', '₿ Cripto'),
-                                         ('CURRENCIES', '💱 Valute')]],
-                    html.Hr(style={'margin': '12px 0'}),
                     html.B('💾 Salva sessione come…',
                            style={'font-size': '11px', 'color': '#1a3a5c',
                                   'display': 'block', 'margin-bottom': '8px'}),
@@ -1877,6 +1969,13 @@ def get_file_panel_layout():
                              style={'max-height': '280px', 'overflow-y': 'auto'}),
                 ], style={'flex': '1', 'padding-left': '20px'}),
             ], style={'display': 'flex'}),
+            # Footer: pulsante Chiudi in basso a destra
+            html.Div([
+                html.Button('Chiudi', id='fp-close-btn', n_clicks=0,
+                            style={**_bb, 'background-color': '#5a1a6a', 'color': 'white',
+                                   'padding': '7px 20px'}),
+            ], style={'display': 'flex', 'justify-content': 'flex-end', 'margin-top': '14px',
+                      'border-top': '1px solid #eee', 'padding-top': '10px'}),
         ]),
     ], style={'display': 'inline-block', 'position': 'relative'})
 
@@ -1913,6 +2012,101 @@ def get_date_range_bar(suffix):
         ], style={'display': 'flex', 'align-items': 'center', 'padding': '6px 12px',
                   'background': '#f0f4fa', 'border': '1px solid #d0d8e8',
                   'border-radius': '6px', 'margin-bottom': '8px', 'gap': '4px'}),
+    ])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layout Tab — Matrice di Correlazione (portata da ir_fe_14.py, adattata)
+# ─────────────────────────────────────────────────────────────────────────────
+def get_correlation_matrix_tab(options_tickers=None):
+    """Heatmap di correlazione (rendimenti settimanali) + correlazione rolling."""
+    return html.Div([
+        # ── Riga controlli ───────────────────────────────────────────────────
+        html.Div([
+            get_date_range_bar('corr'),
+            html.Div([
+                html.Label("Finestra (giorni):", style={'margin-right': '6px', 'font-size': '12px', 'white-space': 'nowrap'}),
+                dcc.Input(id='correlation-window-input', type='number', value=252, min=10,
+                          placeholder='Giorni', style={'width': '80px', 'margin-right': '14px'}),
+                html.Label("Benchmark:", style={'margin-right': '6px', 'font-size': '12px', 'white-space': 'nowrap'}),
+                dcc.Dropdown(id='benchmark-selector-corr', options=[], value=None,
+                             placeholder='Seleziona benchmark…', clearable=False,
+                             style={'width': '200px', 'font-size': '11px', 'margin-right': '14px'}),
+                html.Button('Update', id='update-correlation-button', n_clicks=0,
+                            style={'background-color': '#28a745', 'color': 'white', 'border': 'none',
+                                   'padding': '7px 18px', 'border-radius': '4px', 'cursor': 'pointer',
+                                   'font-weight': 'bold', 'font-size': '12px'}),
+                html.Div(id='corr-filter-info',
+                         style={'font-size': '11px', 'color': '#0066cc', 'margin-left': '16px', 'align-self': 'center'}),
+            ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '6px', 'flex-wrap': 'wrap'}),
+            html.Div(id='date-values-correlation',
+                     style={'font-size': '11px', 'color': '#666', 'margin-bottom': '4px'}),
+        ], style={'padding': '8px 12px 0 12px'}),
+
+        # ── Corpo a due colonne ──────────────────────────────────────────────
+        html.Div([
+            # Colonna sinistra: griglia asset con spunte MT (matrice) e ML (rolling)
+            html.Div([
+                html.Div('Asset da confrontare',
+                         style={'font-weight': 'bold', 'font-size': '11px', 'color': '#1a3a5c',
+                                'margin-bottom': '2px', 'text-align': 'center'}),
+                html.Div('MT = matrice · ML = rolling',
+                         style={'font-size': '9px', 'color': '#888', 'margin-bottom': '8px', 'text-align': 'center'}),
+                # Intestazione colonne con pulsanti seleziona/deseleziona tutti
+                html.Div([
+                    html.Div('', style={'flex': '1'}),
+                    html.Div([
+                        html.Div('MT', style={'font-size': '10px', 'font-weight': 'bold', 'color': '#1a3a5c'}),
+                        html.Button('☑', id='corr-mt-all', n_clicks=0,
+                                    title='Seleziona/deseleziona tutti — Matrice',
+                                    style={'font-size': '11px', 'padding': '0 3px', 'border': '1px solid #ccc',
+                                           'background': '#eef4ff', 'borderRadius': '3px', 'cursor': 'pointer',
+                                           'lineHeight': '14px'}),
+                    ], style={'width': '34px', 'display': 'flex', 'flexDirection': 'column',
+                              'alignItems': 'center', 'gap': '2px'}),
+                    html.Div([
+                        html.Div('ML', style={'font-size': '10px', 'font-weight': 'bold', 'color': '#e6550d'}),
+                        html.Button('☑', id='corr-ml-all', n_clicks=0,
+                                    title='Seleziona/deseleziona tutti — Rolling',
+                                    style={'font-size': '11px', 'padding': '0 3px', 'border': '1px solid #ccc',
+                                           'background': '#fff3e8', 'borderRadius': '3px', 'cursor': 'pointer',
+                                           'lineHeight': '14px'}),
+                    ], style={'width': '34px', 'display': 'flex', 'flexDirection': 'column',
+                              'alignItems': 'center', 'gap': '2px'}),
+                ], style={'display': 'flex', 'align-items': 'flex-end', 'gap': '4px',
+                          'padding': '0 2px 6px 2px', 'borderBottom': '1px solid #e0e0e0',
+                          'margin-bottom': '4px'}),
+                html.Div(id='corr-asset-grid', children=[
+                    html.Div('(carica i dati per popolare)',
+                             style={'font-size': '10px', 'color': '#aaa', 'font-style': 'italic',
+                                    'text-align': 'center', 'padding': '10px 4px'})
+                ]),
+            ], style={'width': '24%', 'min-width': '180px', 'padding': '10px 8px 10px 12px',
+                      'border-right': '1px solid #e0e0e0', 'overflow-y': 'auto',
+                      'max-height': '88vh', 'box-sizing': 'border-box'}),
+
+            # Colonna destra: heatmap + legenda + rolling chart
+            html.Div([
+                dcc.Loading(id='loading-correlation', type='circle', children=[
+                    dcc.Graph(id='correlation-heatmap', style={'width': '100%', 'height': '48vh'},
+                              config={'responsive': True})]),
+                html.Div([
+                    html.Div('Legenda: ', style={'font-weight': 'bold', 'margin-right': '12px', 'font-size': '11px'}),
+                    html.Div('Verde ≥0.70', style={'background': '#2ca02c', 'color': 'white', 'padding': '3px 8px',
+                                                   'margin': '2px', 'border-radius': '3px', 'font-size': '10px'}),
+                    html.Div('Bianco [-0.50, 0.70)', style={'background': '#e0e0e0', 'color': 'black', 'padding': '3px 8px',
+                                                            'margin': '2px', 'border-radius': '3px', 'font-size': '10px'}),
+                    html.Div('Rosso ≤-0.50', style={'background': '#d62728', 'color': 'white', 'padding': '3px 8px',
+                                                    'margin': '2px', 'border-radius': '3px', 'font-size': '10px'}),
+                ], style={'display': 'flex', 'align-items': 'center', 'margin': '4px 0 6px 0', 'flex-wrap': 'wrap'}),
+                html.Hr(style={'margin': '6px 0'}),
+                html.Div('Correlazione Rolling',
+                         style={'font-weight': 'bold', 'font-size': '12px', 'color': '#1a3a5c', 'margin-bottom': '4px'}),
+                dcc.Loading(id='loading-rolling-corr', type='circle', children=[
+                    dcc.Graph(id='rolling-corr-chart', style={'width': '100%', 'height': '35vh'},
+                              config={'responsive': True})]),
+            ], style={'width': '76%', 'padding': '4px 8px', 'box-sizing': 'border-box'}),
+        ], style={'display': 'flex', 'align-items': 'flex-start'}),
     ])
 
 
@@ -2094,16 +2288,22 @@ def get_portfolio_analysis_tab(options_tickers):
                                      style={'width': '22%', 'font-weight': 'bold',
                                             'padding-left': '4px', 'font-size': '9px'}),
                             html.Div(id='sum-p1-display', children='0%',
-                                     style={'width': '8%', 'text-align': 'center',
-                                            'color': '#d62728', 'font-size': '10px'}),
+                                     style={'width': '12%', 'text-align': 'right',
+                                            'padding-right': '5px', 'font-weight': 'bold',
+                                            'color': '#d62728', 'font-size': '10px',
+                                            'box-sizing': 'border-box'}),
                             html.Div(id='sum-p2-display', children='0%',
-                                     style={'width': '8%', 'text-align': 'center',
-                                            'color': '#d62728', 'font-size': '10px'}),
+                                     style={'width': '12%', 'text-align': 'right',
+                                            'padding-right': '5px', 'font-weight': 'bold',
+                                            'color': '#d62728', 'font-size': '10px',
+                                            'box-sizing': 'border-box'}),
                             html.Div(id='sum-p3-display', children='0%',
-                                     style={'width': '8%', 'text-align': 'center',
-                                            'color': '#d62728', 'font-size': '10px'}),
-                            html.Div('', style={'width': '58%'}),
-                        ], style={'display': 'flex'}),
+                                     style={'width': '12%', 'text-align': 'right',
+                                            'padding-right': '5px', 'font-weight': 'bold',
+                                            'color': '#d62728', 'font-size': '10px',
+                                            'box-sizing': 'border-box'}),
+                            html.Div('', style={'width': '42%'}),
+                        ], style={'display': 'flex', 'align-items': 'center'}),
                     ], style={'margin-top': '10px'}),
                 ], style={'width': '35%', 'vertical-align': 'top'}),
 
@@ -2234,9 +2434,6 @@ app.layout = html.Div([
                                    'font-weight': 'bold', 'font-size': '12px'}),
             ]),
             html.Span(id='data-last-updated'),
-            dcc.Dropdown(id='file-selector', options=_list_files(),
-                         value='ETF.xlsx', clearable=False,
-                         style={'width': '160px'}, optionHeight=28),
             html.Button('✏️ Gestisci', id='gestisci-btn', n_clicks=0),
             get_session_panel_layout(),
             html.Button(id='delete-column-button', n_clicks=0),
@@ -2247,6 +2444,13 @@ app.layout = html.Div([
             dcc.ConfirmDialog(id='import-frontier-confirm',
                               message='Sovrascrivere i pesi P1/P2/P3 con quelli della Frontiera?'),
         ], style={'display': 'none'}),
+
+        # ── Selettore file ESTERNO: default (ETF/Cripto/Commodities) o file personale ──
+        html.Div([
+            dcc.Dropdown(id='file-selector', options=_list_files(),
+                         value='ETF.xlsx', clearable=False,
+                         style={'width': '200px', 'font-size': '11px'}, optionHeight=28),
+        ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '12px'}),
 
         # ── Pulsanti (etichette/separatori rimossi; ordine da definire) ───────
         get_file_panel_layout(),
@@ -2509,17 +2713,67 @@ app.layout = html.Div([
     dcc.Store(id='isin-req-id', data=None),
     dcc.Store(id='style-analysis-store', data=None),
     dcc.Store(id='pending-upload-store', data=None),
-    dcc.ConfirmDialog(
-        id='overwrite-confirm',
-        message='Hai una sessione non salvata. Caricare il nuovo file la sovrascriverà.\nContinuare?',
-    ),
+    # Modal stilizzato per la conferma di sovrascrittura all'upload di un file
+    html.Div(id='overwrite-modal-overlay', style=_EDITOR_HIDDEN, children=[
+        html.Div(style={'background': 'white', 'borderRadius': '8px', 'padding': '24px 26px',
+                        'width': '420px', 'maxWidth': '90vw',
+                        'boxShadow': '0 4px 24px rgba(0,0,0,0.35)'}, children=[
+            html.Div([
+                html.H4('Sovrascrivere il lavoro in corso?',
+                        style={'margin': 0, 'fontSize': '14px', 'fontWeight': '700', 'color': '#1a3a5c'}),
+                html.Button('✕', id='overwrite-x', n_clicks=0,
+                            style={'background': 'none', 'border': 'none', 'fontSize': '20px',
+                                   'cursor': 'pointer', 'color': '#666', 'lineHeight': 1}),
+            ], style={'display': 'flex', 'justifyContent': 'space-between',
+                      'alignItems': 'center', 'marginBottom': '14px'}),
+            html.Div("Hai una sessione non salvata: caricare il nuovo file sostituirà "
+                     "l'analisi in corso. Continuare?",
+                     style={'fontSize': '12px', 'color': '#444', 'marginBottom': '18px',
+                            'lineHeight': '1.4'}),
+            html.Div([
+                html.Button('Annulla', id='overwrite-no', n_clicks=0,
+                            style={'background': '#e8e8e8', 'color': '#333', 'border': 'none',
+                                   'borderRadius': '4px', 'padding': '8px 16px', 'cursor': 'pointer',
+                                   'fontSize': '12px', 'fontWeight': 'bold', 'marginRight': '8px'}),
+                html.Button('Sì, carica', id='overwrite-yes', n_clicks=0,
+                            style={'background': '#1a3a5c', 'color': 'white', 'border': 'none',
+                                   'borderRadius': '4px', 'padding': '8px 16px', 'cursor': 'pointer',
+                                   'fontSize': '12px', 'fontWeight': 'bold'}),
+            ], style={'display': 'flex', 'justifyContent': 'flex-end'}),
+        ]),
+    ]),
     dcc.Store(id='pending-fileload-store', data=None),
     dcc.Store(id='fp-delete-trigger', data=None),
     dcc.Store(id='sm-dirty-sink', data=None),
-    dcc.ConfirmDialog(
-        id='fileload-confirm',
-        message='Hai una sessione non salvata. Caricare questo file la sovrascriverà.\nContinuare?',
-    ),
+    # Modal stilizzato (coerente col sito) per la conferma di sovrascrittura
+    html.Div(id='fileload-modal-overlay', style=_EDITOR_HIDDEN, children=[
+        html.Div(style={'background': 'white', 'borderRadius': '8px', 'padding': '24px 26px',
+                        'width': '420px', 'maxWidth': '90vw',
+                        'boxShadow': '0 4px 24px rgba(0,0,0,0.35)'}, children=[
+            html.Div([
+                html.H4('Sovrascrivere il lavoro in corso?',
+                        style={'margin': 0, 'fontSize': '14px', 'fontWeight': '700', 'color': '#1a3a5c'}),
+                html.Button('✕', id='fileload-x', n_clicks=0,
+                            style={'background': 'none', 'border': 'none', 'fontSize': '20px',
+                                   'cursor': 'pointer', 'color': '#666', 'lineHeight': 1}),
+            ], style={'display': 'flex', 'justifyContent': 'space-between',
+                      'alignItems': 'center', 'marginBottom': '14px'}),
+            html.Div("Hai una sessione non salvata: caricare questo file sostituirà "
+                     "l'analisi in corso. Continuare?",
+                     style={'fontSize': '12px', 'color': '#444', 'marginBottom': '18px',
+                            'lineHeight': '1.4'}),
+            html.Div([
+                html.Button('Annulla', id='fileload-no', n_clicks=0,
+                            style={'background': '#e8e8e8', 'color': '#333', 'border': 'none',
+                                   'borderRadius': '4px', 'padding': '8px 16px', 'cursor': 'pointer',
+                                   'fontSize': '12px', 'fontWeight': 'bold', 'marginRight': '8px'}),
+                html.Button('Sì, carica', id='fileload-yes', n_clicks=0,
+                            style={'background': '#1a3a5c', 'color': 'white', 'border': 'none',
+                                   'borderRadius': '4px', 'padding': '8px 16px', 'cursor': 'pointer',
+                                   'fontSize': '12px', 'fontWeight': 'bold'}),
+            ], style={'display': 'flex', 'justifyContent': 'flex-end'}),
+        ]),
+    ]),
 
     # ── Modale ISIN conversion ────────────────────────────────────────────────
     html.Div(id='isin-modal-overlay',
@@ -2669,6 +2923,10 @@ app.layout = html.Div([
                 style={'font-size': '12px', 'padding': '8px 18px'},
                 selected_style={'font-size': '12px', 'padding': '8px 18px',
                                 'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
+        dcc.Tab(label='🔗 Matrice Correlazioni', value='tab-correlazioni',
+                style={'font-size': '12px', 'padding': '8px 18px'},
+                selected_style={'font-size': '12px', 'padding': '8px 18px',
+                                'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
     ]),
     html.Div(id='tab1-content'),
     # SA layout sempre presente nel DOM (nascosto finché non si clicca il tab)
@@ -2676,6 +2934,12 @@ app.layout = html.Div([
     html.Div(id='tab-sa-content',
              children=get_style_analysis_tab([]),
              style={'display': 'none'}),
+    # Matrice Correlazioni: layout sempre presente nel DOM (nascosto), così i
+    # callback trovano sempre i componenti (stesso pattern di Style Analysis).
+    html.Div(id='tab-corr-content',
+             children=get_correlation_matrix_tab([]),
+             style={'display': 'none'}),
+    dcc.Store(id='corr-calculated', data=False),
     # Frontiera e Rendimenti incorporate via iframe (app standalone, navbar nascosta).
     # src impostato dinamicamente al click del tab con timestamp anti-cache,
     # così l'iframe si ricarica fresco e i callback colpiscono il server corrente.
@@ -2736,7 +3000,7 @@ app.clientside_callback(
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
     Output('pending-upload-store', 'data'),
-    Output('overwrite-confirm',    'displayed'),
+    Output('overwrite-modal-overlay', 'style'),
     Output('upload-data',          'contents', allow_duplicate=True),
     Input('upload-data',           'contents'),
     State('upload-data',           'filename'),
@@ -2746,23 +3010,38 @@ def _stage_upload(contents, filename):
     if not contents:
         raise PreventUpdate
     _u = _get_username()
-    payload = {'contents': contents, 'filename': filename or ''}
-    if _sm.has_unsaved_changes(_u):
+    needs = _sm.has_unsaved_changes(_u)
+    payload = {'contents': contents, 'filename': filename or '', 'await': needs}
+    if needs:
         # Mostra warning — resetta contents per permettere re-upload stesso file
-        return payload, True, None
+        return payload, _EDITOR_SHOWN, None
     # Nessuna sessione a rischio — procedi direttamente (contents rimane)
-    return payload, False, no_update
+    return payload, _EDITOR_HIDDEN, no_update
 
 
 @app.callback(
     Output('pending-upload-store', 'data', allow_duplicate=True),
-    Input('overwrite-confirm',     'cancel_n_clicks'),
+    Output('overwrite-modal-overlay', 'style', allow_duplicate=True),
+    Input('overwrite-no',          'n_clicks'),
+    Input('overwrite-x',           'n_clicks'),
     prevent_initial_call=True,
 )
-def _cancel_upload(n):
+def _cancel_upload(n_no, n_x):
+    if not (n_no or n_x):
+        raise PreventUpdate
+    return None, _EDITOR_HIDDEN   # annulla il pending + chiudi modal
+
+
+# Chiudi il modal di sovrascrittura upload al click di "Sì, carica"
+@app.callback(
+    Output('overwrite-modal-overlay', 'style', allow_duplicate=True),
+    Input('overwrite-yes', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def _close_overwrite_modal(n):
     if not n:
         raise PreventUpdate
-    return None   # annulla il pending
+    return _EDITOR_HIDDEN
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2788,7 +3067,7 @@ def _cancel_upload(n):
     Output('upload-done-ts',          'data',        allow_duplicate=True),
     Input('nav-reload',              'data'),
     Input('pending-upload-store',    'data'),     # sostituisce upload-data diretta
-    Input('overwrite-confirm',       'submit_n_clicks'),
+    Input('overwrite-yes',           'n_clicks'),
     State('upload-data',             'filename'),
     prevent_initial_call=True,
 )
@@ -2799,11 +3078,14 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
 
     # Risolvi contents e filename da pending-upload-store
     contents = None
-    if triggered_id in ('pending-upload-store', 'overwrite-confirm') and pending_upload:
+    if triggered_id in ('pending-upload-store', 'overwrite-yes') and pending_upload:
+        # Serve conferma e non è ancora arrivato il "Sì" → attendi (non caricare)
+        if triggered_id == 'pending-upload-store' and pending_upload.get('await'):
+            raise PreventUpdate
         contents = pending_upload.get('contents')
         filename = pending_upload.get('filename', filename)
-        # Se triggered da confirm ma pending è None → l'utente ha annullato
-        if triggered_id == 'overwrite-confirm' and not contents:
+        # Se triggered dal "Sì" ma pending è None → l'utente ha annullato
+        if triggered_id == 'overwrite-yes' and not contents:
             raise PreventUpdate
         triggered_id = 'upload-data'   # trattalo come upload normale
 
@@ -2811,20 +3093,48 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
 
     if triggered_id == 'nav-reload':
         _cl_clear(_get_username())
-        _active_file_store['filename'] = 'ETF.xlsx'
         _PENDING.clear()
-        import pickle as _pickle
         _u = _get_username()
-        cr, op, tm, saved_at = None, None, {}, ''
 
-        # Carica sessione tramite sessions_manager (no persistenza pesi)
-        _data, _source = _sm.load_for_user(_u)
+        # ── FILE UNICO (Opzione A) ─────────────────────────────────────────────
+        # All'avvio carica SEMPRE current.json (l'unico file di lavoro): NON
+        # resetta mai. Così Portafoglio, Correlazioni, Frontiera e Rendimenti
+        # leggono tutti lo stesso file → niente disallineamenti. Il default ETF
+        # si carica solo come SEED iniziale (file vuoto) o scegliendolo dal menu.
+        cr, op, tm = None, None, {}
+        try:
+            cr, op, tm = dc.build_dataset(_u)
+        except Exception:
+            cr = None
+        if cr is not None and not cr.empty:
+            _is_pers = (_read_tipo(_u) == 'personale')
+            _active_file_store['filename'] = '__personale__' if _is_pers else 'ETF.xlsx'
+            _active_file_store['is_personale'] = _is_pers
+            with _DL_LOCK:
+                _DL_BUFFER.clear()
+                _DL_BUFFER.update({'close_returns': cr, 'original_prices': op, 'ticker_map': tm})
+            options = [{'label': c, 'value': c} for c in cr.columns]
+            _lbl = 'File personale' if _is_pers else 'File di lavoro'
+            return (
+                html.Div(f'✓ {len(options)} asset — {_lbl}',
+                         style={'color': '#007755', 'font-size': '11px'}),
+                options,
+                cr.to_json(date_format='iso', orient='split'),
+                op.to_json(date_format='iso', orient='split'),
+                [], tm, _lbl, None,
+                *_noup, no_update,
+            )
+
+        # ── SEED INIZIALE: current.json vuoto/assente → default ETF fresco ─────
+        _active_file_store['filename'] = 'ETF.xlsx'
+        _active_file_store['is_personale'] = False
+        saved_at = ''
+        _data = _sm.load_default('ETF')
         if _data is not None:
             cr       = _data.get('close_returns')
             op       = _data.get('original_prices')
             tm       = _data.get('ticker_map', {})
             saved_at = _data.get('saved_at', '')
-        # Fallback: _DL_BUFFER già caricato da _startup_load
         if cr is None:
             with _DL_LOCK:
                 cr       = _DL_BUFFER.get('close_returns')
@@ -2835,19 +3145,15 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
             with _DL_LOCK:
                 _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
                                    'ticker_map': tm, 'saved_at': saved_at})
-            _write_user_json(cr, op, tm, reset_state=True)  # pesi sempre a 0
-        _active_file_store['is_personale'] = False
-
-        if cr is not None:
+            _write_user_json(cr, op, tm, reset_state=True, tipo='default:ETF.xlsx')
             options  = [{'label': col, 'value': col} for col in cr.columns]
-            last_upd = f"Aggiornati: {saved_at}" if saved_at else ''
             return (
-                html.Div(f'✓ {len(options)} asset — da file locale',
+                html.Div(f'✓ {len(options)} asset — ETF (default)',
                          style={'color': '#007755', 'font-size': '11px'}),
                 options,
                 cr.to_json(date_format='iso', orient='split'),
                 op.to_json(date_format='iso', orient='split'),
-                [], tm, last_upd, None,
+                [], tm, f"Aggiornati: {saved_at}" if saved_at else '', None,
                 *_noup, no_update,
             )
         options, ticker_map = load_ticker_names_only()
@@ -2893,6 +3199,8 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
                         'ticker_map': ticker_map,
                     })
                 _write_user_json(close_returns, df_prices, ticker_map, reset_state=True)
+                # Caricare un file da zero → file di lavoro Personale (persistito).
+                _mark_personale()
                 return (
                     html.Div(f'✓ {len(options)} asset — prezzi caricati dal file',
                              style={'color': '#007755', 'font-size': '11px'}),
@@ -2994,6 +3302,7 @@ app.clientside_callback(
     Output('tab-sa-content',         'style'),
     Output('tab-frontiera-content',  'style'),
     Output('tab-rendimenti-content', 'style'),
+    Output('tab-corr-content',       'style'),
     Input('main-tabs',       'value'),
     Input('asset-checklist', 'data'),
 )
@@ -3001,12 +3310,14 @@ def render_tab1(active_tab, options_tickers):
     show = {'display': 'block'}
     hide = {'display': 'none'}
     if active_tab == 'tab-sa':
-        return no_update, hide, show, hide, hide
+        return no_update, hide, show, hide, hide, hide
     if active_tab == 'tab-frontiera':
-        return no_update, hide, hide, show, hide
+        return no_update, hide, hide, show, hide, hide
     if active_tab == 'tab-rendimenti':
-        return no_update, hide, hide, hide, show
-    return get_portfolio_analysis_tab(options_tickers), show, hide, hide, hide
+        return no_update, hide, hide, hide, show, hide
+    if active_tab == 'tab-correlazioni':
+        return no_update, hide, hide, hide, hide, show
+    return get_portfolio_analysis_tab(options_tickers), show, hide, hide, hide, hide
 
 
 # Carica/ricarica l'iframe (fresco, anti-cache) quando si apre il relativo tab
@@ -3023,6 +3334,300 @@ def _load_tab_iframe(active_tab):
     if active_tab == 'tab-rendimenti':
         return no_update, f'/rendimenti/?embed=1&t={ts}'
     raise PreventUpdate
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: Matrice di Correlazione (heatmap rendimenti settimanali)
+# Portato da ir_fe_14.py, adattato ai date-picker e store del portafoglio.
+# ─────────────────────────────────────────────────────────────────────────────
+_CORR_COLORSCALE = [
+    [0.0, '#8B0000'], [0.25, '#d62728'], [0.375, '#e0e0e0'], [0.5, 'white'],
+    [0.625, '#f0f0f0'], [0.85, '#ccffcc'], [0.9, '#2ca02c'], [1.0, '#006400'],
+]
+
+
+def _corr_heatmap_figure(corr_matrix, title_text):
+    n = len(corr_matrix.columns)
+    max_lbl = max((len(str(c)) for c in corr_matrix.columns), default=6)
+    tick_size = max(7, min(12, int(130 / max(n, 1))))
+    l_margin = max(80, max_lbl * tick_size * 0.65)
+    b_margin = max(80, max_lbl * tick_size * 0.65)
+    fig = go.Figure(data=go.Heatmap(
+        z=corr_matrix.values, x=list(corr_matrix.columns), y=list(corr_matrix.index),
+        colorscale=_CORR_COLORSCALE, zmid=0, zmin=-1, zmax=1,
+        text=np.round(corr_matrix.values, 2), texttemplate='%{text}',
+        textfont={'size': max(8, min(16, int(180 / max(n, 1))))},
+        colorbar=dict(title='Correlazione', tickvals=[-1, -0.5, 0, 0.7, 1],
+                      ticktext=['-1.0', '-0.5', '0.0', '0.7', '1.0']),
+        hovertemplate='%{y} vs %{x}<br>Correlazione: %{z:.3f}<extra></extra>',
+    ))
+    fig.update_layout(
+        title=dict(text=title_text, font=dict(size=13), x=0.5),
+        xaxis=dict(side='bottom', tickangle=-45, tickfont=dict(size=tick_size), automargin=True),
+        yaxis=dict(autorange='reversed', tickfont=dict(size=tick_size), automargin=True),
+        margin=dict(l=int(l_margin), b=int(b_margin), t=40, r=20), autosize=True,
+        paper_bgcolor='white',
+    )
+    return fig
+
+
+# Costruisce la griglia asset (colonne MT/ML) e popola il benchmark, quando
+# cambiano i dati caricati. MT pre-spuntati = SELEZIONE CONDIVISA (campo `checked`
+# di current.json) → coerente con tutte le altre tab. ML inizialmente vuoti.
+@app.callback(
+    Output('corr-asset-grid',         'children'),
+    Output('benchmark-selector-corr', 'options'),
+    Input('stock-data',               'data'),
+    prevent_initial_call=True,
+)
+def build_corr_grid(stock_data):
+    df = _get_df(stock_data)
+    if df is None or df.empty:
+        return ([html.Div('(carica i dati per popolare)',
+                          style={'font-size': '10px', 'color': '#aaa', 'font-style': 'italic',
+                                 'text-align': 'center', 'padding': '10px 4px'})], [])
+    assets = list(df.columns)
+    ns = _read_user_json(_get_username())
+    mt_default = {a for a in assets if ns.get(a, {}).get('checked')}
+
+    def _chk(kind, asset, checked, color):
+        return html.Div(
+            dcc.Checklist(id={'type': kind, 'index': asset},
+                          options=[{'label': '', 'value': asset}],
+                          value=[asset] if checked else [],
+                          inputStyle={'cursor': 'pointer', 'accentColor': color, 'margin': '0'},
+                          style={'display': 'flex', 'justifyContent': 'center'}),
+            style={'width': '34px', 'display': 'flex', 'justifyContent': 'center', 'alignItems': 'center'})
+
+    rows = []
+    for i, a in enumerate(assets):
+        rows.append(html.Div([
+            html.Div(html.Span(a, **{'data-tooltip': a},
+                               style={'overflow': 'hidden', 'whiteSpace': 'nowrap',
+                                      'textOverflow': 'ellipsis', 'maxWidth': '100%',
+                                      'fontSize': '10px', 'color': '#1a3a5c'}),
+                     style={'flex': '1', 'overflow': 'hidden', 'paddingRight': '4px', 'minWidth': '0'}),
+            _chk('corr-mt', a, a in mt_default, '#1a3a5c'),
+            _chk('corr-ml', a, False, '#e6550d'),
+        ], style={'display': 'flex', 'align-items': 'center', 'gap': '4px',
+                  'padding': '2px', 'borderBottom': '1px dotted #eee',
+                  'background': 'white' if i % 2 == 0 else '#fafcff'}))
+    return rows, [{'label': a, 'value': a} for a in assets]
+
+
+# Pulsanti seleziona/deseleziona tutti (toggle) per colonna MT e ML
+@app.callback(
+    Output({'type': 'corr-mt', 'index': ALL}, 'value'),
+    Input('corr-mt-all', 'n_clicks'),
+    State({'type': 'corr-mt', 'index': ALL}, 'value'),
+    State({'type': 'corr-mt', 'index': ALL}, 'id'),
+    prevent_initial_call=True,
+)
+def corr_mt_all(n, vals, ids):
+    if not n:
+        raise PreventUpdate
+    any_unchecked = any(not v for v in (vals or []))
+    return [[i['index']] if any_unchecked else [] for i in ids]
+
+
+@app.callback(
+    Output({'type': 'corr-ml', 'index': ALL}, 'value'),
+    Input('corr-ml-all', 'n_clicks'),
+    State({'type': 'corr-ml', 'index': ALL}, 'value'),
+    State({'type': 'corr-ml', 'index': ALL}, 'id'),
+    prevent_initial_call=True,
+)
+def corr_ml_all(n, vals, ids):
+    if not n:
+        raise PreventUpdate
+    any_unchecked = any(not v for v in (vals or []))
+    return [[i['index']] if any_unchecked else [] for i in ids]
+
+
+# La spunta MT è la SELEZIONE CONDIVISA: scrivila nel campo `checked` di
+# current.json (fonte unica) + aggiorna lo store globale, così è coerente con
+# tutte le altre tab e persiste nella dashboard temporanea / file personale.
+@app.callback(
+    Output('global-assets-selected', 'data', allow_duplicate=True),
+    Input({'type': 'corr-mt', 'index': ALL}, 'value'),
+    prevent_initial_call=True,
+)
+def corr_mt_to_checked(mt_vals):
+    sel = [v[0] for v in (mt_vals or []) if v]
+    _update_user_json(checked=sel)
+    return sel
+
+
+# All'apertura del tab Correlazioni allinea le spunte MT alla selezione condivisa
+# (campo `checked`), SENZA ricostruire la griglia → le spunte ML restano intatte.
+@app.callback(
+    Output({'type': 'corr-mt', 'index': ALL}, 'value', allow_duplicate=True),
+    Input('main-tabs', 'value'),
+    State({'type': 'corr-mt', 'index': ALL}, 'id'),
+    prevent_initial_call=True,
+)
+def sync_mt_on_open(active_tab, ids):
+    if active_tab != 'tab-correlazioni' or not ids:
+        raise PreventUpdate
+    ns = _read_user_json(_get_username())
+    return [[i['index']] if ns.get(i['index'], {}).get('checked') else [] for i in ids]
+
+
+@app.callback(
+    Output('correlation-heatmap',     'figure'),
+    Output('date-values-correlation',  'children'),
+    Output('corr-filter-info',         'children'),
+    Output('corr-calculated',          'data'),
+    Input({'type': 'corr-mt', 'index': ALL}, 'value'),
+    Input('benchmark-selector-corr',   'value'),
+    Input('update-correlation-button', 'n_clicks'),
+    State('stock-data',                'data'),
+    State('dr-start-corr',             'date'),
+    State('dr-end-corr',               'date'),
+    State('correlation-window-input',  'value'),
+    prevent_initial_call=True,
+)
+def update_correlation_matrix(mt_vals, benchmark_sel, n_clicks, stock_data,
+                              date_start, date_end, corr_window):
+    def _empty(msg):
+        f = go.Figure().add_annotation(text=msg, xref='paper', yref='paper',
+                                       x=0.5, y=0.5, showarrow=False, font=dict(size=16, color='#888'))
+        f.update_layout(paper_bgcolor='white', margin=dict(l=20, r=20, t=20, b=20))
+        return f
+
+    close_returns = _get_df(stock_data)
+    if close_returns is None or close_returns.empty:
+        return _empty('Nessun dato disponibile'), 'Nessun dato', '', no_update
+
+    # Asset spuntati nella colonna MT (la spunta determina il calcolo)
+    mt_sel = [v[0] for v in (mt_vals or []) if v]
+    cols   = [c for c in mt_sel if c in close_returns.columns]
+    if len(cols) < 2:
+        return _empty('Spunta almeno 2 asset nella colonna MT'), '', 'Seleziona ≥2 asset (MT)', no_update
+
+    # Filtro date (DatePickerSingle → stringhe 'YYYY-MM-DD')
+    try:
+        filtered_df = close_returns.loc[pd.to_datetime(date_start):pd.to_datetime(date_end)] \
+                      if (date_start and date_end) else close_returns
+    except Exception:
+        filtered_df = close_returns
+    if filtered_df.empty:
+        filtered_df = close_returns
+    start_date = filtered_df.index[0]  if not filtered_df.empty else pd.Timestamp.now()
+    end_date   = filtered_df.index[-1] if not filtered_df.empty else pd.Timestamp.now()
+
+    filtered_df = filtered_df[cols]
+    filter_info = f'{len(cols)} asset selezionati (MT)'
+
+    if corr_window and corr_window > 0:
+        filtered_df = filtered_df.tail(corr_window)
+
+    if filtered_df.empty or filtered_df.shape[1] < 2:
+        return _empty('Dati insufficienti nel range selezionato'), 'Dati insufficienti', filter_info, no_update
+
+    # Rendimenti settimanali: neutralizza lo sfasamento degli orari di chiusura
+    weekly_df   = filtered_df.resample('W').apply(lambda x: (1 + x).prod() - 1).dropna()
+    corr_matrix = weekly_df.corr()
+    n_weeks     = len(weekly_df)
+
+    title_text = 'Matrice di Correlazione – rendimenti settimanali'
+    if corr_window and corr_window > 0:
+        title_text += f' (ultimi {min(corr_window, len(filtered_df))} gg → {n_weeks} settimane)'
+    else:
+        title_text += f' ({n_weeks} settimane)'
+
+    if benchmark_sel and benchmark_sel in corr_matrix.columns:
+        order = corr_matrix[benchmark_sel].abs().sort_values(ascending=False).index.tolist()
+        corr_matrix = corr_matrix.loc[order, order]
+        title_text += f'  |  ordinata per correlazione con {benchmark_sel}'
+
+    fig = _corr_heatmap_figure(corr_matrix, title_text)
+    date_message = (f"Range: {start_date.strftime('%d-%m-%Y')} — "
+                    f"{end_date.strftime('%d-%m-%Y')} ({len(filtered_df)} giorni)")
+    return fig, date_message, filter_info, True
+
+
+@app.callback(
+    Output('rolling-corr-chart',      'figure'),
+    Input({'type': 'corr-ml', 'index': ALL}, 'value'),
+    Input('benchmark-selector-corr',  'value'),
+    State('stock-data',               'data'),
+    State('dr-start-corr',            'date'),
+    State('dr-end-corr',              'date'),
+    State('correlation-window-input', 'value'),
+    prevent_initial_call=True,
+)
+def update_rolling_corr(ml_vals, benchmark, stock_data, date_start, date_end, window):
+    def _empty(msg=''):
+        f = go.Figure()
+        if msg:
+            f.add_annotation(text=msg, xref='paper', yref='paper', x=0.5, y=0.5,
+                             showarrow=False, font=dict(size=13, color='#888'))
+        f.update_layout(paper_bgcolor='#fafafa', plot_bgcolor='#fafafa',
+                        margin=dict(l=40, r=20, t=30, b=40))
+        return f
+
+    # Asset spuntati nella colonna ML (la spunta determina il rolling)
+    selected_assets = [v[0] for v in (ml_vals or []) if v]
+    if not selected_assets or not benchmark:
+        return _empty('Spunta gli asset (colonna ML) e scegli un benchmark per la correlazione rolling')
+    df = _get_df(stock_data)
+    if df is None or df.empty:
+        return _empty('Nessun dato disponibile')
+    try:
+        if date_start and date_end:
+            df = df.loc[pd.to_datetime(date_start):pd.to_datetime(date_end)]
+    except Exception:
+        pass
+    if benchmark not in df.columns:
+        return _empty(f'Benchmark "{benchmark}" non trovato nel dataset')
+    assets_to_plot = [a for a in selected_assets if a in df.columns and a != benchmark]
+    if not assets_to_plot or df.empty:
+        return _empty('Nessun asset valido selezionato')
+
+    roll_window_days  = max(int(window or 60), 10)
+    roll_window_weeks = max(roll_window_days // 5, 4)
+    all_cols  = list(set(assets_to_plot + [benchmark]))
+    df_weekly = (df[all_cols].dropna().resample('W')
+                 .apply(lambda x: (1 + x).prod() - 1).dropna())
+    if df_weekly.empty or len(df_weekly) < roll_window_weeks:
+        return _empty('Dati insufficienti per la finestra rolling selezionata')
+
+    fig = go.Figure()
+    palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+               '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+    all_y = []
+    for i, asset in enumerate(assets_to_plot):
+        rolling_corr = (df_weekly[asset].rolling(roll_window_weeks)
+                        .corr(df_weekly[benchmark]).dropna())
+        all_y.extend(rolling_corr.values.tolist())
+        fig.add_trace(go.Scatter(
+            x=rolling_corr.index, y=rolling_corr.values, mode='lines',
+            name=f'{asset} vs {benchmark}',
+            line=dict(color=palette[i % len(palette)], width=1.8),
+            hovertemplate=f'{asset} vs {benchmark}: %{{y:.3f}}<extra></extra>'))
+
+    if all_y:
+        y_min, y_max = min(all_y), max(all_y)
+        margin = max((y_max - y_min) * 0.08, 0.05)
+        y_range = [y_min - margin, y_max + margin]
+    else:
+        y_min, y_max, y_range = -1.0, 1.0, [-1.05, 1.05]
+    fig.add_hline(y=0, line_dash='dash', line_color='#999', line_width=1)
+    if y_max >= 0.7:
+        fig.add_hline(y=0.7, line_dash='dot', line_color='#2ca02c', line_width=1,
+                      annotation_text='0.70', annotation_position='right')
+    if y_min <= -0.5:
+        fig.add_hline(y=-0.5, line_dash='dot', line_color='#d62728', line_width=1,
+                      annotation_text='-0.50', annotation_position='right')
+    fig.update_layout(
+        title=dict(text=f'Correlazione Rolling vs {benchmark} '
+                        f'({roll_window_weeks} settimane – rend. settimanali)', font=dict(size=13), x=0.5),
+        xaxis_title='Data', yaxis_title='Correlazione', yaxis=dict(range=y_range, zeroline=False),
+        legend=dict(orientation='v', yanchor='top', y=1, xanchor='left', x=1.01, font=dict(size=10)),
+        margin=dict(l=50, r=190, t=50, b=40), hovermode='x unified',
+        paper_bgcolor='white', plot_bgcolor='#f9f9f9')
+    return fig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3045,11 +3650,22 @@ def _load_tab_iframe(active_tab):
     prevent_initial_call=True,
 )
 def on_file_selected(filename, cur_clicks):
-    if not filename or filename == '__personale__':
+    if not filename:
         raise PreventUpdate
+    _u = _get_username()
+
+    # UN SOLO file: "👤 Personale" è solo l'ETICHETTA dello stato corrente —
+    # current.json È GIÀ il file personale, non c'è nulla da ricaricare.
+    # (Per questo l'accodo che porta il selettore a Personale non cambia i dati.)
+    if filename == '__personale__':
+        raise PreventUpdate
+
+    # Selezione di un DEFAULT (ETF/CRIPTO/Commodities): sovrascrive il file di
+    # lavoro col default fresco e riporta lo stato a "default" (non personale).
     _active_file_store['filename'] = filename
     _active_file_store['is_personale'] = False
-    _cl_clear(_get_username())
+    _cl_clear(_u)
+    _tipo_def = f'default:{filename}'
 
     _noup4 = (no_update,) * 4
 
@@ -3067,7 +3683,7 @@ def on_file_selected(filename, cur_clicks):
                 with _DL_LOCK:
                     _DL_BUFFER.clear()
                     _DL_BUFFER.update(data)
-                _write_user_json(cr, op, tm, vm, reset_state=True)
+                _write_user_json(cr, op, tm, vm, reset_state=True, tipo=_tipo_def)
                 options = [{'label': c, 'value': c} for c in cr.columns]
                 return (filename,
                         cr.to_json(date_format='iso', orient='split'),
@@ -3093,7 +3709,9 @@ def on_file_selected(filename, cur_clicks):
         _DL_STATE.update({'status': 'running', 'current': 0, 'total': len(tickers), 'errors': []})
     threading.Thread(target=_do_download,
                      args=(tickers, descr, valuta, start),
-                     kwargs={'cache_file': cache}, daemon=True).start()
+                     kwargs={'cache_file': cache, 'username': _get_username(),
+                             'tipo': _tipo_def},
+                     daemon=True).start()
     print(f"▶ Download {filename}: {len(tickers)} ticker")
     return (filename, None, None, options, tm,
             f'Download {Path(filename).stem}…',
@@ -3401,6 +4019,12 @@ def poll_refresh_progress(n, n_btn):
     state  = cl_state  if client_active else dl_state
     buffer = cl_buffer if client_active else dl_buffer
 
+    def _ncol(b):
+        cr = b.get('close_returns')
+        return len(cr.columns) if cr is not None else 0
+    print(f"[POLL] client_active={client_active} cl_status={cl_state.get('status')} "
+          f"dl_status={dl_state.get('status')} cl_cols={_ncol(cl_buffer)} dl_cols={_ncol(dl_buffer)}", flush=True)
+
     status  = state.get('status', 'idle')
     current = state.get('current', 0)
     total   = state.get('total', 1) or 1
@@ -3426,8 +4050,13 @@ def poll_refresh_progress(n, n_btn):
                 'Si è verificato un errore.', _STATUS_RED, no_update, _EDITOR_HIDDEN,
                 no_update, no_update, no_update, '❌ Errore download', *_NU3)
 
-    close_returns   = buffer.get('close_returns')
-    original_prices = buffer.get('original_prices')
+    # FONTE UNICA: leggi il dataset da current.json (così non dipende da quale
+    # buffer ha scritto il download). Fallback al buffer se current.json è vuoto.
+    close_returns, original_prices, ticker_map = dc.build_dataset(_u)
+    if close_returns is None or close_returns.empty:
+        close_returns   = buffer.get('close_returns')
+        original_prices = buffer.get('original_prices')
+        ticker_map      = buffer.get('ticker_map', {})
     if close_returns is None or close_returns.empty:
         err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
         return (no_update, no_update, no_update, no_update, no_update,
@@ -3437,7 +4066,6 @@ def poll_refresh_progress(n, n_btn):
                 no_update, no_update, no_update, '❌ Nessun dato', *_NU3)
 
     options      = [{'label': col, 'value': col} for col in close_returns.columns]
-    ticker_map   = buffer.get('ticker_map', {})
     saved_at     = buffer.get('saved_at', '')
     returns_json = close_returns.to_json(date_format='iso', orient='split')
     prices_json  = original_prices.to_json(date_format='iso', orient='split')
@@ -3450,6 +4078,14 @@ def poll_refresh_progress(n, n_btn):
     status_msg = (f'Dati pronti — {n_ok} asset scaricati{err_note}.\n'
                   + ('\n'.join(errors[:5]) if errors else ''))
 
+    # Ripristina i pesi P1/P2/P3 DAI dati correnti (current.json), così aggiungere
+    # un asset NON cancella i portafogli creati. (Azzerare le store non bastava:
+    # se c'erano asset selezionati, la griglia non li rileggeva da current.json.)
+    _nsw = _read_user_json(_u)
+    p1w = {d: v.get('P1', 0) for d, v in _nsw.items() if v.get('P1', 0)}
+    p2w = {d: v.get('P2', 0) for d, v in _nsw.items() if v.get('P2', 0)}
+    p3w = {d: v.get('P3', 0) for d, v in _nsw.items() if v.get('P3', 0)}
+
     return (
         returns_json, prices_json, options, ticker_map,
         f"Aggiornati: {saved_at}",
@@ -3459,8 +4095,7 @@ def poll_refresh_progress(n, n_btn):
         _MODAL_HIDDEN, _EDITOR_HIDDEN,
         no_update, no_update,
         (n_btn or 0) + 1, f'✓ {n_ok} asset caricati',
-        {}, {}, {},   # azzera weights-store P1/P2/P3 → generate_asset_and_weight_inputs
-                      # rilegge i pesi freschi da current.json
+        p1w, p2w, p3w,   # pesi ripristinati da current.json (no wipe dei portafogli)
     )
 
 
@@ -3503,10 +4138,10 @@ def delete_asset_inline(clicks, options, current_clicks, filename):
     ns = _read_user_json(_u)
     if asset in ns:
         del ns[asset]
-        try:
-            json.dump(ns, open(_user_json_path(_u), 'w'))
-        except Exception:
-            pass
+        # Scrittura ATOMICA (mai json.dump diretto su current.json: non atomico →
+        # con scritture concorrenti corrompe il file). _mark_personale() più sotto
+        # ripristina il campo _tipo.
+        _atomic_json_write(_user_json_path(_u), ns, validate=False)
 
     user_pkl = _user_cache_path(_u, fn)
     try:
@@ -3523,7 +4158,8 @@ def delete_asset_inline(clicks, options, current_clicks, filename):
     except Exception as e:
         print(f'⚠ delete_asset_inline pkl: {e}')
 
-    _active_file_store['is_personale'] = True
+    # Modifica del file (rimozione titolo) → diventa Personale e si persiste.
+    _mark_personale(_u)
     new_options = [o for o in (options or []) if o['value'] != asset]
     new_stock = new_cr.to_json(date_format='iso', orient='split') if new_cr is not None else no_update
     return new_stock, new_options, (current_clicks or 0) + 1, _list_files_with_personale(), '__personale__'
@@ -3546,9 +4182,12 @@ def delete_asset_inline(clicks, options, current_clicks, filename):
     State('inline-desc-input',        'value'),
     State('inline-valuta-dropdown',   'value'),
     State('file-selector',            'value'),
+    State('stock-data',               'data'),
+    State('original-prices-data',     'data'),
+    State('ticker-map-store',         'data'),
     prevent_initial_call=True,
 )
-def add_asset_inline(n, ticker, desc, valuta, filename):
+def add_asset_inline(n, ticker, desc, valuta, filename, sd_json, op_json, tm_store):
     if not n or not ticker or not ticker.strip():
         raise PreventUpdate
     ticker = ticker.strip().upper()
@@ -3557,18 +4196,47 @@ def add_asset_inline(n, ticker, desc, valuta, filename):
     _u = _get_username()
     fn = filename if filename and filename != '__personale__' else 'ETF.xlsx'
 
-    with _DL_LOCK:
-        existing_tm = dict(_DL_BUFFER.get('ticker_map', {}))
+    # Riallinea current.json con ciò che è MOSTRATO a schermo (store del grid):
+    # all'avvio il display può venire dal buffer ETF (es. 29 asset) mentre
+    # current.json è rimasto a una sessione precedente (es. 21). Sincronizzando
+    # qui, l'accodo parte sempre dallo stesso identico set visualizzato.
+    # reset_state=False → preserva pesi P1/P2/P3 e selezioni già impostati.
+    try:
+        from io import StringIO as _SIO
+        if sd_json and op_json:
+            _disp_cr = pd.read_json(_SIO(sd_json), orient='split')
+            _disp_op = pd.read_json(_SIO(op_json), orient='split')
+            if not _disp_cr.empty and not _disp_op.empty:
+                _write_user_json(_disp_cr, _disp_op, dict(tm_store or {}), username=_u)
+    except Exception as _e:
+        print(f"⚠ resync current.json pre-add: {_e}", flush=True)
+
+    # Asset ESISTENTI dalla fonte unica current.json (ora allineata al display),
+    # così l'accodo non perde mai gli asset già presenti. Fallback al buffer.
+    try:
+        _cur = json.load(open(_user_json_path(_u)))
+        existing_tm = {a: (v.get('ticker') or a)
+                       for a, v in _cur.items() if isinstance(v, dict)}
+    except Exception:
+        existing_tm = {}
+    if not existing_tm:
+        with _DL_LOCK:
+            existing_tm = dict(_DL_BUFFER.get('ticker_map', {}))
 
     if desc in existing_tm:
         return no_update, no_update, f'⚠ "{desc}" già presente', no_update, no_update, no_update, no_update, no_update
 
     start     = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
     all_descr = list(existing_tm.keys()) + [desc]
+    # Aggiungere un titolo modifica il file → diventa Personale (un solo file:
+    # marco _tipo dentro current.json, niente copie/altri file).
     _active_file_store['is_personale'] = True
+    _active_file_store['filename'] = '__personale__'
+    _set_tipo('personale', username=_u)
     threading.Thread(
         target=_do_gestisci_download,
         args=([ticker], [desc], [valuta], start, _u, fn, all_descr),
+        kwargs={'persist_personale': True},
         daemon=True,
     ).start()
     return '', '', f'⏳ Download {ticker}…', False, 0, True, _list_files_with_personale(), '__personale__'
@@ -4147,13 +4815,19 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
     saved_p2 = saved_p2 or {}
     saved_p3 = saved_p3 or {}
 
-    if not saved_selected and not saved_p1 and not saved_p2 and not saved_p3:
-        ns = _read_user_json()
-        if ns:
-            saved_selected = [d for d, v in ns.items() if v.get('checked')]
-            saved_p1 = {d: v.get('P1', 0) for d, v in ns.items()}
-            saved_p2 = {d: v.get('P2', 0) for d, v in ns.items()}
-            saved_p3 = {d: v.get('P3', 0) for d, v in ns.items()}
+    # Ripristina dalla FONTE UNICA (current.json) in modo indipendente: la
+    # selezione 📊 (checked) va riletta anche quando ci sono pesi, altrimenti
+    # tornando da un'altra tab (es. Correlazioni) le spunte sparirebbero.
+    _ns = None
+    if not saved_selected:
+        _ns = _read_user_json()
+        saved_selected = [d for d, v in _ns.items() if v.get('checked')]
+    if not saved_p1 and not saved_p2 and not saved_p3:
+        if _ns is None:
+            _ns = _read_user_json()
+        saved_p1 = {d: v.get('P1', 0) for d, v in _ns.items()}
+        saved_p2 = {d: v.get('P2', 0) for d, v in _ns.items()}
+        saved_p3 = {d: v.get('P3', 0) for d, v in _ns.items()}
 
     # Calcola AKRatio per colorazione etichette
     assets_above_threshold = set()
@@ -4289,20 +4963,20 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
                     'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
                 }),
                 **{'data-tooltip': portfolio_name, 'data-tooltip-color': '#0066cc'},
-                style={'width': '22%', 'height': '28px', 'display': 'flex',
+                style={'width': '19%', 'height': '28px', 'display': 'flex',
                        'alignItems': 'center', 'paddingLeft': '4px',
                        'overflow': 'hidden', 'position': 'relative', 'cursor': 'default'}),
             _pchk({'type': 'graph-select-checkbox',  'index': portfolio_name}, portfolio_name,                       port_val,        '3%'),
-            html.Div('', style={'width': '8%'}),
-            html.Div('', style={'width': '8%'}),
-            html.Div('', style={'width': '8%'}),
+            html.Div('', style={'width': '12%'}),
+            html.Div('', style={'width': '12%'}),
+            html.Div('', style={'width': '12%'}),
             _pchk({'type': 'ir-select-checkbox',     'index': portfolio_name}, f'{portfolio_name}_InformationRatio', ir_port_val,     '5%'),
-            _pchk({'type': 'sharpe-select-checkbox', 'index': portfolio_name}, f'{portfolio_name}_Sharpe',           sharpe_port_val, '6%'),
-            _pchk({'type': 'tev-select-checkbox',    'index': portfolio_name}, f'{portfolio_name}_TEV',              tev_port_val,    '6%'),
-            _pchk({'type': 'dd-select-checkbox',     'index': portfolio_name}, f'{portfolio_name}_DD',               dd_port_val,     '7%'),
-            _pchk({'type': 'vol-select-checkbox',    'index': portfolio_name}, f'{portfolio_name}_Vol',              vol_port_val,    '7%'),
-            _pchk({'type': 'var90-select-checkbox',  'index': portfolio_name}, f'{portfolio_name}_VaR90',            var90_port_val,  '7%'),
-            _pchk({'type': 'var95-select-checkbox',  'index': portfolio_name}, f'{portfolio_name}_VaR95',            var95_port_val,  '8%'),
+            _pchk({'type': 'sharpe-select-checkbox', 'index': portfolio_name}, f'{portfolio_name}_Sharpe',           sharpe_port_val, '5%'),
+            _pchk({'type': 'tev-select-checkbox',    'index': portfolio_name}, f'{portfolio_name}_TEV',              tev_port_val,    '5%'),
+            _pchk({'type': 'dd-select-checkbox',     'index': portfolio_name}, f'{portfolio_name}_DD',               dd_port_val,     '5%'),
+            _pchk({'type': 'vol-select-checkbox',    'index': portfolio_name}, f'{portfolio_name}_Vol',              vol_port_val,    '5%'),
+            _pchk({'type': 'var90-select-checkbox',  'index': portfolio_name}, f'{portfolio_name}_VaR90',            var90_port_val,  '5%'),
+            _pchk({'type': 'var95-select-checkbox',  'index': portfolio_name}, f'{portfolio_name}_VaR95',            var95_port_val,  '5%'),
         ], style={'display': 'flex', 'align-items': 'center', 'border-bottom': '1px dotted #eee',
                   'background-color': '#f0f0f0'})
         rows.append(portfolio_row)
@@ -4465,7 +5139,8 @@ def update_portfolio_weights(all_input_values, all_input_ids, p1_data, p2_data, 
     sum3 = sum(v for v in p3.values() if v)
 
     def _style(s):
-        base = {'width': '8%', 'text-align': 'center', 'font-size': '10px'}
+        base = {'width': '12%', 'text-align': 'right', 'padding-right': '5px',
+                'font-size': '10px', 'font-weight': 'bold', 'box-sizing': 'border-box'}
         base['color'] = '#1b7a34' if abs(s - 100) < 0.01 else '#d62728'
         return base
 
@@ -5165,10 +5840,14 @@ def _build_fp_row(f):
 @app.callback(
     Output('file-panel', 'style'),
     Input('file-panel-btn', 'n_clicks'),
+    Input('fp-close-btn',   'n_clicks'),
     State('file-panel', 'style'),
     prevent_initial_call=True,
 )
-def toggle_file_panel(n, cur):
+def toggle_file_panel(n, n_close, cur):
+    # Chiudi esplicito → nascondi
+    if callback_context.triggered_id == 'fp-close-btn':
+        return {'display': 'none'}
     if cur and cur.get('display') == 'none':
         return {'display': 'block', 'position': 'absolute', 'top': '70px', 'left': '10px',
                 'z-index': '1000', 'background': 'white', 'border': '1px solid #ccc',
@@ -5244,7 +5923,7 @@ def fp_save_named(n, name, *store_values):
 # ── Stage caricamento file (default o personale) con warning ─────────────────
 @app.callback(
     Output('pending-fileload-store', 'data'),
-    Output('fileload-confirm',       'displayed'),
+    Output('fileload-modal-overlay', 'style'),
     Input({'type': 'fp-default-btn', 'index': ALL}, 'n_clicks'),
     Input({'type': 'fp-load-btn',    'index': ALL}, 'n_clicks'),
     prevent_initial_call=True,
@@ -5264,18 +5943,32 @@ def stage_file_load(default_clicks, load_clicks):
     needs_confirm = _sm.has_unsaved_changes(_get_username())
     payload = {'kind': kind, 'key': id_dict['index'],
                'await': needs_confirm, 'ts': time.time()}
-    return payload, needs_confirm
+    return payload, (_EDITOR_SHOWN if needs_confirm else _EDITOR_HIDDEN)
 
 
 @app.callback(
     Output('pending-fileload-store', 'data', allow_duplicate=True),
-    Input('fileload-confirm', 'cancel_n_clicks'),
+    Output('fileload-modal-overlay', 'style', allow_duplicate=True),
+    Input('fileload-no', 'n_clicks'),
+    Input('fileload-x',  'n_clicks'),
     prevent_initial_call=True,
 )
-def cancel_file_load(n):
+def cancel_file_load(n_no, n_x):
+    if not (n_no or n_x):
+        raise PreventUpdate
+    return None, _EDITOR_HIDDEN
+
+
+# Chiudi il modal al click di "Sì, carica" (il caricamento lo fa execute_file_load)
+@app.callback(
+    Output('fileload-modal-overlay', 'style', allow_duplicate=True),
+    Input('fileload-yes', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def _close_fileload_modal(n):
     if not n:
         raise PreventUpdate
-    return None
+    return _EDITOR_HIDDEN
 
 
 # ── Esegui caricamento file ──────────────────────────────────────────────────
@@ -5293,7 +5986,7 @@ def cancel_file_load(n):
     Output('insufficient-data-store', 'data',     allow_duplicate=True),
     Output('update-portfolio-button', 'n_clicks', allow_duplicate=True),
     Input('pending-fileload-store',   'data'),
-    Input('fileload-confirm',         'submit_n_clicks'),
+    Input('fileload-yes',             'n_clicks'),
     State('update-portfolio-button',  'n_clicks'),
     prevent_initial_call=True,
 )
@@ -5302,10 +5995,10 @@ def execute_file_load(pending, submit_n, cur_clicks):
     trig_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ''
     if not pending:
         raise PreventUpdate
-    # Serviva conferma: non eseguire sul cambio dello store, attendi il submit
+    # Serviva conferma: non eseguire sul cambio dello store, attendi il click "Sì"
     if trig_id == 'pending-fileload-store' and pending.get('await'):
         raise PreventUpdate
-    if trig_id == 'fileload-confirm' and not submit_n:
+    if trig_id == 'fileload-yes' and not submit_n:
         raise PreventUpdate
 
     _u   = _get_username()
@@ -5724,12 +6417,12 @@ def reset_to_default(n, cur_clicks):
     prevent_initial_call=True,
 )
 def restore_file_selector(nav_reload):
-    if nav_reload == 1:
-        return _list_files(), 'ETF.xlsx'
-    if _active_file_store.get('is_personale'):
-        return _list_files_with_personale(), '__personale__'
-    fn = _active_file_store.get('filename', 'ETF.xlsx')
-    return _list_files(), fn
+    # La selezione rispecchia il tipo del file di lavoro (un solo file: current.json).
+    # Se è "personale" → 👤 Personale; altrimenti default ETF.
+    _u = _get_username()
+    is_pers = (_read_tipo(_u) == 'personale')
+    opts = _list_files_with_personale() if is_pers else _list_files()
+    return opts, ('__personale__' if is_pers else 'ETF.xlsx')
 
 
 try:

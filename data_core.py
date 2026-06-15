@@ -56,7 +56,21 @@ def analyses_path(username=None):
 def read_current(username=None):
     try:
         with open(current_path(username)) as f:
-            return json.load(f)
+            raw = json.load(f)
+        # current.json contiene solo voci-asset (dict). Eventuali chiavi meta
+        # (es. "_tipo": "personale"|"default:ETF") vengono ignorate qui, così
+        # ogni iterazione a valle vede solo asset.
+        return {k: v for k, v in raw.items() if isinstance(v, dict)}
+    except Exception:
+        return {}
+
+
+def read_meta(username=None):
+    """Legge le chiavi meta (non-asset) di current.json, es. {'_tipo': ...}."""
+    try:
+        with open(current_path(username)) as f:
+            raw = json.load(f)
+        return {k: v for k, v in raw.items() if not isinstance(v, dict)}
     except Exception:
         return {}
 
@@ -101,6 +115,33 @@ def read_analyses(username=None):
 # ─── Viste sui dati ───────────────────────────────────────────────────────────
 def asset_options(username=None):
     return [{'label': a, 'value': a} for a in read_current(username).keys()]
+
+
+def build_dataset(username=None):
+    """
+    Ricostruisce (close_returns, original_prices, ticker_map) dal file UNICO
+    current.json. Usato per mostrare i dati senza dipendere dai buffer in memoria.
+    """
+    data = read_current(username)
+    pcols, rcols, tm = {}, {}, {}
+    for a, v in data.items():
+        if not isinstance(v, dict):
+            continue
+        dates = v.get('dates')
+        if not dates:
+            continue
+        try:
+            idx = pd.to_datetime(dates)
+        except Exception:
+            continue
+        if v.get('prices') and len(v['prices']) == len(dates):
+            pcols[a] = pd.Series(v['prices'], index=idx)
+        if v.get('returns') and len(v['returns']) == len(dates):
+            rcols[a] = pd.Series(v['returns'], index=idx)
+        tm[a] = v.get('ticker') or a
+    op = pd.DataFrame(pcols).sort_index() if pcols else None
+    cr = pd.DataFrame(rcols).sort_index() if rcols else None
+    return cr, op, tm
 
 
 def build_prices(username=None):

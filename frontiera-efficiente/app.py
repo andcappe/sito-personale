@@ -59,40 +59,55 @@ def _get_username():
         return 'anon'
 
 def _read_user_json():
+    """Solo voci-asset di current.json (chiavi meta tipo _tipo escluse)."""
     try:
         u = _get_username()
-        return json.load(open(_ROOT_DIR / 'sessions' / u / 'current.json'))
+        raw = json.load(open(_ROOT_DIR / 'sessions' / u / 'current.json'))
+        return {k: v for k, v in raw.items() if isinstance(v, dict)}
     except Exception:
         return {}
 
 
 def _fe_consistency(data):
-    """Coerenza profilo: ogni asset ha dates+returns della stessa lunghezza."""
+    """Coerenza profilo: ogni asset ha dates+returns della stessa lunghezza.
+    Le chiavi meta (non-dict, es. _tipo) vengono ignorate."""
     if not isinstance(data, dict):
         return False
     for v in data.values():
         if not isinstance(v, dict):
-            return False
+            continue
         d, r = v.get('dates'), v.get('returns')
         if not d or not r or len(d) != len(r):
             return False
     return True
 
 
+_FE_JSON_WRITE_LOCK = threading.Lock()
+
+
 def _fe_atomic_json_write(path, data):
-    """Scrittura atomica (temp+rename) + validazione: mai file a metà o incoerente."""
+    """Scrittura atomica (temp+rename) + validazione: mai file a metà o incoerente.
+    Temp UNIVOCO (pid+thread): la Frontiera gira nello stesso processo del
+    Portafoglio; un .tmp condiviso causerebbe scritture concorrenti sovrapposte
+    e JSON corrotto su current.json."""
     if not _fe_consistency(data):
         print("⚠ [frontiera] profilo incoerente — non salvato")
         return False
+    tmp = f'{path}.{os.getpid()}.{threading.get_ident()}.tmp'
     try:
-        tmp = str(path) + '.tmp'
-        with open(tmp, 'w') as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
+        with _FE_JSON_WRITE_LOCK:
+            with open(tmp, 'w') as f:
+                json.dump(data, f)
+            os.replace(tmp, path)
         _cloud_push(path)       # replica su storage persistente (S3/R2)
         return True
     except Exception as e:
         print(f"⚠ [frontiera] scrittura current.json fallita: {e}")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
         return False
 
 
@@ -107,12 +122,16 @@ def _update_user_json_fe(checked=None, weights=None):
     if checked is not None:
         s = set(checked)
         for desc in data:
+            if not isinstance(data[desc], dict):
+                continue
             v = desc in s
             if data[desc].get('checked') != v:
                 data[desc]['checked'] = v
                 changed = True
     if weights is not None:
         for desc in data:
+            if not isinstance(data[desc], dict):
+                continue
             for k in ('P1', 'P2', 'P3'):
                 v = float(weights.get(k, {}).get(desc, 0) or 0)
                 if data[desc].get(k) != v:
@@ -206,8 +225,23 @@ _ARIMA_LOCK  = threading.Lock()
 _ARIMA_STATE = {
     'req_id': None, 'running': False, 'done': False,
     'pct': 0, 'total': 0, 'error': None, 'mu': None, 'cov': None,
+    'precompute': False, 'sig': '',
 }
 _ARIMA_CACHE_INFO = {'available': False, 'ts': ''}
+
+# ── Stili barra di avanzamento ARIMA (riusati da più callback) ───────────────
+_ARIMA_PROG_HIDDEN = {'display': 'none'}
+_ARIMA_PROG_SHOWN  = {'display': 'flex', 'flexDirection': 'column', 'gap': '5px',
+                      'padding': '8px 16px', 'background': '#eef4ff',
+                      'borderRadius': '8px', 'margin': '4px 0',
+                      'flexShrink': '0', 'minWidth': '300px'}
+
+
+def _arima_bar_style(pct, color='#1a3a6b'):
+    """Stile del riempimento della barra di avanzamento (0–100%)."""
+    return {'width': f'{max(0, min(100, int(pct)))}%', 'height': '100%',
+            'background': color, 'borderRadius': '6px',
+            'transition': 'width 0.3s ease'}
 
 
 def _arima_garch_mu_vol(returns_df, window=250, req_id=None):
@@ -740,6 +774,23 @@ def _read_arima_cache():
     return None, None, None
 
 
+def _get_arima_cache(src):
+    """(mu, cov) della cache ARIMA per la sorgente ('user' | 'default').
+    (None, None) se assente. Stessa logica di lettura usata da calc_and_render."""
+    try:
+        if src == 'user':
+            arima = _read_user_data()[3]
+            if arima and isinstance(arima, dict) and arima.get('mu') and arima.get('cov'):
+                return pd.Series(arima['mu']), pd.DataFrame(arima['cov'])
+            return None, None
+        mu, cov, _ = _read_arima_from_pkl(_PORT_PKL)
+        if mu is None:
+            mu, cov, _ = _read_arima_cache()
+        return mu, cov
+    except Exception:
+        return None, None
+
+
 def _refresh_arima_cache_info():
     """Aggiorna _ARIMA_CACHE_INFO leggendo il pkl una volta sola (chiamata ad avvio e post-calcolo)."""
     mu, _, ts = _read_arima_cache()
@@ -1138,15 +1189,20 @@ app.layout = html.Div([
                                 'marginBottom':'4px','borderRadius':'0 4px 4px 0',
                                 'flexShrink':'0'}),
                 html.Div(id='fe-arima-progress-div',
-                         style={'display':'none','alignItems':'center','justifyContent':'center',
-                                'gap':'10px','padding':'8px 16px','background':'#eef4ff',
-                                'borderRadius':'8px','margin':'4px 0','flexShrink':'0'},
+                         style=_ARIMA_PROG_HIDDEN,
                          children=[
-                    html.Div(style={'width':'16px','height':'16px','border':'3px solid #ccd9ee',
-                                    'borderTop':'3px solid #1a3a6b','borderRadius':'50%',
-                                    'animation':'fe-spin 0.9s linear infinite','flexShrink':'0'}),
-                    html.Span(id='fe-arima-progress-text', children='ARIMA in corso...',
-                              style={'fontSize':'11px','color':'#1a3a6b','fontWeight':'600'}),
+                    html.Div([
+                        html.Div(style={'width':'14px','height':'14px','border':'2px solid #ccd9ee',
+                                        'borderTop':'2px solid #1a3a6b','borderRadius':'50%',
+                                        'animation':'fe-spin 0.9s linear infinite','flexShrink':'0'}),
+                        html.Span(id='fe-arima-progress-text', children='ARIMA in corso...',
+                                  style={'fontSize':'11px','color':'#1a3a6b','fontWeight':'600'}),
+                    ], style={'display':'flex','alignItems':'center','gap':'8px'}),
+                    # Barra di avanzamento (track + riempimento)
+                    html.Div(
+                        html.Div(id='fe-arima-progress-bar', style=_arima_bar_style(0)),
+                        style={'width':'100%','height':'9px','background':'#ccd9ee',
+                               'borderRadius':'6px','overflow':'hidden'}),
                 ]),
                 dcc.Loading(
                     type='circle',
@@ -1339,6 +1395,85 @@ def on_page_load(_):
     raise PreventUpdate
 
 
+# ── ARIMA: avvio automatico al caricamento dati / passaggio in modalità ARIMA ──
+# Il calcolo gira lato server (thread nel processo gunicorn) e NON si interrompe
+# se l'utente naviga altrove: lo stato è nella globale _ARIMA_STATE, la barra è
+# solo un "visore". Si attiva quando cambiano i dati (sincronizzati dall'unico
+# current.json) o quando si passa in modalità ARIMA+GARCH. Una "firma" degli
+# asset evita ricalcoli/loop inutili. Quando è pronto, on_arima_done disegna la
+# frontiera (suffisso ':done').
+@app.callback(
+    Output('fe-arima-reqid',         'data',     allow_duplicate=True),
+    Output('fe-arima-poll',          'disabled', allow_duplicate=True),
+    Output('fe-arima-progress-div',  'style',    allow_duplicate=True),
+    Output('fe-arima-progress-text', 'children', allow_duplicate=True),
+    Output('fe-arima-progress-bar',  'style',    allow_duplicate=True),
+    Input('fe-stock-data',           'data'),
+    Input('fe-risk-measure',         'value'),
+    State('fe-data-source',          'data'),
+    prevent_initial_call=True,
+)
+def auto_start_arima(stock_data, risk, data_source):
+    # Solo in modalità ARIMA+GARCH: negli altri rischi la frontiera non usa ARIMA.
+    if risk != 'arima_garch' or not stock_data:
+        raise PreventUpdate
+    returns_df = _get_returns(stock_data)
+    if returns_df is None or returns_df.empty:
+        raise PreventUpdate
+    assets = sorted(set(map(str, returns_df.dropna(how='all', axis=1).columns)))
+    if len(assets) < 2:
+        raise PreventUpdate
+    sig = ','.join(assets)
+
+    with _ARIMA_LOCK:
+        st = dict(_ARIMA_STATE)
+
+    # Calcolo già in corso per QUESTI asset → ri-aggancia la barra (sopravvive
+    # alla navigazione), senza far ripartire nulla.
+    if st.get('running') and st.get('sig') == sig:
+        total = st.get('total') or 1
+        pct   = int((st.get('pct') or 0) / total * 100)
+        return (st.get('req_id'), False, _ARIMA_PROG_SHOWN,
+                f"ARIMA: {st.get('pct')}/{total} titoli ({pct}%)",
+                _arima_bar_style(pct))
+
+    # Già completato per QUESTI asset → la frontiera è (o sarà) già disegnata.
+    if st.get('done') and not st.get('error') and st.get('sig') == sig:
+        raise PreventUpdate
+
+    import uuid as _uuid
+    req_id = str(_uuid.uuid4())[:8]
+    _src = data_source if data_source in ('default', 'user') else 'user'
+
+    # Cache su disco già completa → iniettala e disegna subito (no ricalcolo).
+    mu_c, cov_c = _get_arima_cache(_src)
+    cached = (set(map(str, mu_c.index)) & set(map(str, cov_c.index))) \
+             if (mu_c is not None and cov_c is not None) else set()
+    if set(assets).issubset(cached):
+        with _ARIMA_LOCK:
+            _ARIMA_STATE.update({
+                'req_id': req_id, 'running': False, 'done': True,
+                'pct': len(assets), 'total': len(assets), 'error': None,
+                'mu': mu_c, 'cov': cov_c, 'sig': sig, 'precompute': False,
+            })
+        # ':done' → on_arima_done costruisce e disegna la frontiera.
+        return (req_id + ':done', True, _ARIMA_PROG_HIDDEN,
+                '✓ ARIMA pronto', _arima_bar_style(100))
+
+    # Altrimenti calcola in background (ARIMA per tutti gli asset caricati).
+    with _ARIMA_LOCK:
+        _ARIMA_STATE.update({
+            'req_id': req_id, 'running': True, 'done': False,
+            'pct': 0, 'total': len(assets), 'error': None,
+            'mu': None, 'cov': None, 'sig': sig, 'precompute': False,
+        })
+    t = threading.Thread(target=_run_arima_thread,
+                         args=(req_id, returns_df, 250, _src), daemon=True)
+    t.start()
+    return (req_id, False, _ARIMA_PROG_SHOWN,
+            'Calcolo ARIMA+GARCH in background…', _arima_bar_style(0))
+
+
 def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
     pre_select = set(pre_select or [])
     pre_p1 = (pre_weights or {}).get('P1', {})
@@ -1405,14 +1540,43 @@ def build_grid_on_load(loaded, stock_data):
     if returns_df is None or returns_df.empty:
         raise PreventUpdate
     ns = _read_user_json()
-    pre_select = [d for d, v in ns.items() if v.get('checked')] if ns else []
     pre_weights = {
         'P1': {d: v['P1'] for d, v in ns.items() if v.get('P1', 0)},
         'P2': {d: v['P2'] for d, v in ns.items() if v.get('P2', 0)},
         'P3': {d: v['P3'] for d, v in ns.items() if v.get('P3', 0)},
     } if ns else None
+    # Spunta l'asset (📊) se è 'checked' OPPURE se ha un peso in P1/P2/P3:
+    # passando dal Portafoglio alla Frontiera gli asset con pesi risultano già selezionati.
+    pre_select = [d for d, v in ns.items()
+                  if v.get('checked') or v.get('P1', 0) or v.get('P2', 0) or v.get('P3', 0)] if ns else []
     return _build_grid_rows(returns_df, pre_select=pre_select, pre_weights=pre_weights)
 
+
+# Quando cambia la LISTA asset (es. cancelli un asset in Analisi Portafoglio),
+# la frontiera GIÀ CALCOLATA è stale (può contenere l'asset rimosso nel grafico
+# e nei pesi F1/F2/F3). La azzeriamo: così l'asset cancellato non resta appeso.
+# L'utente ricalcola con "Calcola Frontiera" sulla nuova lista.
+@app.callback(
+    Output('fe-frontier-chart',   'figure',   allow_duplicate=True),
+    Output('fe-perf-chart',       'figure',   allow_duplicate=True),
+    Output('fe-drawdown-chart',   'figure',   allow_duplicate=True),
+    Output('fe-stats-panel',      'children', allow_duplicate=True),
+    Output('fe-f1-weights',       'data',     allow_duplicate=True),
+    Output('fe-f2-weights',       'data',     allow_duplicate=True),
+    Output('fe-f3-weights',       'data',     allow_duplicate=True),
+    Output('fe-frontier-rawdata', 'data',     allow_duplicate=True),
+    Output('fe-selected-pt',      'data',     allow_duplicate=True),
+    Input('fe-stock-data',        'data'),
+    prevent_initial_call=True,
+)
+def _clear_stale_frontier(_stock_data):
+    _empty = go.Figure().update_layout(
+        paper_bgcolor='white', plot_bgcolor='#f8faff',
+        font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
+        annotations=[dict(text='Lista asset aggiornata — clicca "Calcola Frontiera"',
+                          xref='paper', yref='paper', x=0.5, y=0.5,
+                          showarrow=False, font=dict(size=13, color='#6b7a99'))])
+    return _empty, _empty, _empty, '', None, None, None, None, None
 
 
 @app.callback(
@@ -1623,9 +1787,25 @@ def calc_and_render(n, stock_data, prices_data,
             mu_cached, cov_cached, arima_ts = _read_arima_from_pkl(cache_path)
             if mu_cached is None:
                 mu_cached, cov_cached, arima_ts = _read_arima_cache()
-        print(f"[calc_and_render] ARIMA cache ({_src}): {'trovata' if mu_cached is not None else 'VUOTA'}")
-        if mu_cached is not None:
-            # Cache disponibile → inietta nel _ARIMA_STATE e scatta on_arima_done subito
+        # La cache va usata solo se copre TUTTI gli asset selezionati per le frontiere.
+        # Se sono stati caricati/selezionati titoli nuovi non presenti nella cache ARIMA,
+        # questa è incompleta → va ricalcolata in background (altrimenti i nuovi titoli
+        # verrebbero esclusi dalla frontiera per covarianza mancante).
+        _required = set()
+        for _sel in (p1_sel, p2_sel, p3_sel):
+            _required.update(str(a) for a in _sel if a in returns_df.columns)
+        if mu_cached is not None and cov_cached is not None and _required:
+            _cached_assets = set(map(str, mu_cached.index)) & set(map(str, cov_cached.index))
+            _missing = _required - _cached_assets
+        else:
+            _missing = _required
+        _cache_ok = (mu_cached is not None and cov_cached is not None and not _missing)
+        print(f"[calc_and_render] ARIMA cache ({_src}): "
+              f"{'trovata' if mu_cached is not None else 'VUOTA'}; "
+              f"richiesti={len(_required)} mancanti={len(_missing)} → "
+              f"{'uso cache' if _cache_ok else 'ricalcolo background'}")
+        if _cache_ok:
+            # Cache disponibile e completa → inietta nel _ARIMA_STATE e scatta on_arima_done subito
             import uuid as _uuid
             req_id = str(_uuid.uuid4())[:8]
             with _ARIMA_LOCK:
@@ -1633,6 +1813,8 @@ def calc_and_render(n, stock_data, prices_data,
                     'req_id': req_id, 'running': False, 'done': True,
                     'pct': len(all_assets), 'total': len(all_assets),
                     'error': None, 'mu': mu_cached, 'cov': cov_cached,
+                    'precompute': False,
+                    'sig': ','.join(sorted(map(str, all_assets))),
                 })
             _nu = no_update
             # Restituisce req_id + ':done' così on_arima_done scatta immediatamente
@@ -1648,6 +1830,8 @@ def calc_and_render(n, stock_data, prices_data,
                 _ARIMA_STATE.update({
                     'req_id': req_id, 'running': True, 'done': False,
                     'pct': 0, 'total': len(all_assets), 'error': None, 'mu': None, 'cov': None,
+                    'precompute': False,
+                    'sig': ','.join(sorted(map(str, all_assets))),
                 })
             t = threading.Thread(
                 target=_run_arima_thread,
@@ -1655,13 +1839,10 @@ def calc_and_render(n, stock_data, prices_data,
                 daemon=True,
             )
             t.start()
-            _prog_style = {'display':'flex','alignItems':'center','justifyContent':'center',
-                           'gap':'10px','padding':'8px 16px','background':'#eef4ff',
-                           'borderRadius':'8px','margin':'4px 0','flexShrink':'0'}
             _nu = no_update
             return (_nu, _nu, _nu, _nu, _nu, _nu,
                     _nu, _nu, _nu, _nu, _nu,
-                    False, req_id, _prog_style)
+                    False, req_id, _ARIMA_PROG_SHOWN)
 
     for fname, assets_sel in [('F1', p1_sel), ('F2', p2_sel), ('F3', p3_sel)]:
         valid = [a for a in assets_sel if a in returns_df.columns]
@@ -2038,6 +2219,7 @@ _wgt_f3_cb = _make_wgt_cell_cb('fe-f3-weights', 'fe-wgt-f3', '#e6550d')
     Output('fe-arima-reqid',         'data',     allow_duplicate=True),
     Output('fe-arima-progress-text', 'children', allow_duplicate=True),
     Output('fe-arima-poll',          'disabled', allow_duplicate=True),
+    Output('fe-arima-progress-bar',  'style',    allow_duplicate=True),
     Input('fe-arima-poll',           'n_intervals'),
     State('fe-arima-reqid',          'data'),
     prevent_initial_call=True,
@@ -2045,20 +2227,27 @@ _wgt_f3_cb = _make_wgt_cell_cb('fe-f3-weights', 'fe-wgt-f3', '#e6550d')
 def arima_poll(n_int, cur_req_id):
     if not cur_req_id:
         raise PreventUpdate
-    raw_id = cur_req_id.replace(':done', '').replace(':error', '')
+    raw_id = cur_req_id.replace(':done', '').replace(':error', '').replace(':ready', '')
     with _ARIMA_LOCK:
         s = dict(_ARIMA_STATE)
     if s.get('req_id') != raw_id:
         raise PreventUpdate
+    _pre = s.get('precompute')
     if s.get('error'):
-        return cur_req_id + ':error', f"❌ Errore: {s['error'][:50]}", True
+        return (raw_id + ':error', f"❌ Errore: {s['error'][:50]}", True,
+                _arima_bar_style(100, '#c0392b'))
     if s.get('done'):
-        return cur_req_id + ':done', '✓ Completato', True
+        # In precompute non costruiamo la frontiera: usiamo il suffisso ':ready'
+        # (on_arima_done lo ignora). In modalità calcolo usiamo ':done'.
+        if _pre:
+            return raw_id + ':ready', '✓ ARIMA pronto', True, _arima_bar_style(100)
+        return raw_id + ':done', '✓ Completato', True, _arima_bar_style(100)
     total = s['total'] or 1
     pct   = int(s['pct'] / total * 100)
     return (no_update,
             f"ARIMA: {s['pct']}/{total} titoli ({pct}%)",
-            False)
+            False,
+            _arima_bar_style(pct))
 
 
 # ── ARIMA: quando completato → calcola frontiere e aggiorna ──────────────────
@@ -2101,6 +2290,10 @@ def on_arima_done(req_id, stock_data, prices_data,
                   n_port, wmin, wmax, rf, risk, arima_window,
                   date_start, date_end, port_chart_vals, port_chart_ids, sel_pt_cur):
     if not req_id:
+        raise PreventUpdate
+    # ':ready' = precompute completato in background: la cache ARIMA è pronta,
+    # ma NON costruiamo la frontiera ora (l'utente la calcola quando vuole).
+    if req_id.endswith(':ready'):
         raise PreventUpdate
     raw_id = req_id.replace(':done', '').replace(':error', '')
     with _ARIMA_LOCK:
