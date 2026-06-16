@@ -6012,6 +6012,8 @@ def _close_fileload_modal(n):
     Output('global-assets-selected',  'data',     allow_duplicate=True),
     Output('insufficient-data-store', 'data',     allow_duplicate=True),
     Output('update-portfolio-button', 'n_clicks', allow_duplicate=True),
+    Output('file-panel',              'style',    allow_duplicate=True),
+    Output('main-tabs',               'value',    allow_duplicate=True),
     Input('pending-fileload-store',   'data'),
     Input('fileload-yes',             'n_clicks'),
     State('update-portfolio-button',  'n_clicks'),
@@ -6102,6 +6104,8 @@ def execute_file_load(pending, submit_n, cur_clicks):
         html.Div(label, style={'color': '#007755', 'font-size': '11px'}),
         p1, p2, p3, gsel, insuf,
         (cur_clicks or 0) + 1,
+        {'display': 'none'},   # chiudi il pannello File: così la griglia caricata è visibile
+        'tab-portfolio',       # porta sul tab Analisi Portafoglio
     )
 
 
