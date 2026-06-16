@@ -2944,7 +2944,11 @@ app.layout = html.Div([
                 selected_style={'font-size': '12px', 'padding': '8px 18px',
                                 'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
     ]),
-    html.Div(id='tab1-content'),
+    # Pre-renderizzato col tab Portafoglio: così i suoi componenti
+    # (update-portfolio-button, dr-start-tab1, griglia…) esistono GIÀ nel layout
+    # iniziale e i callback non vanno in "nonexistent object" all'avvio.
+    # render_tab1 lo ri-renderizza al cambio tab.
+    html.Div(id='tab1-content', children=get_portfolio_analysis_tab([])),
     # SA layout sempre presente nel DOM (nascosto finché non si clicca il tab)
     # Garantisce che i callback sa_populate_x/y trovino i componenti al caricamento
     html.Div(id='tab-sa-content',
@@ -5832,13 +5836,20 @@ def _build_fp_row(f):
            'font-size': '10px', 'padding': '3px 8px', 'font-weight': 'bold'}
     return html.Div([
         html.Div([
-            html.Span(name, style={'font-weight': 'bold', 'font-size': '11px',
-                                   'color': '#1a3a5c'}),
-            html.Br(),
+            # Nome EDITABILE: modifica + ✏️ per rinominare (aggiorna l'etichetta)
+            dcc.Input(id={'type': 'fp-name-input', 'index': fn}, type='text', value=name,
+                      debounce=True,
+                      style={'width': '100%', 'font-weight': 'bold', 'font-size': '11px',
+                             'color': '#1a3a5c', 'border': '1px solid #e0e0e0',
+                             'border-radius': '3px', 'padding': '2px 5px'}),
             html.Span(f'🕐 {date}  ·  {size} KB',
                       style={'font-size': '9px', 'color': '#888'}),
         ], style={'flex': '1', 'min-width': '0'}),
         html.Div([
+            html.Button('✏️', id={'type': 'fp-rename-btn', 'index': fn}, n_clicks=0,
+                        title='Rinomina',
+                        style={**btn, 'background': '#e8e8e8', 'color': '#333',
+                               'margin-right': '4px'}),
             html.Button('📂 Carica', id={'type': 'fp-load-btn', 'index': fn},
                         n_clicks=0,
                         style={**btn, 'background': '#1a3a5c', 'color': 'white',
@@ -6113,6 +6124,46 @@ def delete_fp_file(all_clicks):
         raise PreventUpdate
     _sm.delete_user_file(_get_username(), filename)
     return f'{filename}:{time.time()}'
+
+
+# ── Rinomina file (aggiorna l'etichetta mostrata) ────────────────────────────
+@app.callback(
+    Output('fp-delete-trigger', 'data', allow_duplicate=True),
+    Input({'type': 'fp-rename-btn', 'index': ALL}, 'n_clicks'),
+    State({'type': 'fp-name-input', 'index': ALL}, 'value'),
+    State({'type': 'fp-name-input', 'index': ALL}, 'id'),
+    prevent_initial_call=True,
+)
+def rename_fp_file(_clicks, values, ids):
+    ctx = callback_context
+    if not ctx.triggered or not ctx.triggered[0]['value']:
+        raise PreventUpdate
+    try:
+        fn = json.loads(ctx.triggered[0]['prop_id'].split('.')[0])['index']
+    except Exception:
+        raise PreventUpdate
+    new_name = next((v for v, i in zip(values, ids) if i.get('index') == fn), None)
+    if not (new_name and new_name.strip()):
+        raise PreventUpdate
+    _sm.rename_user_file(_get_username(), fn, new_name.strip())
+    return f'rename:{fn}:{time.time()}'
+
+
+# ── Nome di default per il salvataggio: User_AAAAMMGG (precompilato, editabile) ─
+@app.callback(
+    Output('fp-save-name', 'value'),
+    Input('file-panel-btn', 'n_clicks'),
+    State('fp-save-name', 'value'),
+    prevent_initial_call=True,
+)
+def fp_default_save_name(n, cur):
+    if not n:
+        raise PreventUpdate
+    if cur and cur.strip():
+        raise PreventUpdate   # non sovrascrivere ciò che hai già scritto
+    u = _get_username()
+    base = u.split('@')[0] if '@' in u else u
+    return f"{base}_{datetime.now().strftime('%Y%m%d')}"
 
 
 # ── Marca sessione modificata su cambio pesi (per il warning) ────────────────

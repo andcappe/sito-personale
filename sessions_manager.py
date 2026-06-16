@@ -236,15 +236,37 @@ def list_user_files(username: str) -> list:
 
 
 def delete_user_file(username: str, filename: str) -> bool:
-    """Elimina un file salvato dell'utente (non working.pkl)."""
+    """Elimina un file salvato dell'utente (non working.pkl), anche dal bucket
+    (altrimenti online verrebbe ripristinato da R2 al prossimo sync)."""
     if filename == 'working.pkl':
         return False
     path = user_dir(username) / filename
     try:
-        path.unlink()
+        if path.exists():
+            path.unlink()
+        try:
+            import cloud_storage
+            cloud_storage.delete(path)   # rimuove anche da R2/S3
+        except Exception:
+            pass
         return True
     except Exception:
         return False
+
+
+def rename_user_file(username: str, filename: str, new_name: str) -> bool:
+    """Rinomina (etichetta) un file salvato: aggiorna il nome visualizzato
+    (_saved_name) dentro il pkl, senza cambiare il nome-file fisico. Ripersiste
+    su disco e su R2."""
+    new_name = (new_name or '').strip()
+    if not new_name or filename == 'working.pkl':
+        return False
+    path = user_dir(username) / filename
+    data = _load_pkl(path)
+    if not isinstance(data, dict):
+        return False
+    data['_saved_name'] = new_name
+    return _save_pkl(path, data)   # _save_pkl fa anche _cloud_push
 
 
 # ─── Admin ────────────────────────────────────────────────────────────────────

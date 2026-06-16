@@ -124,6 +124,28 @@ def push(local_path):
                      daemon=True).start()
 
 
+def _delete_blocking(key):
+    try:
+        _cli().delete_object(Bucket=_bucket(), Key=key)
+    except Exception as e:
+        print(f"⚠ [cloud] delete fallito {key}: {e}", flush=True)
+
+
+def delete(local_path):
+    """
+    Elimina l'oggetto corrispondente dal bucket (thread daemon, best-effort).
+    Indispensabile quando si cancella/rinomina un file: senza questo, al prossimo
+    pull_all il file tornerebbe dal bucket (la cancellazione locale non basta).
+    Il key si ricava dal path anche se il file locale è già stato rimosso.
+    """
+    if not enabled():
+        return
+    key = _rel_key(local_path)
+    if not key:
+        return
+    threading.Thread(target=_delete_blocking, args=(key,), daemon=True).start()
+
+
 # ─── Pull all'avvio (download bucket → disco locale) ──────────────────────────
 
 def pull_all() -> int:
