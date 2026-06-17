@@ -5772,16 +5772,12 @@ def save_session_cb(n_clicks, name, desc, *store_values):
 )
 def delete_session_cb(all_clicks):
     ctx = callback_context
-    if not ctx.triggered:
+    if not ctx.triggered or not ctx.triggered[0]['value']:
         raise PreventUpdate
-    triggered = ctx.triggered[0]
-    if not triggered['value']:
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict):
         raise PreventUpdate
-    try:
-        id_dict    = json.loads(triggered['prop_id'].split('.')[0])
-        session_id = id_dict['index']
-    except Exception:
-        raise PreventUpdate
+    session_id = tid['index']
     delete_session(session_id)
     return str(session_id)
 
@@ -5797,16 +5793,12 @@ def delete_session_cb(all_clicks):
 )
 def select_session(all_clicks):
     ctx = callback_context
-    if not ctx.triggered:
+    if not ctx.triggered or not ctx.triggered[0]['value']:
         raise PreventUpdate
-    triggered = ctx.triggered[0]
-    if not triggered['value']:
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict):
         raise PreventUpdate
-    try:
-        id_dict    = json.loads(triggered['prop_id'].split('.')[0])
-        session_id = id_dict['index']
-    except Exception:
-        raise PreventUpdate
+    session_id = tid['index']
     return session_id, session_id
 
 
@@ -5957,16 +5949,14 @@ def fp_save_named(n, name, *store_values):
 )
 def stage_file_load(default_clicks, load_clicks):
     ctx = callback_context
-    if not ctx.triggered:
+    if not ctx.triggered or not ctx.triggered[0]['value']:
         raise PreventUpdate
-    trig = ctx.triggered[0]
-    if not trig['value']:
+    # triggered_id è l'id GIÀ parsato (dict): niente split('.') che si rompe sui
+    # nomi file con punti (es. "...@gmail.com_..._.pkl").
+    id_dict = ctx.triggered_id
+    if not isinstance(id_dict, dict):
         raise PreventUpdate
-    try:
-        id_dict = json.loads(trig['prop_id'].split('.')[0])
-    except Exception:
-        raise PreventUpdate
-    kind = 'default' if id_dict['type'] == 'fp-default-btn' else 'personal'
+    kind = 'default' if id_dict.get('type') == 'fp-default-btn' else 'personal'
     needs_confirm = _sm.has_unsaved_changes(_get_username())
     payload = {'kind': kind, 'key': id_dict['index'],
                'await': needs_confirm, 'ts': time.time()}
@@ -6116,16 +6106,12 @@ def execute_file_load(pending, submit_n, cur_clicks):
 )
 def delete_fp_file(all_clicks):
     ctx = callback_context
-    if not ctx.triggered:
+    if not ctx.triggered or not ctx.triggered[0]['value']:
         raise PreventUpdate
-    trig = ctx.triggered[0]
-    if not trig['value']:
+    tid = ctx.triggered_id   # id già parsato (no split('.') che rompe sui punti del nome)
+    if not isinstance(tid, dict):
         raise PreventUpdate
-    try:
-        id_dict  = json.loads(trig['prop_id'].split('.')[0])
-        filename = id_dict['index']
-    except Exception:
-        raise PreventUpdate
+    filename = tid['index']
     _sm.delete_user_file(_get_username(), filename)
     return f'{filename}:{time.time()}'
 
@@ -6142,10 +6128,10 @@ def rename_fp_file(_clicks, values, ids):
     ctx = callback_context
     if not ctx.triggered or not ctx.triggered[0]['value']:
         raise PreventUpdate
-    try:
-        fn = json.loads(ctx.triggered[0]['prop_id'].split('.')[0])['index']
-    except Exception:
+    tid = ctx.triggered_id   # id già parsato (no split('.') che rompe sui punti del nome)
+    if not isinstance(tid, dict):
         raise PreventUpdate
+    fn = tid['index']
     new_name = next((v for v, i in zip(values, ids) if i.get('index') == fn), None)
     if not (new_name and new_name.strip()):
         raise PreventUpdate
