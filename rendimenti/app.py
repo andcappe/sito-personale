@@ -59,10 +59,14 @@ def _get_username():
         return 'anon'
 
 def _read_user_json():
+    """Solo voci-asset di current.json: scarta le chiavi meta (es. "_tipo": "personale"),
+    altrimenti _reconstruct_from_json andrebbe in eccezione sui valori non-dict e
+    Rendimenti ripiegherebbe sul pkl di default (asset diversi dal portafoglio)."""
     try:
         u = _get_username()
         root = Path(os.path.dirname(os.path.abspath(__file__))).parent
-        return json.load(open(root / 'sessions' / u / 'current.json'))
+        raw = json.load(open(root / 'sessions' / u / 'current.json'))
+        return {k: v for k, v in raw.items() if isinstance(v, dict)}
     except Exception:
         return {}
 
