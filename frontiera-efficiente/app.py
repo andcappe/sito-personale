@@ -1531,9 +1531,10 @@ def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
     Output('fe-asset-count', 'children', allow_duplicate=True),
     Input('fe-loaded-flag',  'data'),
     Input('fe-stock-data',   'data'),
+    Input('fe-sync-sig',     'data'),   # ricostruisci anche su cambio selezione/pesi
     prevent_initial_call=True,
 )
-def build_grid_on_load(loaded, stock_data):
+def build_grid_on_load(loaded, stock_data, _sync_sig):
     if not stock_data:
         raise PreventUpdate
     returns_df = _get_returns(stock_data)
@@ -2905,10 +2906,21 @@ _cb_p3    = _make_selall_cb('fe-selall-p3',   'fe-p3')
 )
 def fe_live_sync(_, sig):
     ns = _read_user_json()
-    new_sig = ','.join(sorted(ns.keys())) if ns else ''
-    if new_sig == (sig or ''):
-        raise PreventUpdate
     if not ns:
+        raise PreventUpdate
+    # Firma su ASSET + SELEZIONE + PESI: così la Frontiera si riallinea a current.json
+    # appena cambia QUALSIASI cosa (lista asset, asset selezionati, pesi P1/P2/P3),
+    # non solo la lista asset. Senza pesi/selezione restavano i "vecchi portafogli".
+    new_sig = repr((
+        tuple(sorted(ns.keys())),
+        tuple(sorted(d for d, v in ns.items() if v.get('checked'))),
+        tuple(sorted((d, round(float(v.get('P1') or 0), 4),
+                          round(float(v.get('P2') or 0), 4),
+                          round(float(v.get('P3') or 0), 4))
+                     for d, v in ns.items()
+                     if (v.get('P1') or v.get('P2') or v.get('P3')))),
+    ))
+    if new_sig == (sig or ''):
         raise PreventUpdate
     op, cr = _reconstruct_from_json_fe(ns)
     if op is None or cr is None:
