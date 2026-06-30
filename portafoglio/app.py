@@ -369,7 +369,7 @@ def _get_df(json_str):
 # ─────────────────────────────────────────────────────────────────────────────
 DOWNLOAD_BATCH_SIZE = 10
 
-_DL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
+_DL_STATE  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': [], 'suggestions': {}, 'auto_fixed': {}}
 _DL_BUFFER: dict = {}   # dati file attivo — salvati su disco, permanenti
 _DL_LOCK   = threading.Lock()
 
@@ -618,14 +618,14 @@ def _cl_buf(username: str) -> dict:
 def _cl_state(username: str) -> dict:
     with _CL_LOCK:
         if username not in _CL_STATES:
-            _CL_STATES[username] = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
+            _CL_STATES[username] = {'status': 'idle', 'current': 0, 'total': 0, 'errors': [], 'suggestions': {}}
         return _CL_STATES[username]
 
 
 def _cl_clear(username: str):
     with _CL_LOCK:
         _CL_BUFFERS[username] = {}
-        _CL_STATES[username]  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': []}
+        _CL_STATES[username]  = {'status': 'idle', 'current': 0, 'total': 0, 'errors': [], 'suggestions': {}}
 
 
 def _user_cache_path(username: str, filename: str = None) -> Path:
@@ -837,7 +837,15 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
             return None
 
     eurusd, eurgbp = _fx('EURUSD=X'), _fx('EURGBP=X')
-    all_prices = {}
+    all_prices  = {}
+    failed_map  = {}   # {ticker: descrizione} per ticker non scaricati
+
+    def _apply_fx(px, curr):
+        if curr == 'USD' and eurusd is not None:
+            return px / eurusd.reindex(px.index).ffill()
+        if curr == 'GBP' and eurgbp is not None:
+            return px / eurgbp.reindex(px.index).ffill()
+        return px
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
         bt = tickers[i:i + DOWNLOAD_BATCH_SIZE]
@@ -852,21 +860,47 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
                 try:
                     px = (raw[(t, 'Close')].copy() if isinstance(raw.columns, pd.MultiIndex)
                           else raw['Close'].copy())
-                    px = px.ffill()
-                    if curr == 'USD' and eurusd is not None:
-                        px = px / eurusd.reindex(px.index).ffill()
-                    elif curr == 'GBP' and eurgbp is not None:
-                        px = px / eurgbp.reindex(px.index).ffill()
+                    px = _apply_fx(px.ffill(), curr)
                     all_prices[desc] = px
-                except Exception as e2:
+                except Exception:
+                    # Ticker non in risposta batch: prova suffissi europei automaticamente
+                    t_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs)
+                    if t_ok and px_ok is not None:
+                        px_ok = _apply_fx(px_ok, curr)
+                        all_prices[desc] = px_ok
+                        with _DL_LOCK:
+                            _DL_STATE.setdefault('auto_fixed', {})[t] = t_ok
+                        print(f"✅ Auto-corretto: {t} → {t_ok}")
+                    else:
+                        failed_map[t] = desc
+        except Exception:
+            # Batch fallito (es. HTTP 404) → riprova ogni ticker con suffissi europei
+            for j2, t in enumerate(bt):
+                desc, curr = bd[j2], bv[j2]
+                t_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs)
+                if t_ok and px_ok is not None:
+                    all_prices[desc] = _apply_fx(px_ok, curr)
                     with _DL_LOCK:
-                        _DL_STATE['errors'].append(f"{t}: {e2}")
-        except Exception as e:
-            with _DL_LOCK:
-                _DL_STATE['errors'].append(f"Batch {i}: {e}")
+                        _DL_STATE.setdefault('auto_fixed', {})[t] = t_ok
+                    print(f"✅ Auto-corretto: {t} → {t_ok}")
+                else:
+                    failed_map[t] = desc
         with _DL_LOCK:
             _DL_STATE['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
         time.sleep(0.3)
+
+    # Per i ticker rimasti falliti, cerca suggerimenti testuali (max 6)
+    if failed_map:
+        suggestions = {}
+        for t in list(failed_map.keys())[:6]:
+            sug = _suggest_ticker(t)
+            if sug:
+                suggestions[t] = sug
+                print(f"💡 Suggerimenti per {t}: {sug}")
+            with _DL_LOCK:
+                _DL_STATE['errors'].append(f"{t}: non trovato su Yahoo Finance")
+        with _DL_LOCK:
+            _DL_STATE['suggestions'] = suggestions
 
     if not all_prices:
         with _DL_LOCK:
@@ -1093,7 +1127,8 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
         _fx_thread.start()
 
     # Fase 1: scarica i prezzi grezzi di tutti i batch (FX scarica in parallelo)
-    all_prices = {}
+    all_prices       = {}
+    _gestisci_failed = []   # ticker falliti → usati per suggerimenti
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
         bt = new_tickers[i:i + DOWNLOAD_BATCH_SIZE]
@@ -1125,15 +1160,70 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                     elif curr == 'GBP' and eurgbp is not None:
                         px = px / eurgbp.reindex(px.index).ffill()
                     all_prices[desc] = px
-                except Exception as e2:
+                except Exception:
+                    # Ticker mancante nel batch: prova suffissi europei automaticamente
+                    t_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs)
+                    if t_ok and px_ok is not None:
+                        if curr == 'USD' and eurusd is not None:
+                            px_ok = px_ok / eurusd.reindex(px_ok.index).ffill()
+                        elif curr == 'GBP' and eurgbp is not None:
+                            px_ok = px_ok / eurgbp.reindex(px_ok.index).ffill()
+                        all_prices[desc] = px_ok
+                        with _DL_LOCK:
+                            _DL_STATE.setdefault('auto_fixed', {})[t] = t_ok
+                        with _CL_LOCK:
+                            _CL_STATES.setdefault(username, {}).setdefault('auto_fixed', {})[t] = t_ok
+                        print(f"✅ Auto-corretto gestisci: {t} → {t_ok}")
+                    else:
+                        _gestisci_failed.append(t)
+        except Exception:
+            # Batch fallito (es. HTTP 404 su tutti) → riprova ciascun ticker individualmente
+            if i == 0 and _fx_thread is not None:
+                _fx_thread.join(timeout=30)
+            _eurusd = _fx_res[0]
+            def _get_fx2(name):
+                if _eurusd is None or _eurusd.empty: return None
+                try:
+                    return _eurusd[(name, 'Close')] if isinstance(_eurusd.columns, pd.MultiIndex) else _eurusd['Close']
+                except Exception: return None
+            eurusd2 = _get_fx2('EURUSD=X')
+            eurgbp2 = _get_fx2('EURGBP=X')
+            for j, t in enumerate(bt):
+                desc, curr = bd[j], bv[j]
+                t_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs)
+                if t_ok and px_ok is not None:
+                    if curr == 'USD' and eurusd2 is not None:
+                        px_ok = px_ok / eurusd2.reindex(px_ok.index).ffill()
+                    elif curr == 'GBP' and eurgbp2 is not None:
+                        px_ok = px_ok / eurgbp2.reindex(px_ok.index).ffill()
+                    all_prices[desc] = px_ok
                     with _DL_LOCK:
-                        _DL_STATE['errors'].append(f"{t}: {e2}")
-        except Exception as e:
-            with _DL_LOCK:
-                _DL_STATE['errors'].append(f"Batch {i}: {e}")
+                        _DL_STATE.setdefault('auto_fixed', {})[t] = t_ok
+                    with _CL_LOCK:
+                        _CL_STATES.setdefault(username, {}).setdefault('auto_fixed', {})[t] = t_ok
+                    print(f"✅ Auto-corretto gestisci (batch-err): {t} → {t_ok}")
+                else:
+                    _gestisci_failed.append(t)
         with _DL_LOCK:
             _DL_STATE['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
         time.sleep(0.3)
+
+    # Per i ticker rimasti falliti, cerca suggerimenti testuali
+    if _gestisci_failed:
+        sug = {}
+        for t in _gestisci_failed[:6]:
+            s = _suggest_ticker(t)
+            if s:
+                sug[t] = s
+                print(f"💡 Suggerimenti per {t}: {s}")
+            with _DL_LOCK:
+                _DL_STATE['errors'].append(f"{t}: non trovato su Yahoo Finance")
+        if sug:
+            with _DL_LOCK:
+                _DL_STATE['suggestions'] = {**_DL_STATE.get('suggestions', {}), **sug}
+            with _CL_LOCK:
+                st = _CL_STATES.setdefault(username, {})
+                st['suggestions'] = {**st.get('suggestions', {}), **sug}
 
     if not all_prices:
         with _DL_LOCK:
@@ -1322,6 +1412,60 @@ _OPENFIGI_EXCH = {
 }
 
 
+_TICKER_SUFFIXES = ['.MI', '.DE', '.L', '.PA', '.AS', '.MC', '.SW', '.OL', '.ST', '.HE', '.CO', '.VI', '.BR', '.LI']
+
+
+def _find_working_ticker(ticker, start_date, dl_kwargs):
+    """
+    Quando un ticker fallisce, prova automaticamente tutti i suffissi di borsa
+    europei con un unico batch download. Restituisce (ticker_ok, serie_prezzi)
+    se trova dati, altrimenti (None, None).
+    Solo per ticker senza suffisso (nessun '.' nel simbolo).
+    """
+    if '.' in ticker:
+        return None, None
+    candidates = [ticker + sfx for sfx in _TICKER_SUFFIXES]
+    try:
+        raw = yf.download(candidates, start=start_date, group_by='ticker', **dl_kwargs)
+        if raw.empty:
+            return None, None
+        for t2 in candidates:
+            try:
+                col = (raw[(t2, 'Close')].copy()
+                       if isinstance(raw.columns, pd.MultiIndex)
+                       else raw['Close'].copy())
+                col = col.dropna()
+                if len(col) > 10:          # almeno 10 barre valide
+                    return t2, col.ffill()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None, None
+
+
+def _suggest_ticker(ticker):
+    """
+    Lista di suggerimenti testuali per un ticker fallito (usata per il messaggio UI
+    quando anche _find_working_ticker non ha trovato nulla).
+    """
+    suggestions = []
+    try:
+        s = yf.Search(ticker, max_results=6, news_count=0)
+        for q in (s.quotes or []):
+            sym  = q.get('symbol', '').strip()
+            name = (q.get('shortname') or q.get('longname') or '')[:40]
+            if sym and sym.upper() != ticker.upper():
+                candidate = f'{sym}' + (f' — {name}' if name else '')
+                if candidate not in suggestions:
+                    suggestions.append(candidate)
+                    if len(suggestions) >= 4:
+                        break
+    except Exception:
+        pass
+    return suggestions
+
+
 def _yahoo_search_isin(isin, ua):
     """Cerca ISIN: yf.Search con retry, poi OpenFIGI come fallback."""
     results = []
@@ -1382,8 +1526,7 @@ def _best_ticker_from_candidates(candidates, start_date, dl_kwargs):
     # Più candidati: confronta con batch download
     symbols = [c[0] for c in candidates[:6]]
     try:
-        raw = yf.download(symbols, start=start_date, group_by='ticker',
-                          progress=False, **dl_kwargs)
+        raw = yf.download(symbols, start=start_date, group_by='ticker', **dl_kwargs)
         if raw.empty:
             return candidates[0]
         best_sym, best_n = None, 0
@@ -4035,7 +4178,7 @@ def poll_refresh_progress(n, n_btn):
         dl_state  = dict(_DL_STATE)
         dl_buffer = dict(_DL_BUFFER)
 
-    client_active = cl_state.get('status') in ('running', 'done') and cl_state.get('status') != 'idle'
+    client_active = cl_state.get('status') in ('running', 'done', 'error')
     state  = cl_state  if client_active else dl_state
     buffer = cl_buffer if client_active else dl_buffer
 
@@ -4063,12 +4206,32 @@ def poll_refresh_progress(n, n_btn):
                 no_update, no_update, no_update, no_update, *_NU3)
 
     if status == 'error':
-        err_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
+        err_fill   = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
+        sug_err    = state.get('suggestions', {})
+        auto_fixed = state.get('auto_fixed', {})
+        err_list   = state.get('errors', [])
+        fix_lines  = [f'✅ Auto-corretto: {t} → {t_ok}' for t, t_ok in auto_fixed.items()]
+        err_lines  = []
+        for err in err_list[:5]:
+            t_fail = err.split(':')[0].strip()
+            sug    = sug_err.get(t_fail, [])
+            line   = f'❌ {err}'
+            if sug:
+                line += f'\n💡 Prova: {" · ".join(sug[:3])}'
+            else:
+                line += '\n💡 Ticker europeo? Prova .MI .DE .L .PA .AS ecc.'
+            err_lines.append(line)
+        if not err_lines and sug_err:
+            for t, sug in list(sug_err.items())[:3]:
+                err_lines.append(f'❌ {t}: non trovato\n💡 Prova: {" · ".join(sug[:3])}')
+        all_lines = fix_lines + err_lines
+        err_msg   = '\n'.join(all_lines) if all_lines else 'Errore durante il download.'
+        badge_msg = f'❌ {err_lines[0].split(chr(10))[0]}' if err_lines else '❌ Errore download'
         return (no_update, no_update, no_update, no_update, no_update,
                 True, False,
                 err_fill, '❌ Download fallito',
-                'Si è verificato un errore.', _STATUS_RED, no_update, _EDITOR_HIDDEN,
-                no_update, no_update, no_update, '❌ Errore download', *_NU3)
+                err_msg, _STATUS_RED, no_update, _EDITOR_HIDDEN,
+                no_update, no_update, no_update, badge_msg, *_NU3)
 
     # FONTE UNICA: leggi il dataset da current.json (così non dipende da quale
     # buffer ha scritto il download). Fallback al buffer se current.json è vuoto.
@@ -4091,12 +4254,34 @@ def poll_refresh_progress(n, n_btn):
     prices_json  = original_prices.to_json(date_format='iso', orient='split')
     ok_fill      = {**_FILL_LOADING, 'width': '100%'}
 
-    errors    = state.get('errors', [])
-    n_ok      = len(options)
-    n_err     = len(errors)
-    err_note  = f' — ⚠ {n_err} non trovati su Yahoo' if n_err else ''
-    status_msg = (f'Dati pronti — {n_ok} asset scaricati{err_note}.\n'
-                  + ('\n'.join(errors[:5]) if errors else ''))
+    errors      = state.get('errors', [])
+    suggestions = state.get('suggestions', {})
+    auto_fixed  = state.get('auto_fixed', {})
+    n_ok        = len(options)
+    n_err       = len(errors)
+    err_note    = f' — ⚠ {n_err} non trovati' if n_err else ''
+
+    # Ticker auto-corretti (es. BMPS → BMPS.MI trovato automaticamente)
+    fix_lines = [f'✅ Auto-corretto: {t} → {t_ok}'
+                 for t, t_ok in auto_fixed.items()]
+
+    # Ticker ancora falliti + suggerimenti
+    err_lines = []
+    for err in errors[:5]:
+        t_failed = err.split(':')[0].strip()
+        sug = suggestions.get(t_failed, [])
+        line = f'❌ {err}'
+        if sug:
+            line += f'\n   💡 Prova: {" · ".join(sug[:3])}'
+        else:
+            line += '\n   💡 Ticker europeo? Prova ad aggiungere .MI .DE .L .PA ecc.'
+        err_lines.append(line)
+
+    all_lines = fix_lines + err_lines
+    status_msg = (
+        f'Dati pronti — {n_ok} asset scaricati{err_note}.\n'
+        + ('\n'.join(all_lines) if all_lines else '')
+    )
 
     # Ripristina i pesi P1/P2/P3 DAI dati correnti (current.json), così aggiungere
     # un asset NON cancella i portafogli creati. (Azzerare le store non bastava:
@@ -5415,7 +5600,7 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
                              showarrow=False, font=dict(size=13, color='#888'))
         empty.update_layout(paper_bgcolor='white', plot_bgcolor='#f8faff',
                             margin=dict(t=30, b=20, l=40, r=20))
-        return empty
+        return empty, '', ''
 
     # Versione ridotta per il rendering (max 500 punti per trace)
     df_plot = _thin(df_final)

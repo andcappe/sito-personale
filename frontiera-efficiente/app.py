@@ -54,8 +54,11 @@ def _cloud_push(path):
 def _get_username():
     try:
         from flask import session as _fs
-        return _fs.get('username') or 'anon'
-    except Exception:
+        u = _fs.get('username')
+        print(f"[fe _get_username] flask session username={u!r}", flush=True)
+        return u or 'anon'
+    except Exception as e:
+        print(f"[fe _get_username] exception: {e}", flush=True)
         return 'anon'
 
 def _read_user_json():
@@ -1188,6 +1191,41 @@ app.layout = html.Div([
                                 'background':'#e8f4ff','borderLeft':'3px solid #0066cc',
                                 'marginBottom':'4px','borderRadius':'0 4px 4px 0',
                                 'flexShrink':'0'}),
+
+                # ── Toast ARIMA background: appare al primo avvio, si chiude da solo ──
+                html.Div(id='fe-arima-toast', style={'display': 'none'},
+                         children=html.Div([
+                    html.Div([
+                        html.Span('⏳ Calcolo ARIMA+GARCH avviato in background',
+                                  style={'fontWeight': '700', 'fontSize': '12px',
+                                         'color': '#1a3a5c'}),
+                        html.Button('✕', id='fe-arima-toast-close', n_clicks=0,
+                                    style={'background': 'none', 'border': 'none',
+                                           'fontSize': '14px', 'cursor': 'pointer',
+                                           'color': '#888', 'marginLeft': 'auto',
+                                           'padding': '0 4px'}),
+                    ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px',
+                              'marginBottom': '6px'}),
+                    html.P([
+                        'Il modello ARIMA+GARCH viene calcolato in background per tutti gli asset. ',
+                        html.Strong('Nel frattempo puoi usare gli altri metodi di rischio: '),
+                        'Varianza storica, EWMA o Varianza uguale.',
+                    ], style={'fontSize': '11px', 'color': '#444', 'margin': '0',
+                              'lineHeight': '1.5'}),
+                    html.P('Quando il calcolo sarà completato, la barra qui sotto scomparirà '
+                           'e potrai ricalcolare la frontiera con ARIMA+GARCH.',
+                           style={'fontSize': '10px', 'color': '#666', 'margin': '6px 0 0',
+                                  'fontStyle': 'italic'}),
+                ], style={
+                    'background': '#f0f6ff',
+                    'border': '1px solid #a8c4e8',
+                    'borderLeft': '4px solid #1a3a5c',
+                    'borderRadius': '6px',
+                    'padding': '10px 14px',
+                    'marginBottom': '8px',
+                    'boxShadow': '0 2px 8px rgba(26,58,92,0.1)',
+                })),
+
                 html.Div(id='fe-arima-progress-div',
                          style=_ARIMA_PROG_HIDDEN,
                          children=[
@@ -1402,12 +1440,16 @@ def on_page_load(_):
 # current.json) o quando si passa in modalità ARIMA+GARCH. Una "firma" degli
 # asset evita ricalcoli/loop inutili. Quando è pronto, on_arima_done disegna la
 # frontiera (suffisso ':done').
+_ARIMA_TOAST_SHOWN = {'display': 'block'}
+_ARIMA_TOAST_HIDDEN = {'display': 'none'}
+
 @app.callback(
     Output('fe-arima-reqid',         'data',     allow_duplicate=True),
     Output('fe-arima-poll',          'disabled', allow_duplicate=True),
     Output('fe-arima-progress-div',  'style',    allow_duplicate=True),
     Output('fe-arima-progress-text', 'children', allow_duplicate=True),
     Output('fe-arima-progress-bar',  'style',    allow_duplicate=True),
+    Output('fe-arima-toast',         'style',    allow_duplicate=True),
     Input('fe-stock-data',           'data'),
     Input('fe-risk-measure',         'value'),
     State('fe-data-source',          'data'),
@@ -1428,14 +1470,13 @@ def auto_start_arima(stock_data, risk, data_source):
     with _ARIMA_LOCK:
         st = dict(_ARIMA_STATE)
 
-    # Calcolo già in corso per QUESTI asset → ri-aggancia la barra (sopravvive
-    # alla navigazione), senza far ripartire nulla.
+    # Calcolo già in corso per QUESTI asset → ri-aggancia la barra, no toast (già visto)
     if st.get('running') and st.get('sig') == sig:
         total = st.get('total') or 1
         pct   = int((st.get('pct') or 0) / total * 100)
         return (st.get('req_id'), False, _ARIMA_PROG_SHOWN,
                 f"ARIMA: {st.get('pct')}/{total} titoli ({pct}%)",
-                _arima_bar_style(pct))
+                _arima_bar_style(pct), _ARIMA_TOAST_HIDDEN)
 
     # Già completato per QUESTI asset → la frontiera è (o sarà) già disegnata.
     if st.get('done') and not st.get('error') and st.get('sig') == sig:
@@ -1458,7 +1499,7 @@ def auto_start_arima(stock_data, risk, data_source):
             })
         # ':done' → on_arima_done costruisce e disegna la frontiera.
         return (req_id + ':done', True, _ARIMA_PROG_HIDDEN,
-                '✓ ARIMA pronto', _arima_bar_style(100))
+                '✓ ARIMA pronto', _arima_bar_style(100), _ARIMA_TOAST_HIDDEN)
 
     # Altrimenti calcola in background (ARIMA per tutti gli asset caricati).
     with _ARIMA_LOCK:
@@ -1470,8 +1511,22 @@ def auto_start_arima(stock_data, risk, data_source):
     t = threading.Thread(target=_run_arima_thread,
                          args=(req_id, returns_df, 250, _src), daemon=True)
     t.start()
+    # Mostra toast: avvisa che ARIMA parte in background e nel frattempo
+    # si possono usare gli altri proxy di rischio.
     return (req_id, False, _ARIMA_PROG_SHOWN,
-            'Calcolo ARIMA+GARCH in background…', _arima_bar_style(0))
+            'Calcolo ARIMA+GARCH in background…', _arima_bar_style(0),
+            _ARIMA_TOAST_SHOWN)
+
+
+@app.callback(
+    Output('fe-arima-toast', 'style', allow_duplicate=True),
+    Input('fe-arima-toast-close', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def close_arima_toast(n):
+    if not n:
+        raise PreventUpdate
+    return _ARIMA_TOAST_HIDDEN
 
 
 def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
@@ -1532,10 +1587,21 @@ def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
     Input('fe-loaded-flag',  'data'),
     Input('fe-stock-data',   'data'),
     Input('fe-sync-sig',     'data'),   # ricostruisci anche su cambio selezione/pesi
+    State('fe-frontier-rawdata', 'data'),
     prevent_initial_call=True,
 )
-def build_grid_on_load(loaded, stock_data, _sync_sig):
+def build_grid_on_load(loaded, stock_data, _sync_sig, rawdata):
     if not stock_data:
+        raise PreventUpdate
+    # Se una frontiera è già calcolata e il trigger è solo un cambio di
+    # selezione/pesi (fe-sync-sig dall'Interval di sync), NON ricostruire la
+    # griglia: distruggerebbe le righe-portafoglio (F1/F2/F3 + checkbox di
+    # confronto + riga "Portfolio selezionato") create da calc_and_render,
+    # e con esse i pesi del punto cliccato sulla frontiera. La griglia va
+    # rifatta solo se cambia la LISTA asset (fe-stock-data) o al caricamento.
+    _trig = (callback_context.triggered[0]['prop_id'].split('.')[0]
+             if callback_context.triggered else '')
+    if _trig == 'fe-sync-sig' and rawdata:
         raise PreventUpdate
     returns_df = _get_returns(stock_data)
     if returns_df is None or returns_df.empty:
@@ -1577,7 +1643,110 @@ def _clear_stale_frontier(_stock_data):
         annotations=[dict(text='Lista asset aggiornata — clicca "Calcola Frontiera"',
                           xref='paper', yref='paper', x=0.5, y=0.5,
                           showarrow=False, font=dict(size=13, color='#6b7a99'))])
-    return _empty, _empty, _empty, '', None, None, None, None, None
+    # Ripristina i pesi F1/F2/F3 con i valori P1/P2/P3 da current.json:
+    # così i portafogli costruiti in Analisi Portafoglio rimangono visibili
+    # anche dopo che la frontiera viene resettata per una lista asset diversa.
+    ns = _read_user_json()
+    def _w_json(key):
+        if not ns:
+            return None
+        d = {desc: v[key] for desc, v in ns.items() if v.get(key, 0)}
+        return json.dumps(d) if d else None
+    return _empty, _empty, _empty, '', _w_json('P1'), _w_json('P2'), _w_json('P3'), None, None
+
+
+# ── Anteprima: asset spuntati come punti (rend. medio / rischio) PRIMA del calcolo ──
+# Appena i dati sono caricati, mostra sul grafico principale gli asset selezionati
+# (📊) come punti rendimento medio annuo vs rischio (misura scelta: Standard / CVaR /
+# Vol), senza dover calcolare la frontiera. Reagisce al cambio di selezione 📊 e al
+# cambio di misura di rischio. Si disattiva da sé quando una frontiera è già stata
+# calcolata (fe-frontier-rawdata valorizzato), per non sovrascrivere il grafico reale.
+@app.callback(
+    Output('fe-frontier-chart', 'figure', allow_duplicate=True),
+    Input({'type':'fe-chart','index':ALL}, 'value'),
+    Input('fe-risk-measure',     'value'),
+    State('fe-stock-data',       'data'),
+    State('fe-frontier-rawdata', 'data'),
+    State('fe-date-start',       'date'),
+    State('fe-date-end',         'date'),
+    State('fe-arima-window',     'value'),
+    prevent_initial_call=True,
+)
+def preview_asset_points(chart_vals, risk, stock_data, rawdata, date_start, date_end, arima_window):
+    # Frontiera già calcolata → non toccare il grafico (lo gestisce calc_and_render).
+    if rawdata or not stock_data:
+        raise PreventUpdate
+    returns_df = _get_returns(stock_data)
+    if returns_df is None or returns_df.empty:
+        raise PreventUpdate
+    if date_start: returns_df = returns_df.loc[date_start:]
+    if date_end:   returns_df = returns_df.loc[:date_end]
+    returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+    chart_assets = [a for v in (chart_vals or []) if v for a in v]
+
+    # Stessa finestra usata in calcolo: Vol→configurabile, ARIMA→250, altri→tutta la storia.
+    if risk == 'vol':
+        win = int(arima_window or 250)
+    elif risk == 'arima_garch':
+        win = 250
+    else:
+        win = None
+    _cvar_pct = 10 if risk == 'cvar90' else (5 if risk == 'cvar95' else None)
+
+    fig = go.Figure()
+    for ai, asset in enumerate(chart_assets):
+        if asset not in returns_df.columns:
+            continue
+        s = returns_df[asset].dropna()
+        if win and win < len(s):
+            s = s.tail(win)
+        if len(s) < 10:
+            continue
+        ret_a = float(s.mean() * 252)
+        vol_a = float(s.std() * np.sqrt(252))
+        if _cvar_pct is not None:
+            risk_a   = _port_cvar(np.array([1.0]), s.to_frame(), _cvar_pct)
+            risk_lbl = f'CVaR {100-_cvar_pct}%: {risk_a*100:.2f}%'
+        else:
+            risk_a   = vol_a
+            risk_lbl = f'Vol: {vol_a*100:.2f}%'
+        color = _PALETTE[ai % len(_PALETTE)]
+        fig.add_trace(go.Scatter(
+            x=[risk_a * 100], y=[ret_a * 100],
+            mode='markers+text', name=asset,
+            marker=dict(size=8, symbol='circle', opacity=0.8, color=color),
+            text=[asset[:9]], textposition='top center',
+            textfont=dict(size=8, color=color), showlegend=False,
+            hoverlabel=dict(bgcolor='white', bordercolor=color,
+                            font=dict(color='black', size=11)),
+            hovertemplate=f'<b>{asset}</b><br>{risk_lbl}<br>Rendimento: {ret_a*100:.2f}%<extra></extra>',
+        ))
+
+    if not fig.data:
+        return go.Figure().update_layout(
+            paper_bgcolor='white', plot_bgcolor='#f8faff',
+            font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
+            annotations=[dict(text='Spunta gli asset (📊) per vederli sul grafico, poi clicca Calcola Frontiera',
+                              xref='paper', yref='paper', x=0.5, y=0.5,
+                              showarrow=False, font=dict(size=13, color='#6b7a99'))])
+
+    risk_label = {
+        'standard':    'Volatilità Ann. (%)',
+        'vol':         'Volatilità Ann. (%) [fin.]',
+        'cvar90':      'CVaR 90% Ann. (%)',
+        'cvar95':      'CVaR 95% Ann. (%)',
+        'arima_garch': 'Volatilità Ann. (%)',
+    }.get(risk, 'Rischio Ann. (%)')
+    fig.update_layout(
+        title=dict(text='Rendimento / Rischio — asset selezionati',
+                   font=dict(size=14, color='#1a3a6b'), x=0.02),
+        xaxis=dict(title=risk_label, gridcolor='#e8eef8', zeroline=False),
+        yaxis=dict(title='Rendimento Atteso Ann. (%)', gridcolor='#e8eef8', zeroline=False),
+        paper_bgcolor='white', plot_bgcolor='#f8faff',
+        font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
+        margin=dict(l=50, r=30, t=80, b=40), hovermode='closest',
+    )
+    return fig
 
 
 @app.callback(
@@ -1939,6 +2108,45 @@ def calc_and_render(n, stock_data, prices_data,
                 hovertemplate=(f'<b>Max Sharpe {fname}: {ms["Sharpe"]:.2f}</b>'
                                f'<br>Rischio: {ms["Volatility"]*100:.2f}%'
                                f'<br>Rendimento: {ms["Return"]*100:.2f}%<extra></extra>'),
+            ))
+
+    # ── P1/P2/P3 dal portafoglio come punti di confronto ────────────────────────
+    _P_COLORS  = {'P1': '#0066cc', 'P2': '#2ca02c', 'P3': '#e6550d'}
+    ns_ref = _read_user_json()
+    if ns_ref:
+        cov_ref = returns_df.cov() * 252
+        mu_ref  = returns_df.mean() * 252
+        for pname, pcolor in _P_COLORS.items():
+            raw_w = {d: float(v.get(pname) or 0)
+                     for d, v in ns_ref.items() if v.get(pname, 0)}
+            avail_w = {d: w for d, w in raw_w.items() if d in returns_df.columns and w > 0}
+            if not avail_w:
+                continue
+            tot = sum(avail_w.values())
+            if tot <= 0:
+                continue
+            w_norm = {d: w / tot for d, w in avail_w.items()}
+            w_arr  = np.array([w_norm[d] for d in avail_w])
+            assets = list(avail_w.keys())
+            r_p    = float(sum(w_norm[d] * mu_ref[d] for d in assets))
+            cov_sub = cov_ref.loc[assets, assets].values
+            var_p   = float(w_arr @ cov_sub @ w_arr)
+            v_p     = float(np.sqrt(max(var_p, 0)))
+            if _cvar_pct is not None:
+                v_p = _port_cvar(w_arr, returns_df[assets].dropna(), _cvar_pct)
+            hover_lines = '<br>'.join(f'{d}: {w*100:.1f}%' for d, w in w_norm.items())
+            fig.add_trace(go.Scatter(
+                x=[v_p * 100], y=[r_p * 100],
+                mode='markers+text', name=pname,
+                marker=dict(size=14, symbol='diamond', color=pcolor,
+                            line=dict(color='white', width=1.5)),
+                text=[pname], textposition='top center',
+                textfont=dict(size=9, color=pcolor, family='Inter, sans-serif'),
+                showlegend=True,
+                hovertemplate=(f'<b>{pname} (portafoglio)</b><br>'
+                               f'Rischio: {v_p*100:.2f}%<br>'
+                               f'Rendimento: {r_p*100:.2f}%<br>'
+                               f'{hover_lines}<extra></extra>'),
             ))
 
     risk_label = {
@@ -2906,12 +3114,15 @@ _cb_p3    = _make_selall_cb('fe-selall-p3',   'fe-p3')
 )
 def fe_live_sync(_, sig):
     ns = _read_user_json()
+    print(f"[fe_live_sync] username={_get_username()} ns_keys={len(ns)} checked={[k for k,v in ns.items() if v.get('checked')]} P1={[k for k,v in ns.items() if v.get('P1',0)]}", flush=True)
     if not ns:
         raise PreventUpdate
-    # Firma su ASSET + SELEZIONE + PESI: così la Frontiera si riallinea a current.json
-    # appena cambia QUALSIASI cosa (lista asset, asset selezionati, pesi P1/P2/P3),
-    # non solo la lista asset. Senza pesi/selezione restavano i "vecchi portafogli".
-    new_sig = repr((
+
+    # Firma divisa in due livelli:
+    # 1. asset_sig: solo nomi asset → cambia se si aggiunge/rimuove un titolo
+    # 2. full_sig: asset + spunte + pesi → cambia anche se si modifica solo un peso
+    asset_sig = repr(tuple(sorted(ns.keys())))
+    full_sig  = repr((
         tuple(sorted(ns.keys())),
         tuple(sorted(d for d, v in ns.items() if v.get('checked'))),
         tuple(sorted((d, round(float(v.get('P1') or 0), 4),
@@ -2920,17 +3131,36 @@ def fe_live_sync(_, sig):
                      for d, v in ns.items()
                      if (v.get('P1') or v.get('P2') or v.get('P3')))),
     ))
-    if new_sig == (sig or ''):
+    old_full = (sig or '')
+    if full_sig == old_full:
         raise PreventUpdate
+
     op, cr = _reconstruct_from_json_fe(ns)
     if op is None or cr is None:
         raise PreventUpdate
+
+    # Estrai asset_sig dall'ultima firma salvata per capire se la lista è cambiata
+    try:
+        old_asset_sig = repr(eval(old_full)[0]) if old_full else ''
+    except Exception:
+        old_asset_sig = ''
+
     n = len(op.columns)
-    return (
-        cr.to_json(orient='split', date_format='iso'),
-        op.to_json(orient='split', date_format='iso'),
-        True, f'👤 Personale ({n} asset)', 'default', new_sig,
-    )
+    lbl = f'👤 Personale ({n} asset)'
+
+    if asset_sig != old_asset_sig:
+        # Lista asset cambiata: aggiorna fe-stock-data → _clear_stale_frontier fa il reset
+        return (
+            cr.to_json(orient='split', date_format='iso'),
+            op.to_json(orient='split', date_format='iso'),
+            True, lbl, 'default', full_sig,
+        )
+    else:
+        # Solo pesi/spunte cambiati: aggiorna solo fe-sync-sig → ricostruisce la griglia
+        # senza toccare fe-stock-data → la frontiera calcolata NON viene cancellata
+        return (
+            no_update, no_update, no_update, lbl, no_update, full_sig,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
