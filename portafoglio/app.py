@@ -348,6 +348,11 @@ _DF_CACHE: dict = {}
 def _df_key(json_str):
     return json_str[:4000]
 
+# Tetto ai rendimenti giornalieri: oltre ±50%/giorno è un tick corrotto che fa
+# esplodere volatilità/covarianze. _get_df è usato SOLO per i rendimenti
+# (stock_data) — NON usarlo per i prezzi (li clipperebbe).
+_MAX_DAILY_RET = 0.5
+
 def _get_df(json_str):
     if not json_str:
         return None
@@ -355,6 +360,7 @@ def _get_df(json_str):
     if key not in _DF_CACHE:
         df = pd.read_json(io.StringIO(json_str), orient='split')
         df.index = pd.to_datetime(df.index)
+        df = df.clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)   # neutralizza tick corrotti
         _DF_CACHE[key] = df
         if len(_DF_CACHE) > 20:
             oldest = next(iter(_DF_CACHE))
@@ -823,7 +829,7 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
     # FX
     fx = None
     try:
-        fx = yf.download(['EURUSD=X', 'EURGBP=X'], start=start_date,
+        fx = yf.download(['EURUSD=X', 'EURGBP=X', 'EURCHF=X'], start=start_date,
                          group_by='ticker', **_dl_kwargs)
     except Exception as e:
         print(f"⚠ FX download fallito: {e}")
@@ -836,15 +842,18 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
         except Exception:
             return None
 
-    eurusd, eurgbp = _fx('EURUSD=X'), _fx('EURGBP=X')
+    eurusd, eurgbp, eurchf = _fx('EURUSD=X'), _fx('EURGBP=X'), _fx('EURCHF=X')
     all_prices  = {}
     failed_map  = {}   # {ticker: descrizione} per ticker non scaricati
+    _resolved   = {}   # {descrizione: ticker_risolto} per aggiornare ticker_map
 
     def _apply_fx(px, curr):
         if curr == 'USD' and eurusd is not None:
             return px / eurusd.reindex(px.index).ffill()
         if curr == 'GBP' and eurgbp is not None:
             return px / eurgbp.reindex(px.index).ffill()
+        if curr == 'CHF' and eurchf is not None:
+            return px / eurchf.reindex(px.index).ffill()
         return px
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
@@ -863,26 +872,28 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
                     px = _apply_fx(px.ffill(), curr)
                     all_prices[desc] = px
                 except Exception:
-                    # Ticker non in risposta batch: prova suffissi europei automaticamente
-                    t_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs)
+                    # Nessun dato: scegli la quotazione con più storico (ticker + valuta)
+                    t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
                     if t_ok and px_ok is not None:
-                        px_ok = _apply_fx(px_ok, curr)
+                        px_ok = _apply_fx(px_ok, curr_ok)
                         all_prices[desc] = px_ok
+                        _resolved[desc]  = t_ok
                         with _DL_LOCK:
-                            _DL_STATE.setdefault('auto_fixed', {})[t] = t_ok
-                        print(f"✅ Auto-corretto: {t} → {t_ok}")
+                            _DL_STATE.setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
+                        print(f"✅ Auto-corretto: {t} → {t_ok} ({curr_ok})")
                     else:
                         failed_map[t] = desc
         except Exception:
-            # Batch fallito (es. HTTP 404) → riprova ogni ticker con suffissi europei
+            # Batch fallito (es. HTTP 404) → riprova ogni ticker cercando la miglior quotazione
             for j2, t in enumerate(bt):
                 desc, curr = bd[j2], bv[j2]
-                t_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs)
+                t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
                 if t_ok and px_ok is not None:
-                    all_prices[desc] = _apply_fx(px_ok, curr)
+                    all_prices[desc] = _apply_fx(px_ok, curr_ok)
+                    _resolved[desc]  = t_ok
                     with _DL_LOCK:
-                        _DL_STATE.setdefault('auto_fixed', {})[t] = t_ok
-                    print(f"✅ Auto-corretto: {t} → {t_ok}")
+                        _DL_STATE.setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
+                    print(f"✅ Auto-corretto: {t} → {t_ok} ({curr_ok})")
                 else:
                     failed_map[t] = desc
         with _DL_LOCK:
@@ -912,8 +923,9 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
     original_prices.index = pd.to_datetime(original_prices.index)
     original_prices = original_prices.ffill()
     original_prices = _clean_prices(original_prices)
-    close_returns   = original_prices.pct_change(fill_method=None)
-    ticker_map      = {descrizione[i]: tickers[i] for i in range(len(tickers))}
+    close_returns   = original_prices.pct_change(fill_method=None).clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)
+    ticker_map      = {descrizione[i]: _resolved.get(descrizione[i], tickers[i])
+                       for i in range(len(tickers))}
     saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
 
     data = {
@@ -974,7 +986,7 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
 
     fx = None
     try:
-        fx = yf.download(['EURUSD=X', 'EURGBP=X'], start=start_date,
+        fx = yf.download(['EURUSD=X', 'EURGBP=X', 'EURCHF=X'], start=start_date,
                          group_by='ticker', **_dl_kwargs)
     except Exception as e:
         print(f"⚠ FX download cliente fallito: {e}")
@@ -987,7 +999,7 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
         except Exception:
             return None
 
-    eurusd, eurgbp = _fx('EURUSD=X'), _fx('EURGBP=X')
+    eurusd, eurgbp, eurchf = _fx('EURUSD=X'), _fx('EURGBP=X'), _fx('EURCHF=X')
     all_prices = {}
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
@@ -1020,6 +1032,8 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
                         px = px / eurusd.reindex(px.index).ffill()
                     elif curr == 'GBP' and eurgbp is not None:
                         px = px / eurgbp.reindex(px.index).ffill()
+                    elif curr == 'CHF' and eurchf is not None:
+                        px = px / eurchf.reindex(px.index).ffill()
                     all_prices[desc] = px
                 except Exception as e2:
                     with _CL_LOCK:
@@ -1038,7 +1052,7 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
     original_prices.index = pd.to_datetime(original_prices.index)
     original_prices = original_prices.ffill()
     original_prices = _clean_prices(original_prices)
-    close_returns   = original_prices.pct_change(fill_method=None)
+    close_returns   = original_prices.pct_change(fill_method=None).clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)
     ticker_map      = {descrizione[i]: tickers[i] for i in range(len(tickers))}
     saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
 
@@ -1115,7 +1129,7 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
 
     def _dl_fx():
         try:
-            _fx_res[0] = yf.download(['EURUSD=X', 'EURGBP=X'], start=start_date,
+            _fx_res[0] = yf.download(['EURUSD=X', 'EURGBP=X', 'EURCHF=X'], start=start_date,
                                      group_by='ticker', **_dl_kwargs)
         except Exception as e:
             print(f"⚠ FX gestisci fallito: {e}")
@@ -1129,6 +1143,7 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     # Fase 1: scarica i prezzi grezzi di tutti i batch (FX scarica in parallelo)
     all_prices       = {}
     _gestisci_failed = []   # ticker falliti → usati per suggerimenti
+    _resolved_g = {}        # {descrizione: ticker_risolto} per aggiornare ticker_map
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
         bt = new_tickers[i:i + DOWNLOAD_BATCH_SIZE]
@@ -1149,6 +1164,7 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                 except Exception: return None
             eurusd = _get_fx('EURUSD=X')
             eurgbp = _get_fx('EURGBP=X')
+            eurchf = _get_fx('EURCHF=X')
             for j, t in enumerate(bt):
                 desc, curr = bd[j], bv[j]
                 try:
@@ -1159,21 +1175,26 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                         px = px / eurusd.reindex(px.index).ffill()
                     elif curr == 'GBP' and eurgbp is not None:
                         px = px / eurgbp.reindex(px.index).ffill()
+                    elif curr == 'CHF' and eurchf is not None:
+                        px = px / eurchf.reindex(px.index).ffill()
                     all_prices[desc] = px
                 except Exception:
-                    # Ticker mancante nel batch: prova suffissi europei automaticamente
-                    t_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs)
+                    # Nessun dato: scegli la quotazione con più storico (ticker + valuta)
+                    t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
                     if t_ok and px_ok is not None:
-                        if curr == 'USD' and eurusd is not None:
+                        if curr_ok == 'USD' and eurusd is not None:
                             px_ok = px_ok / eurusd.reindex(px_ok.index).ffill()
-                        elif curr == 'GBP' and eurgbp is not None:
+                        elif curr_ok == 'GBP' and eurgbp is not None:
                             px_ok = px_ok / eurgbp.reindex(px_ok.index).ffill()
+                        elif curr_ok == 'CHF' and eurchf is not None:
+                            px_ok = px_ok / eurchf.reindex(px_ok.index).ffill()
                         all_prices[desc] = px_ok
+                        _resolved_g[desc] = t_ok
                         with _DL_LOCK:
-                            _DL_STATE.setdefault('auto_fixed', {})[t] = t_ok
+                            _DL_STATE.setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
                         with _CL_LOCK:
-                            _CL_STATES.setdefault(username, {}).setdefault('auto_fixed', {})[t] = t_ok
-                        print(f"✅ Auto-corretto gestisci: {t} → {t_ok}")
+                            _CL_STATES.setdefault(username, {}).setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
+                        print(f"✅ Auto-corretto gestisci: {t} → {t_ok} ({curr_ok})")
                     else:
                         _gestisci_failed.append(t)
         except Exception:
@@ -1188,20 +1209,24 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                 except Exception: return None
             eurusd2 = _get_fx2('EURUSD=X')
             eurgbp2 = _get_fx2('EURGBP=X')
+            eurchf2 = _get_fx2('EURCHF=X')
             for j, t in enumerate(bt):
                 desc, curr = bd[j], bv[j]
-                t_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs)
+                t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
                 if t_ok and px_ok is not None:
-                    if curr == 'USD' and eurusd2 is not None:
+                    if curr_ok == 'USD' and eurusd2 is not None:
                         px_ok = px_ok / eurusd2.reindex(px_ok.index).ffill()
-                    elif curr == 'GBP' and eurgbp2 is not None:
+                    elif curr_ok == 'GBP' and eurgbp2 is not None:
                         px_ok = px_ok / eurgbp2.reindex(px_ok.index).ffill()
+                    elif curr_ok == 'CHF' and eurchf2 is not None:
+                        px_ok = px_ok / eurchf2.reindex(px_ok.index).ffill()
                     all_prices[desc] = px_ok
+                    _resolved_g[desc] = t_ok
                     with _DL_LOCK:
-                        _DL_STATE.setdefault('auto_fixed', {})[t] = t_ok
+                        _DL_STATE.setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
                     with _CL_LOCK:
-                        _CL_STATES.setdefault(username, {}).setdefault('auto_fixed', {})[t] = t_ok
-                    print(f"✅ Auto-corretto gestisci (batch-err): {t} → {t_ok}")
+                        _CL_STATES.setdefault(username, {}).setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
+                    print(f"✅ Auto-corretto gestisci (batch-err): {t} → {t_ok} ({curr_ok})")
                 else:
                     _gestisci_failed.append(t)
         with _DL_LOCK:
@@ -1238,7 +1263,8 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     new_prices = new_prices.ffill()
     new_prices = _clean_prices(new_prices)
 
-    new_tm     = {new_descr[i]: new_tickers[i] for i in range(len(new_tickers))}
+    new_tm     = {new_descr[i]: _resolved_g.get(new_descr[i], new_tickers[i])
+                  for i in range(len(new_tickers))}
     merged_op  = new_prices.copy()
     merged_tm  = dict(new_tm)
 
@@ -1413,35 +1439,90 @@ _OPENFIGI_EXCH = {
 
 
 _TICKER_SUFFIXES = ['.MI', '.DE', '.L', '.PA', '.AS', '.MC', '.SW', '.OL', '.ST', '.HE', '.CO', '.VI', '.BR', '.LI']
+# Valuta implicita di alcuni suffissi (fallback quando la ricerca Yahoo non la dà)
+_SUFFIX_CCY = {'.L': 'GBP', '.SW': 'CHF'}   # gli altri suffissi europei sono in EUR
 
 
-def _find_working_ticker(ticker, start_date, dl_kwargs):
-    """
-    Quando un ticker fallisce, prova automaticamente tutti i suffissi di borsa
-    europei con un unico batch download. Restituisce (ticker_ok, serie_prezzi)
-    se trova dati, altrimenti (None, None).
-    Solo per ticker senza suffisso (nessun '.' nel simbolo).
-    """
-    if '.' in ticker:
-        return None, None
-    candidates = [ticker + sfx for sfx in _TICKER_SUFFIXES]
+def _yahoo_currency(sym, fallback='EUR'):
+    """Valuta reale di quotazione di un simbolo Yahoo (via fast_info), con fallback
+    sul suffisso di borsa. Es. BTCW.SW→CHF, BTCW.L→USD, AAPL→USD.
+    Serve perché yf.Search NON restituisce la valuta in modo affidabile."""
     try:
-        raw = yf.download(candidates, start=start_date, group_by='ticker', **dl_kwargs)
-        if raw.empty:
-            return None, None
-        for t2 in candidates:
-            try:
-                col = (raw[(t2, 'Close')].copy()
-                       if isinstance(raw.columns, pd.MultiIndex)
-                       else raw['Close'].copy())
-                col = col.dropna()
-                if len(col) > 10:          # almeno 10 barre valide
-                    return t2, col.ffill()
-            except Exception:
-                pass
+        c = yf.Ticker(sym).fast_info.get('currency')
+        if c:
+            return str(c).upper()
     except Exception:
         pass
-    return None, None
+    for sfx, ccy in _SUFFIX_CCY.items():
+        if sym.upper().endswith(sfx):
+            return ccy
+    return 'USD' if '.' not in sym else fallback
+
+
+def _find_working_ticker(ticker, start_date, dl_kwargs, currency='EUR'):
+    """
+    Quando un ticker/ISIN non ha dati, cerca su Yahoo TUTTE le quotazioni dello
+    stesso strumento (ricerca per ISIN o per simbolo) più i suffissi di borsa
+    europei, scarica i candidati in un unico batch e sceglie quello con il MAGGIOR
+    numero di dati storici. Restituisce (ticker_ok, valuta_ok, serie_prezzi) — con
+    la valuta della quotazione scelta — altrimenti (None, None, None).
+    """
+    ticker = (ticker or '').strip()
+    if not ticker:
+        return None, None, None
+
+    # 1) Raccogli i candidati {simbolo: valuta} da ricerca Yahoo (ISIN o simbolo)
+    cands = {}
+    try:
+        if _is_isin(ticker):
+            for sym, _name, curr in _yahoo_search_isin(ticker.upper(), ''):
+                if sym:
+                    cands.setdefault(sym, curr or currency)
+        else:
+            s = yf.Search(ticker, max_results=10, news_count=0)
+            for q in (s.quotes or []):
+                if str(q.get('quoteType', '')).upper() not in ('EQUITY', 'ETF', 'FUND', 'MUTUALFUND'):
+                    continue
+                sym = q.get('symbol', '').strip()
+                if sym:
+                    cands.setdefault(sym, q.get('currency') or currency)
+    except Exception:
+        pass
+
+    # Suffissi di borsa europei (solo se il simbolo non ne ha già uno)
+    if '.' not in ticker:
+        for sfx in _TICKER_SUFFIXES:
+            cands.setdefault(ticker + sfx, _SUFFIX_CCY.get(sfx, 'EUR'))
+
+    if not cands:
+        return None, None, None
+
+    # 2) Scarica i candidati e scegli quello con più dati storici
+    symbols = list(cands.keys())[:8]
+    try:
+        raw = yf.download(symbols, start=start_date, group_by='ticker', **dl_kwargs)
+    except Exception:
+        return None, None, None
+    if raw is None or raw.empty:
+        return None, None, None
+
+    best_sym, best_curr, best_px, best_n = None, None, None, 0
+    for sym in symbols:
+        try:
+            col = (raw[(sym, 'Close')].copy()
+                   if isinstance(raw.columns, pd.MultiIndex)
+                   else raw['Close'].copy())
+            col = col.dropna()
+            n = int(col.shape[0])
+            if n > best_n and n > 10:          # almeno 10 barre valide
+                best_sym, best_curr, best_px, best_n = sym, cands[sym], col.ffill(), n
+        except Exception:
+            pass
+
+    if best_sym:
+        curr_final = _yahoo_currency(best_sym, currency)
+        return best_sym, curr_final, best_px
+    return None, None, None
 
 
 def _suggest_ticker(ticker):
@@ -2427,7 +2508,8 @@ def get_portfolio_analysis_tab(options_tickers):
                         dcc.Dropdown(id='inline-valuta-dropdown',
                                      options=[{'label': 'EUR', 'value': 'EUR'},
                                               {'label': 'USD', 'value': 'USD'},
-                                              {'label': 'GBP', 'value': 'GBP'}],
+                                              {'label': 'GBP', 'value': 'GBP'},
+                                              {'label': 'CHF', 'value': 'CHF'}],
                                      value='EUR', clearable=False,
                                      style={'width': '65px', 'fontSize': '9px',
                                             'display': 'inline-block'}),
@@ -2825,7 +2907,8 @@ app.layout = html.Div([
                     id='new-valuta-dropdown',
                     options=[{'label': 'EUR', 'value': 'EUR'},
                              {'label': 'USD', 'value': 'USD'},
-                             {'label': 'GBP', 'value': 'GBP'}],
+                             {'label': 'GBP', 'value': 'GBP'},
+                             {'label': 'CHF', 'value': 'CHF'}],
                     value='EUR', clearable=False,
                     style={'width': '85px', 'fontSize': '12px', 'display': 'inline-block'},
                 ),

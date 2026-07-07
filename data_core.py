@@ -20,6 +20,21 @@ import pandas as pd
 
 ROOT = Path(os.path.dirname(os.path.abspath(__file__)))
 
+# Tetto ai rendimenti giornalieri: oltre ±50%/giorno è quasi sempre un tick
+# corrotto (prezzo sbagliato a inizio serie o buco → pct_change esplode) che fa
+# schizzare volatilità e covarianze. Vale per TUTTA la dashboard.
+MAX_DAILY_RET = 0.5
+
+
+def clip_returns(obj):
+    """Limita i rendimenti anomali a ±MAX_DAILY_RET (preserva i NaN)."""
+    if obj is None:
+        return obj
+    try:
+        return obj.clip(-MAX_DAILY_RET, MAX_DAILY_RET)
+    except Exception:
+        return obj
+
 
 # ─── Storage persistente (S3/R2) ──────────────────────────────────────────────
 def cloud_push(path):
@@ -141,6 +156,7 @@ def build_dataset(username=None):
         tm[a] = v.get('ticker') or a
     op = pd.DataFrame(pcols).sort_index() if pcols else None
     cr = pd.DataFrame(rcols).sort_index() if rcols else None
+    cr = clip_returns(cr)   # neutralizza tick corrotti (±50%/giorno)
     return cr, op, tm
 
 
@@ -185,7 +201,7 @@ def fx_series(name, start):
 def download_series(ticker, currency='EUR'):
     """
     Scarica i prezzi (Close adj) da Yahoo e li CONVERTE in EUR in base alla valuta
-    (USD→/EURUSD, GBP→/EURGBP). Ritorna pd.Series o None.
+    (USD→/EURUSD, GBP→/EURGBP, CHF→/EURCHF). Ritorna pd.Series o None.
     """
     import yfinance as yf
     start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
@@ -208,6 +224,10 @@ def download_series(ticker, currency='EUR'):
         fx = fx_series('EURGBP=X', start)
         if fx is not None:
             px = (px / fx.reindex(px.index).ffill()).dropna()
+    elif cur == 'CHF':
+        fx = fx_series('EURCHF=X', start)
+        if fx is not None:
+            px = (px / fx.reindex(px.index).ffill()).dropna()
     return px
 
 
@@ -221,7 +241,7 @@ def add_asset_to_current(ticker, description, currency='EUR', username=None):
     px = download_series(ticker, currency)
     if px is None or len(px) < 30:
         return False, f"⚠ Nessun dato per '{ticker}' (ticker corretto?)"
-    rets = px.pct_change(fill_method=None)
+    rets = clip_returns(px.pct_change(fill_method=None))   # ±50%/giorno
     dates = [d.strftime('%Y-%m-%d') for d in px.index]
     entry = {
         'ticker':   ticker,
