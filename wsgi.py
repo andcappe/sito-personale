@@ -914,7 +914,10 @@ def _register_auth(flask_server, add_login_routes: bool = False):
             return None
         username = session.get('username')
         if not username:
-            return redirect(f'/login?next={request.path}')
+            _nxt = request.path
+            if request.query_string:
+                _nxt += '?' + request.query_string.decode('utf-8', 'ignore')
+            return redirect('/login?next=' + urllib.parse.quote(_nxt, safe=''))
         user = get_user(username)
         if user and user.get('status') == 'suspended':
             return redirect('/suspended')

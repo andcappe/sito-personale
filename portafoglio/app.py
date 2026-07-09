@@ -113,14 +113,14 @@ _FOTO_PNG = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file_
 # Cartella condivisa Files/ (un livello sopra rispetto a portafoglio/)
 _FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
 
-_FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES']
+_FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES', 'VALUTE']
 _PERSONALE_OPT = {'label': '👤 Personale', 'value': '__personale__'}
 
 def _list_files():
     """Restituisce lista di opzioni dcc.Dropdown dai .xlsx in Files/."""
     if not _FILES_DIR.exists():
         return [{'label': 'ETF', 'value': 'ETF.xlsx'}]
-    files = list(_FILES_DIR.glob('*.xlsx'))
+    files = [f for f in _FILES_DIR.glob('*.xlsx') if not f.name.startswith('~$')]
     files.sort(key=lambda f: _FILE_ORDER.index(f.stem.upper()) if f.stem.upper() in _FILE_ORDER else 99)
     return [{'label': f.stem, 'value': f.name} for f in files] or \
            [{'label': 'ETF', 'value': 'ETF.xlsx'}]
@@ -2965,6 +2965,8 @@ app.layout = html.Div([
     ]),
 
     # ── Stores ───────────────────────────────────────────────────────────────
+    dcc.Location(id='page-url', refresh=False),
+    dcc.Interval(id='file-url-once', interval=250, n_intervals=0, max_intervals=1),
     dcc.Interval(id='refresh-poll-interval', interval=1000, n_intervals=0, disabled=True),
     dcc.Store(id='active-xlsx-file',        data='ETF.xlsx'),
     dcc.Store(id='asset-checklist',         data=[]),
@@ -3996,6 +3998,57 @@ def on_file_selected(filename, cur_clicks):
             html.Div(f'⏳ Download {Path(filename).stem} — {len(tickers)} asset…',
                      style={'color': '#e67e22', 'font-size': '11px'}),
             {}, {}, {}, (cur_clicks or 0) + 1)
+
+
+# Apertura da URL: /portafoglio/?file=VALUTE.xlsx → preseleziona quel file di default
+@app.callback(
+    Output('file-selector', 'value', allow_duplicate=True),
+    Input('file-url-once',  'n_intervals'),
+    State('page-url',       'search'),
+    prevent_initial_call=True,
+)
+def _preselect_file_from_url(_n, search):
+    if not search:
+        raise PreventUpdate
+    import urllib.parse as _up
+    wanted = (_up.parse_qs(search.lstrip('?')).get('file', [''])[0] or '').strip()
+    if not wanted:
+        raise PreventUpdate
+    if not wanted.lower().endswith('.xlsx'):
+        wanted += '.xlsx'
+    if wanted in {o['value'] for o in _list_files()}:
+        return wanted
+    raise PreventUpdate
+
+
+# Apertura da URL: /portafoglio/?tab=sa → apre direttamente quella tab
+_TAB_ALIASES = {
+    'portfolio': 'tab-portfolio', 'portafoglio': 'tab-portfolio',
+    'frontiera': 'tab-frontiera',
+    'rendimenti': 'tab-rendimenti',
+    'sa': 'tab-sa', 'style': 'tab-sa', 'style-analysis': 'tab-sa', 'styleanalysis': 'tab-sa',
+    'correlazioni': 'tab-correlazioni', 'corr': 'tab-correlazioni',
+}
+_TAB_VALID = {'tab-portfolio', 'tab-frontiera', 'tab-rendimenti', 'tab-sa', 'tab-correlazioni'}
+
+
+@app.callback(
+    Output('main-tabs', 'value', allow_duplicate=True),
+    Input('file-url-once', 'n_intervals'),
+    State('page-url',      'search'),
+    prevent_initial_call=True,
+)
+def _preselect_tab_from_url(_n, search):
+    if not search:
+        raise PreventUpdate
+    import urllib.parse as _up
+    wanted = (_up.parse_qs(search.lstrip('?')).get('tab', [''])[0] or '').strip().lower()
+    if not wanted:
+        raise PreventUpdate
+    tab = _TAB_ALIASES.get(wanted, wanted)
+    if tab in _TAB_VALID:
+        return tab
+    raise PreventUpdate
 
 
 # ─────────────────────────────────────────────────────────────────────────────
