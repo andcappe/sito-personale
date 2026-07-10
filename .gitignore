@@ -12,3 +12,6 @@ portafoglio/sessions/
 .env
 venv/
 env/
+
+# cache runtime FRED (curva tassi) — rigenerata dal prewarm
+fred/yields_cache.pkl

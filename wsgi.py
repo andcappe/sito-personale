@@ -62,6 +62,7 @@ frontiera_srv   = _safe_load("_app_frontiera",   "frontiera-efficiente")
 rendimenti_srv  = _safe_load("_app_rendimenti",  "rendimenti")
 opzioni_srv     = _safe_load("_app_opzioni",     "opzioni")
 analisitattica_srv = _safe_load("_app_analisitattica", "analisitattica")
+fred_srv        = _safe_load("_app_fred",        "fred")
 
 # ─── Autenticazione ───────────────────────────────────────────────────────────
 from auth import (check_credentials, register_user, register_oauth_user,
@@ -86,7 +87,7 @@ ADMIN_EMAIL          = os.environ.get('ADMIN_EMAIL', 'admin@dashboard.local')
 ADMIN_PASSWORD       = os.environ.get('ADMIN_PASSWORD', 'Cambia.Subito.123')
 
 for _srv in (portafoglio_srv, macro_srv, frontiera_srv, rendimenti_srv, opzioni_srv,
-             analisitattica_srv):
+             analisitattica_srv, fred_srv):
     if _srv:
         _srv.secret_key = SECRET_KEY
 
@@ -105,9 +106,9 @@ _PUBLIC_VERIFY_PREFIX = '/verify-email/'
 _PUBLIC_PREFIXES = (
     '/_dash', '/assets/', '/_reload',
     '/portafoglio/_dash', '/frontiera/_dash', '/macro/_dash', '/rendimenti/_dash', '/opzioni/_dash',
-    '/analisitattica/_dash',
+    '/analisitattica/_dash', '/fred/_dash',
     '/portafoglio/assets', '/frontiera/assets', '/macro/assets', '/rendimenti/assets', '/opzioni/assets',
-    '/analisitattica/assets',
+    '/analisitattica/assets', '/fred/assets',
 )
 
 # ─── Template HTML comune ─────────────────────────────────────────────────────
@@ -933,6 +934,8 @@ if rendimenti_srv:
     _register_auth(rendimenti_srv)
 if opzioni_srv:
     _register_auth(opzioni_srv)
+if fred_srv:
+    _register_auth(fred_srv)
 
 # ─── Bootstrap admin di default ───────────────────────────────────────────────
 from auth import add_user as _add_user, update_user as _upd_user, list_users as _list_users, get_user as _get_user
@@ -952,6 +955,7 @@ _ROUTES = [
     *([("/rendimenti",  rendimenti_srv)]  if rendimenti_srv  else []),
     *([("/opzioni",     opzioni_srv)]     if opzioni_srv     else []),
     *([("/analisitattica", analisitattica_srv)] if analisitattica_srv else []),
+    *([("/fred",        fred_srv)]        if fred_srv        else []),
     ("/",  portafoglio_srv or macro_srv or frontiera_srv),  # catch-all
 ]
 

@@ -18,7 +18,7 @@ _TABS = [
     ("Portafoglio",          "/portafoglio/"),
     ("Strategie Opzioni",    "/opzioni/"),
     ("Analisi Tattica",      "/analisitattica/"),
-    ("Macro Economia",       "/macro/"),
+    ("Macro Economia",       "/fred/"),
 ]
 
 

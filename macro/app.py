@@ -70,6 +70,19 @@ app.index_string = '''
 <body>
 {%app_entry%}
 <footer>{%config%}{%scripts%}{%renderer%}</footer>
+<script>
+(function(){
+  if (location.search.indexOf('embed=1') === -1) return;
+  function apply(){
+    var nb = document.getElementById('site-navbar');
+    if (nb) nb.style.display = 'none';
+    document.querySelectorAll('[style*="margin-top: 64"],[style*="margin-top:64"]')
+      .forEach(function(e){ e.style.marginTop = '8px'; });
+  }
+  var n = 0, iv = setInterval(function(){ apply(); if (++n > 30) clearInterval(iv); }, 100);
+  document.addEventListener('DOMContentLoaded', apply);
+})();
+</script>
 </body>
 </html>
 '''
