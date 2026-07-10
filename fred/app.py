@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore")
 # CONFIGURAZIONE
 # =============================================================================
 
-FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "65061ed1fa4c47d53b1d644e1cd858d3")
 
 DEFAULT_SERIES = {
     "M2SL":    ("M2 Money Supply",     "M"),
