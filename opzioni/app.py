@@ -650,6 +650,488 @@ app.index_string = (
     '<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>'
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FASE 1 — Cruscotto Macro / Sentiment (VIX & intermarket, EOD giornaliero)
+# ─────────────────────────────────────────────────────────────────────────────
+_SENT_TICKERS = {
+    "^VIX":     "VIX — Volatilità S&P 500",
+    "^VIX9D":   "VIX 9 giorni",
+    "^VIX3M":   "VIX 3 mesi",
+    "^VVIX":    "VVIX — Volatilità del VIX",
+    "^SKEW":    "SKEW Index",
+    "^VXN":     "VXN — Volatilità Nasdaq 100",
+    "^RVX":     "RVX — Volatilità Russell 2000",
+    "^TNX":     "Treasury 10Y (rendimento)",
+    "DX-Y.NYB": "Dollar Index (DXY)",
+    "SPY":      "S&P 500 (SPY)",
+}
+
+
+def download_sentiment():
+    """2 anni EOD dei ticker macro/vol. (Il Put/Call CBOE via CSV pubblico non è
+    più disponibile: si aggancia qui su px['Equity_PC'] se colleghi una sorgente.)"""
+    tks = list(_SENT_TICKERS.keys())
+    d = yf.download(tks, period="2y", interval="1d", progress=False, auto_adjust=True)
+    if isinstance(d.columns, pd.MultiIndex):
+        return d["Close"].copy()
+    return d[["Close"]].rename(columns={"Close": tks[0]})
+
+
+def _pct_change_n(s, n):
+    s = s.dropna()
+    if len(s) <= n:
+        return None
+    return (s.iloc[-1] / s.iloc[-1 - n] - 1) * 100
+
+
+def _sent_signal(key, val, pct):
+    g = ("#e6f4ea", "#137333"); y = ("#fff3e0", "#e65100"); r = ("#fce8e6", "#c5221f"); nne = ("#f5f5f5", "#555")
+    if key == "^VIX":
+        if val >= 25: return "Premi molto gonfiati → vendi volatilità (CSP / Iron Condor)", g
+        if val >= 20: return "Premi cari → favorevole ai venditori di opzioni", g
+        if val < 14:  return "Premi compressi → compra protezione / strategie a debito", r
+        return "Regime neutro (14–20)", nne
+    if key == "^SKEW":
+        if val >= 145: return "Coda sinistra estrema: istituzionali comprano Put", r
+        if val >= 135: return "Skew elevato: rischio asimmetrico al ribasso", y
+        return "Skew nella norma", nne
+    if key == "^VVIX":
+        if pct is not None and pct >= 80: return "Vol della vol alta → riduci la size (semaforo giallo)", y
+        return "Stabile", nne
+    if key == "^TNX":
+        return "Filtro macro: se rompe i massimi relativi, riduci esposizione Nasdaq", nne
+    return "", nne
+
+
+def _build_sentiment_table(px):
+    idx = px.dropna(how="all").index
+    if len(idx) == 0:
+        return html.Div("Nessun dato disponibile.", style={"padding": "12px", "fontSize": "12px"})
+
+    th = {"padding": "8px 10px", "fontSize": "11px", "fontWeight": "700", "color": "#fff",
+          "background": "#1a3a5c", "border": "1px solid #ddd", "position": "sticky", "top": "0"}
+    heads = ["Indicatore", "Ultimo", "1g Δ%", "5g Δ%", "20g Δ%", "Perc. 2a", "Segnale operativo"]
+    rows = [html.Tr([html.Th(h, style={**th, "textAlign": "left" if i in (0, 6) else "right"})
+                     for i, h in enumerate(heads)])]
+
+    def _chg(v):
+        if v is None:
+            return html.Td("—", style={"padding": "7px 10px", "textAlign": "right", "fontSize": "11px",
+                                        "color": "#aaa", "border": "1px solid #eee"})
+        c = ("#e6f4ea", "#137333") if v >= 0 else ("#fce8e6", "#c5221f")
+        return html.Td(f"{v:+.1f}%", style={"padding": "7px 10px", "textAlign": "right", "fontSize": "11px",
+                                            "background": c[0], "color": c[1], "border": "1px solid #eee"})
+
+    def _row(name, val, c1, c5, c20, pct, sig, sigcol, fmt="{:.2f}"):
+        return html.Tr([
+            html.Td(name, style={"padding": "7px 10px", "fontSize": "11px", "fontWeight": "600",
+                                 "border": "1px solid #eee", "whiteSpace": "nowrap",
+                                 "position": "sticky", "left": "0", "background": "#fff"}),
+            html.Td(fmt.format(val) if val is not None else "—",
+                    style={"padding": "7px 10px", "textAlign": "right", "fontSize": "11px",
+                           "fontWeight": "700", "border": "1px solid #eee"}),
+            _chg(c1), _chg(c5), _chg(c20),
+            html.Td(f"{pct:.0f}%" if pct is not None else "—",
+                    style={"padding": "7px 10px", "textAlign": "right", "fontSize": "11px",
+                           "border": "1px solid #eee",
+                           "background": "#fff3e0" if (pct is not None and pct >= 70) else "#fff"}),
+            html.Td(sig, style={"padding": "7px 10px", "fontSize": "10.5px", "border": "1px solid #eee",
+                                "background": sigcol[0], "color": sigcol[1]}),
+        ])
+
+    # Term structure VIX/VIX3M (backwardation = venditori favoriti)
+    if "^VIX" in px.columns and "^VIX3M" in px.columns:
+        v, v3 = px["^VIX"].dropna(), px["^VIX3M"].dropna()
+        com = v.index.intersection(v3.index)
+        if len(com) > 5:
+            ratio = float((v.reindex(com) / v3.reindex(com)).dropna().iloc[-1])
+            if ratio > 1:
+                sig, col = "BACKWARDATION → paura sul presente: momento migliore per vendere opzioni", ("#e6f4ea", "#137333")
+            else:
+                sig, col = "Contango (normale): struttura a termine regolare", ("#f5f5f5", "#555")
+            rows.append(_row("Term Structure  VIX / VIX3M", ratio, None, None, None, None, sig, col, "{:.3f}"))
+
+    for key, label in _SENT_TICKERS.items():
+        if key not in px.columns:
+            continue
+        s = px[key].dropna()
+        if s.empty:
+            continue
+        val = float(s.iloc[-1])
+        pct = float((s < val).mean() * 100)
+        sig, col = _sent_signal(key, val, pct)
+        rows.append(_row(label, val, _pct_change_n(s, 1), _pct_change_n(s, 5), _pct_change_n(s, 20), pct, sig, col))
+
+    return html.Table(rows, style={"borderCollapse": "collapse", "width": "100%",
+                                   "fontFamily": "Inter, Arial, sans-serif"})
+
+
+# Soglie di regime del VIX. Sono livelli ASSOLUTI: si disegnano solo sugli indici
+# in scala VIX (vol. implicita annualizzata dell'S&P, stessa unità su ogni scadenza:
+# 9 giorni, 1 mese = il VIX stesso, 3 mesi) e solo su assi in scala reale, mai sui
+# grafici rebasati a 0%.
+_VIX_LEVELS = [
+    (15.0,  "#137333", "Calma — premi compressi"),
+    (22.5,  "#e65100", "Tensione — premi cari"),
+    (40.0,  "#c5221f", "Panico — stress di mercato"),
+]
+_VIX_SCALE = {"^VIX9D", "^VIX", "^VIX3M"}
+
+
+def _add_vix_levels(fig, row=None, col=None, brief=False, secondary_y=None):
+    """Linee orizzontali 15 / 22,5 / 40 sul grafico del VIX."""
+    for y, color, desc in _VIX_LEVELS:
+        txt = f"{y:.1f}".replace(".0", "").replace(".", ",")
+        fig.add_hline(
+            y=y, line_color=color, line_dash="dash", line_width=1,
+            annotation_text=txt if brief else f"{txt} · {desc}",
+            annotation_position="top left",
+            annotation_font=dict(size=8 if brief else 9, color=color),
+            row=row, col=col, secondary_y=secondary_y,
+        )
+
+
+def _centra_soglie(fig, ratios, diffs, soglia_text, row=None, col=None):
+    """Centra l'asse sinistro su 1 (rapporto) e il destro su 0 (differenziale), così
+    le due soglie cadono alla STESSA altezza e le curve si confrontano a occhio: il
+    rapporto sta sopra 1 esattamente quando il differenziale sta sopra 0, quindi con
+    assi automatici le due curve taglierebbero la loro soglia in punti diversi e la
+    lettura sarebbe ingannevole. Una riga sola marca il confine per entrambe."""
+    r = np.concatenate([np.asarray(x, dtype=float) for x in ratios])
+    d = np.concatenate([np.asarray(x, dtype=float) for x in diffs])
+    mr = float(np.nanmax(np.abs(r - 1.0))) * 1.12 or 0.1
+    md = float(np.nanmax(np.abs(d))) * 1.12 or 1.0
+    fig.update_yaxes(range=[1 - mr, 1 + mr], title_text="Rapporto (sx)",
+                     title_font=dict(size=9), row=row, col=col, secondary_y=False)
+    fig.update_yaxes(range=[-md, md], title_text="Differenziale (dx)",
+                     title_font=dict(size=9), showgrid=False,
+                     row=row, col=col, secondary_y=True)
+    fig.add_hline(y=1.0, line_color="#c5221f", line_dash="dash", line_width=1.2,
+                  annotation_text=soglia_text, annotation_position="top left",
+                  annotation_font=dict(size=9, color="#c5221f"),
+                  row=row, col=col, secondary_y=False)
+
+
+def _add_ratio_diff(fig, px, ticker, compare, row=None, col=None):
+    """Per ogni serie di confronto: rapporto principale/confronto (asse sx, tinta unita)
+    e differenziale principale − confronto (asse dx, tratteggiato, stesso colore).
+    Ritorna False se non c'è nulla da disegnare."""
+    label = _SENT_TICKERS.get(ticker, ticker)
+    ratios, diffs = [], []
+    for j, tk in enumerate(compare):
+        sub = px[[ticker, tk]].dropna()
+        if sub.empty:
+            continue
+        ratio = sub[ticker] / sub[tk].replace(0, np.nan)
+        diff  = sub[ticker] - sub[tk]
+        c = _CMP_PAL[j % len(_CMP_PAL)]
+        lbl = _SENT_TICKERS.get(tk, tk)
+        fig.add_trace(go.Scatter(x=ratio.index, y=ratio.values,
+            name=f"Rapporto  {label} / {lbl}", line=dict(color=c, width=1.8),
+            hovertemplate="Rapporto: %{y:.3f}<br>%{x|%d/%m/%y}<extra></extra>"),
+            row=row, col=col, secondary_y=False)
+        fig.add_trace(go.Scatter(x=diff.index, y=diff.values,
+            name=f"Differenziale  {label} − {lbl}",
+            line=dict(color=c, width=1.2, dash='dot'),
+            hovertemplate="Differenziale: %{y:+.2f}<br>%{x|%d/%m/%y}<extra></extra>"),
+            row=row, col=col, secondary_y=True)
+        ratios.append(ratio.dropna().values)
+        diffs.append(diff.dropna().values)
+    if not ratios:
+        return False
+    _centra_soglie(fig, ratios, diffs,
+                   "1,00 / 0 — sopra: il principale sta più in alto del confronto",
+                   row=row, col=col)
+    return True
+
+
+def _vix_term_chart(px, short="^VIX9D", long_="^VIX"):
+    """Struttura a termine breve: rapporto e differenziale fra VIX 9 giorni e VIX 30
+    giorni, sovrapposti su due assi Y (il rapporto sta intorno a 1, il differenziale
+    intorno a 0: senza due assi uno dei due sarebbe una riga piatta).
+    Sopra la soglia è BACKWARDATION: la paura è sul presente, i premi a breve sono
+    gonfiati rispetto a quelli a un mese."""
+    if short not in px.columns or long_ not in px.columns:
+        return go.Figure()
+    sub = px[[short, long_]].dropna()
+    if sub.empty:
+        return go.Figure()
+    ratio = sub[short] / sub[long_]
+    diff  = sub[short] - sub[long_]
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Scatter(x=ratio.index, y=ratio.values, name="Rapporto  VIX 9g / VIX 30g",
+        line=dict(color="#1a3a5c", width=1.8),
+        hovertemplate="Rapporto: %{y:.3f}<br>%{x|%d/%m/%y}<extra></extra>"),
+        secondary_y=False)
+    fig.add_trace(go.Scatter(x=diff.index, y=diff.values, name="Differenziale  VIX 9g − VIX 30g",
+        line=dict(color="#e65100", width=1.4),
+        hovertemplate="Differenziale: %{y:+.2f}<br>%{x|%d/%m/%y}<extra></extra>"),
+        secondary_y=True)
+
+    _centra_soglie(fig, [ratio.values], [diff.values],
+                   "1,00 / 0 — sopra: BACKWARDATION (premi a breve gonfiati)")
+
+    ultimo_r, ultimo_d = float(ratio.iloc[-1]), float(diff.iloc[-1])
+    regime = "BACKWARDATION" if ultimo_r > 1 else "Contango"
+    fig.update_layout(
+        title=dict(text=f"Struttura a termine breve — oggi: {regime} "
+                        f"(rapporto {ultimo_r:.3f} · differenziale {ultimo_d:+.2f})",
+                   font=dict(size=12, color="#1a3a5c"), x=0.01),
+        height=300, hovermode="x unified",
+        legend=dict(orientation="h", y=1.12, x=0, font=dict(size=10)),
+        margin=dict(t=64, b=20, l=52, r=52),
+        paper_bgcolor="white", plot_bgcolor="#f8f9fb",
+        font=dict(family="Inter, sans-serif", size=10))
+    fig.update_xaxes(showgrid=True, gridcolor="#eee")
+    return fig
+
+
+def _build_sentiment_charts(px):
+    """Griglia di grafici (storico 2 anni) per ogni indice scaricato."""
+    series = [(k, _SENT_TICKERS[k]) for k in _SENT_TICKERS
+              if k in px.columns and not px[k].dropna().empty]
+    if not series:
+        return go.Figure()
+    cols = 3
+    rows_n = (len(series) + cols - 1) // cols
+    fig = make_subplots(rows=rows_n, cols=cols,
+                        subplot_titles=[lbl for _, lbl in series],
+                        vertical_spacing=0.09, horizontal_spacing=0.06)
+    _vol = {"^VIX", "^VVIX", "^SKEW", "^VIX9D", "^VIX3M", "^VXN", "^RVX"}
+    for i, (key, lbl) in enumerate(series):
+        r, c = i // cols + 1, i % cols + 1
+        s = px[key].dropna()
+        is_vol = key in _vol
+        fig.add_trace(go.Scatter(
+            x=s.index, y=s.values, mode="lines",
+            line=dict(color="#c5221f" if is_vol else "#1a3a5c", width=1.4),
+            fill="tozeroy" if is_vol else None,
+            fillcolor="rgba(197,34,31,0.06)",
+            hovertemplate=lbl + ": %{y:.2f}<br>%{x|%d/%m/%y}<extra></extra>",
+        ), row=r, col=c)
+        if key in _VIX_SCALE:
+            _add_vix_levels(fig, row=r, col=c, brief=True)
+    fig.update_layout(height=rows_n * 200, showlegend=False,
+                      margin=dict(t=34, b=18, l=44, r=12),
+                      paper_bgcolor="white", plot_bgcolor="#f8f9fb",
+                      font=dict(family="Inter, sans-serif", size=10))
+    fig.update_xaxes(showgrid=True, gridcolor="#eee")
+    fig.update_yaxes(showgrid=True, gridcolor="#eee")
+    for a in fig.layout.annotations:
+        a.font.size = 11
+        a.font.color = "#1a3a5c"
+    return fig
+
+
+# Tipi di indicatore selezionabili (facile aggiungerne di nuovi: qui + in _sent_detail_chart)
+_IND_TYPES = {
+    'rsi':    'RSI',
+    'macd':   'MACD',
+    'stoch':  'Stocastico',
+    'roc':    'Momentum ROC',
+    'zscore': 'Z-Score',
+    'perc':   'Percentile',
+    'bb':     'Bollinger %B',
+    'vol':    'Volatilità realizz.',
+    'dist':   'Distanza da SMA %',
+    'dd':     'Drawdown %',
+}
+_IND_DEFAULT_PERIOD = {'rsi': 14, 'macd': 12, 'stoch': 14, 'roc': 20, 'zscore': 252,
+                       'perc': 252, 'bb': 20, 'vol': 20, 'dist': 50, 'dd': 252}
+
+
+def _rsi(s, n=14):
+    d = s.diff()
+    up = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
+    dn = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
+    rs = up / dn.replace(0, np.nan)
+    return 100 - 100 / (1 + rs)
+
+
+def _macd(s, fast=12, slow=26, sig=9):
+    macd = s.ewm(span=fast, adjust=False).mean() - s.ewm(span=slow, adjust=False).mean()
+    return macd, macd.ewm(span=sig, adjust=False).mean()
+
+
+def _stoch(s, n=14, d=3):
+    lo, hi = s.rolling(n).min(), s.rolling(n).max()
+    k = (s - lo) / (hi - lo).replace(0, np.nan) * 100
+    return k, k.rolling(d).mean()
+
+
+_CMP_PAL = ["#c5221f", "#137333", "#e65100", "#6a1b9a", "#00838f", "#5d4037"]
+
+
+def _sent_detail_chart(px, ticker, slots, compare=None, scala='abs'):
+    """Grafico grande di un indice + un pannello per ogni slot (tipo, periodo).
+    slots = lista di (tipo, periodo). compare = altri indici da sovrapporre.
+    scala:
+      'abs'     = valori assoluti come scaricati (confronto sull'asse destro);
+      'pct'     = variazione % dal 1° giorno comune, tutti sullo stesso asse;
+      'rapdiff' = rapporto (asse sx) e differenziale (asse dx) fra il principale e
+                  ogni confronto, con le soglie 1 e 0 allineate alla stessa altezza.
+    'rapdiff' richiede almeno un indice di confronto: senza, ricade su 'abs'."""
+    if ticker is None or ticker not in px.columns:
+        return go.Figure()
+    slots = [(t, int(p)) for t, p in (slots or []) if t in _IND_TYPES and p][:3]
+    compare = [c for c in (compare or []) if c in px.columns and c != ticker]
+    if scala == 'rapdiff' and not compare:
+        scala = 'abs'          # senza confronto non c'è nessun rapporto da fare
+        manca_confronto = True
+    else:
+        manca_confronto = False
+    pct     = (scala == 'pct')
+    rapdiff = (scala == 'rapdiff')
+    s = px[ticker].dropna()
+    label = _SENT_TICKERS.get(ticker, ticker)
+    nsub = len(slots)
+    heights = ([0.55] + [0.45 / nsub] * nsub) if nsub else [1.0]
+    # Doppio asse quando le due grandezze non condividono la scala: valori assoluti
+    # con confronto (VIX ~18 vs SPY ~600) e rapporto+differenziale (~1 vs ~0).
+    # In variazione % l'asse è uno solo: è tutto il punto del rebase.
+    due_assi = (bool(compare) and not pct) or rapdiff
+    if rapdiff:
+        top_title = f"{label} — rapporto (sx) e differenziale (dx) vs confronto"
+    elif pct:
+        top_title = (f"{label} vs confronto — variazione % dal 1° giorno comune"
+                     if compare else f"{label} — variazione % dal 1° giorno")
+    else:
+        top_title = (f"{label} (asse sx)  vs  confronto in valore assoluto (asse dx)"
+                     if compare else label)
+        if manca_confronto:
+            top_title += "  ·  scegli un indice di confronto per rapporto e differenziale"
+    titles = [top_title] + [f"{_IND_TYPES[t]} ({p})" for t, p in slots]
+    specs = [[{"secondary_y": due_assi}]] + [[{"secondary_y": False}]] * nsub
+    fig = make_subplots(rows=1 + nsub, cols=1, shared_xaxes=True, vertical_spacing=0.045,
+                        row_heights=heights, subplot_titles=titles, specs=specs)
+
+    if rapdiff:
+        _add_ratio_diff(fig, px, ticker, compare, row=1, col=1)
+    elif pct:
+        # Rebase a 0% dal 1° giorno in cui TUTTE le serie mostrate hanno un dato.
+        cols = [ticker] + compare
+        sub = px[cols].dropna()
+        if not sub.empty:
+            norm = (sub / sub.iloc[0] - 1) * 100
+            fig.add_trace(go.Scatter(x=norm.index, y=norm[ticker].values, name=label,
+                line=dict(color='#1a3a5c', width=2.3)), row=1, col=1)
+            for j, tk in enumerate(compare):
+                fig.add_trace(go.Scatter(x=norm.index, y=norm[tk].values,
+                    name=_SENT_TICKERS.get(tk, tk),
+                    line=dict(color=_CMP_PAL[j % len(_CMP_PAL)], width=1.5)), row=1, col=1)
+            fig.add_hline(y=0, line_color='#999', line_dash='dot', line_width=1, row=1, col=1)
+            fig.update_yaxes(title_text='Variazione %', title_font=dict(size=9), row=1, col=1)
+    else:
+        # Valori assoluti, come scaricati.
+        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode='lines', name=label,
+            line=dict(color='#1a3a5c', width=1.7 if not compare else 2.3)),
+            row=1, col=1, secondary_y=False)
+        if compare:
+            for j, tk in enumerate(compare):
+                c = px[tk].dropna()
+                fig.add_trace(go.Scatter(x=c.index, y=c.values,
+                    name=_SENT_TICKERS.get(tk, tk),
+                    line=dict(color=_CMP_PAL[j % len(_CMP_PAL)], width=1.5)),
+                    row=1, col=1, secondary_y=True)
+            fig.update_yaxes(title_text=label, title_font=dict(size=9),
+                             row=1, col=1, secondary_y=False)
+            fig.update_yaxes(title_text='Confronto (valore assoluto)', title_font=dict(size=9),
+                             row=1, col=1, secondary_y=True)
+        else:
+            fig.add_trace(go.Scatter(x=s.index, y=s.rolling(50).mean(), name='SMA 50',
+                line=dict(color='#f0a500', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=s.index, y=s.rolling(200).mean(), name='SMA 200',
+                line=dict(color='#c5221f', width=1, dash='dot')), row=1, col=1)
+        # Soglie di regime: solo sugli indici in scala VIX e solo qui, dove l'asse
+        # è in scala reale (in variazione % i livelli assoluti non varrebbero).
+        if ticker in _VIX_SCALE:
+            _add_vix_levels(fig, row=1, col=1, secondary_y=False if due_assi else None)
+    for i, (kind, period) in enumerate(slots):
+        r = 2 + i
+        if kind == 'rsi':
+            v = _rsi(s, period)
+            fig.add_trace(go.Scatter(x=v.index, y=v.values, line=dict(color='#6a1b9a', width=1.2),
+                showlegend=False), row=r, col=1)
+            fig.add_hline(y=70, line_color='#c5221f', line_dash='dot', line_width=1, row=r, col=1)
+            fig.add_hline(y=30, line_color='#137333', line_dash='dot', line_width=1, row=r, col=1)
+        elif kind == 'stoch':
+            k, d_ = _stoch(s, period)
+            fig.add_trace(go.Scatter(x=k.index, y=k.values, line=dict(color='#1565c0', width=1.2),
+                showlegend=False), row=r, col=1)
+            fig.add_trace(go.Scatter(x=d_.index, y=d_.values, line=dict(color='#e65100', width=1),
+                showlegend=False), row=r, col=1)
+            fig.add_hline(y=80, line_color='#c5221f', line_dash='dot', line_width=1, row=r, col=1)
+            fig.add_hline(y=20, line_color='#137333', line_dash='dot', line_width=1, row=r, col=1)
+        elif kind == 'macd':
+            macd, sg = _macd(s, period, round(period * 26 / 12), max(2, round(period * 9 / 12)))
+            fig.add_trace(go.Bar(x=(macd - sg).index, y=(macd - sg).values,
+                marker_color='rgba(120,120,120,0.35)', showlegend=False), row=r, col=1)
+            fig.add_trace(go.Scatter(x=macd.index, y=macd.values, line=dict(color='#1a3a5c', width=1.2),
+                showlegend=False), row=r, col=1)
+            fig.add_trace(go.Scatter(x=sg.index, y=sg.values, line=dict(color='#f0a500', width=1),
+                showlegend=False), row=r, col=1)
+        elif kind == 'roc':
+            v = s.pct_change(period) * 100
+            fig.add_trace(go.Scatter(x=v.index, y=v.values, line=dict(color='#00838f', width=1.2),
+                showlegend=False), row=r, col=1)
+            fig.add_hline(y=0, line_color='#999', line_dash='dot', line_width=1, row=r, col=1)
+        elif kind == 'zscore':
+            v = (s - s.rolling(period).mean()) / s.rolling(period).std()
+            fig.add_trace(go.Scatter(x=v.index, y=v.values, line=dict(color='#e65100', width=1.2),
+                showlegend=False), row=r, col=1)
+            for yv, cc in ((2, '#c5221f'), (0, '#999'), (-2, '#137333')):
+                fig.add_hline(y=yv, line_color=cc, line_dash='dot', line_width=1, row=r, col=1)
+        elif kind == 'perc':
+            v = s.rolling(period).apply(lambda w: (w < w[-1]).mean() * 100, raw=True)
+            fig.add_trace(go.Scatter(x=v.index, y=v.values, line=dict(color='#2e7d32', width=1.2),
+                showlegend=False), row=r, col=1)
+        elif kind == 'bb':
+            ma, sd = s.rolling(period).mean(), s.rolling(period).std()
+            b = (s - (ma - 2 * sd)) / ((ma + 2 * sd) - (ma - 2 * sd)).replace(0, np.nan) * 100
+            fig.add_trace(go.Scatter(x=b.index, y=b.values, line=dict(color='#00695c', width=1.2),
+                showlegend=False), row=r, col=1)
+            fig.add_hline(y=100, line_color='#c5221f', line_dash='dot', line_width=1, row=r, col=1)
+            fig.add_hline(y=0, line_color='#137333', line_dash='dot', line_width=1, row=r, col=1)
+        elif kind == 'vol':
+            v = s.pct_change().rolling(period).std() * (252 ** 0.5) * 100
+            fig.add_trace(go.Scatter(x=v.index, y=v.values, line=dict(color='#c5221f', width=1.2),
+                fill='tozeroy', fillcolor='rgba(197,34,31,0.06)', showlegend=False), row=r, col=1)
+        elif kind == 'dist':
+            v = (s / s.rolling(period).mean() - 1) * 100
+            fig.add_trace(go.Scatter(x=v.index, y=v.values, line=dict(color='#5d4037', width=1.2),
+                showlegend=False), row=r, col=1)
+            fig.add_hline(y=0, line_color='#999', line_dash='dot', line_width=1, row=r, col=1)
+        elif kind == 'dd':
+            v = (s / s.rolling(period, min_periods=1).max() - 1) * 100
+            fig.add_trace(go.Scatter(x=v.index, y=v.values, line=dict(color='#b71c1c', width=1.2),
+                fill='tozeroy', fillcolor='rgba(183,28,28,0.08)', showlegend=False), row=r, col=1)
+    fig.update_layout(height=360 + nsub * 150, showlegend=True,
+        legend=dict(orientation='h', y=1.03, x=0, font=dict(size=10)),
+        margin=dict(t=44, b=20, l=48, r=15), paper_bgcolor='white', plot_bgcolor='#f8f9fb',
+        font=dict(family='Inter, sans-serif', size=10), hovermode='x unified')
+    fig.update_xaxes(showgrid=True, gridcolor='#eee')
+    fig.update_yaxes(showgrid=True, gridcolor='#eee')
+    for a in fig.layout.annotations:
+        a.font.size = 11
+        a.font.color = '#1a3a5c'
+    return fig
+
+
+def _sent_slot(i, dtype='none', period=14):
+    """Uno slot indicatore: dropdown tipo + input periodo."""
+    return html.Div([
+        dcc.Dropdown(id=f'opt-sent-t{i}',
+            options=[{'label': '— nessuno', 'value': 'none'}]
+                    + [{'label': v, 'value': k} for k, v in _IND_TYPES.items()],
+            value=dtype, clearable=False,
+            style={'width': '140px', 'fontSize': '11px'}),
+        dcc.Input(id=f'opt-sent-p{i}', type='number', value=period, min=2, max=500, step=1,
+            style={'width': '56px', 'fontSize': '11px', 'marginLeft': '6px', 'padding': '3px 5px',
+                   'border': '1px solid #aaa', 'borderRadius': '3px'}),
+    ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '12px'})
+
+
 app.layout = html.Div([
     make_navbar('Opzioni'),
 
@@ -894,6 +1376,57 @@ app.layout = html.Div([
                                  style={'paddingTop': '12px'}),
                     ])),
 
+            dcc.Tab(label='📊 Cruscotto Macro / VIX', value='sentiment',
+                    style=_TAB_STYLE, selected_style=_TAB_SEL,
+                    children=html.Div([
+                        html.Div([
+                            html.Button([html.I(className='fa-solid fa-rotate',
+                                                 style={'marginRight': '6px'}),
+                                         'Scarica / Aggiorna dati'],
+                                id='opt-sent-btn', n_clicks=0, style={
+                                    'background': '#1a3a5c', 'color': 'white', 'border': 'none',
+                                    'padding': '7px 16px', 'borderRadius': '5px', 'cursor': 'pointer',
+                                    'fontWeight': '700', 'fontSize': '11px'}),
+                            html.Div(id='opt-sent-status',
+                                     style={'fontSize': '11px', 'color': '#666', 'marginLeft': '12px'}),
+                        ], style={'display': 'flex', 'alignItems': 'center', 'paddingTop': '12px'}),
+                        dcc.Store(id='opt-sent-store'),
+                        dcc.Loading(type='circle', children=[
+                            dcc.Graph(id='opt-sent-charts', style={'marginTop': '10px'},
+                                      config={'displayModeBar': False}),
+                            dcc.Graph(id='opt-sent-term', style={'marginTop': '6px'},
+                                      config={'displayModeBar': False}),
+                            html.Div([
+                                _lbl('Indice:'),
+                                dcc.Dropdown(id='opt-sent-select', options=[], value=None,
+                                             clearable=False,
+                                             style={'width': '230px', 'fontSize': '11px'}),
+                                dcc.Dropdown(id='opt-sent-compare', options=[], value=[], multi=True,
+                                             placeholder='Confronta con…',
+                                             style={'minWidth': '240px', 'fontSize': '11px'}),
+                                _lbl('Scala:'),
+                                dcc.RadioItems(id='opt-sent-scala',
+                                    options=[{'label': ' Valore assoluto', 'value': 'abs'},
+                                             {'label': ' Variazione %',    'value': 'pct'},
+                                             {'label': ' Rapporto + differenziale',
+                                              'value': 'rapdiff'}],
+                                    value='abs', inline=True,
+                                    inputStyle={'marginRight': '3px'},
+                                    labelStyle={'marginRight': '10px', 'cursor': 'pointer'},
+                                    style={'fontSize': '11px'}),
+                                _lbl('Indicatori (tipo · periodo):'),
+                                _sent_slot(1, 'rsi', 14),
+                                _sent_slot(2, 'macd', 12),
+                                _sent_slot(3, 'none', 14),
+                            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px',
+                                      'flexWrap': 'wrap', 'marginTop': '18px',
+                                      'borderTop': '1px solid #eee', 'paddingTop': '12px'}),
+                            dcc.Graph(id='opt-sent-detail', config={'displayModeBar': False}),
+                            html.Div(id='opt-sent-table',
+                                     style={'overflowX': 'auto', 'marginTop': '14px'}),
+                        ]),
+                    ])),
+
         ]),
 
     ], style={
@@ -901,6 +1434,59 @@ app.layout = html.Div([
         'fontFamily': 'Inter, sans-serif',
     }),
 ])
+
+
+# ── FASE 1: callback cruscotto macro / VIX ────────────────────────────────────
+@app.callback(
+    Output('opt-sent-charts', 'figure'),
+    Output('opt-sent-term',   'figure'),
+    Output('opt-sent-store',  'data'),
+    Output('opt-sent-select', 'options'),
+    Output('opt-sent-select', 'value'),
+    Output('opt-sent-compare', 'options'),
+    Output('opt-sent-table',  'children'),
+    Output('opt-sent-status', 'children'),
+    Input('opt-sent-btn', 'n_clicks'),
+    State('opt-sent-select', 'value'),
+    prevent_initial_call=True,
+)
+def _load_sentiment(_n, cur_sel):
+    try:
+        px = download_sentiment()
+        fig = _build_sentiment_charts(px)
+        term = _vix_term_chart(px)
+        tbl = _build_sentiment_table(px)
+        avail = [k for k in _SENT_TICKERS if k in px.columns and not px[k].dropna().empty]
+        opts = [{'label': _SENT_TICKERS[k], 'value': k} for k in avail]
+        sel = cur_sel if cur_sel in avail else (avail[0] if avail else None)
+        last = px.dropna(how='all').index[-1].strftime('%d/%m/%Y')
+        return (fig, term, px.to_json(orient='split', date_format='iso'),
+                opts, sel, opts, tbl, f'✓ Aggiornato — dati EOD al {last}')
+    except Exception as e:
+        return (go.Figure(), go.Figure(), None, [], None, [],
+                html.Div(f'⚠ Errore nel download: {e}',
+                         style={'color': '#c00', 'fontSize': '11px', 'padding': '8px'}), '')
+
+
+@app.callback(
+    Output('opt-sent-detail', 'figure'),
+    Input('opt-sent-select', 'value'),
+    Input('opt-sent-compare', 'value'),
+    Input('opt-sent-scala', 'value'),
+    Input('opt-sent-t1', 'value'), Input('opt-sent-p1', 'value'),
+    Input('opt-sent-t2', 'value'), Input('opt-sent-p2', 'value'),
+    Input('opt-sent-t3', 'value'), Input('opt-sent-p3', 'value'),
+    State('opt-sent-store', 'data'),
+    prevent_initial_call=True,
+)
+def _sent_detail(ticker, compare, scala, t1, p1, t2, p2, t3, p3, data):
+    if not data or not ticker:
+        raise PreventUpdate
+    slots = [(t, p) for t, p in ((t1, p1), (t2, p2), (t3, p3)) if t and t != 'none' and p]
+    import io as _io
+    px = pd.read_json(_io.StringIO(data), orient='split')
+    px.index = pd.to_datetime(px.index)
+    return _sent_detail_chart(px, ticker, slots, compare, scala or 'abs')
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SEZIONE 6 — CALLBACKS
