@@ -809,6 +809,10 @@ threading.Thread(target=_refresh_arima_cache_info, daemon=True).start()
 # ─────────────────────────────────────────────────────────────────────────────
 _DF_CACHE: dict = {}
 
+# Tetto ai rendimenti giornalieri: oltre ±50%/giorno è quasi sempre un tick
+# corrotto che fa esplodere volatilità/covarianze (anche in ARIMA+GARCH).
+_MAX_DAILY_RET = 0.5
+
 def _get_returns(data_json):
     if not data_json:
         return None
@@ -818,6 +822,7 @@ def _get_returns(data_json):
         df.index = pd.to_datetime(df.index)
         if hasattr(df.index, 'tz') and df.index.tz is not None:
             df.index = df.index.tz_localize(None)
+        df = df.clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)   # neutralizza tick corrotti
         _DF_CACHE[key] = df
     return _DF_CACHE[key].copy()
 
@@ -897,7 +902,7 @@ def _build_perf_chart(prices_data, chart_assets, frontier_weights, show_frontier
                                 font=dict(color='black', size=11)),
                 hovertemplate=f'<b>{asset}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.1f}}%<extra></extra>',
             ))
-        ret_df = prices_df.pct_change()
+        ret_df = prices_df.pct_change().clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)
         for fname, fcolor in _FC.items():
             if not (show_frontiers or {}).get(fname, False):
                 continue
@@ -961,7 +966,7 @@ def _build_drawdown_chart(prices_data, chart_assets, frontier_weights, show_fron
         fig_dd = go.Figure()
 
         def _drawdown(s):
-            cum = (1 + s.pct_change().fillna(0)).cumprod()
+            cum = (1 + s.pct_change().clip(-_MAX_DAILY_RET, _MAX_DAILY_RET).fillna(0)).cumprod()
             roll_max = cum.cummax()
             return (cum / roll_max - 1) * 100
 
@@ -982,7 +987,7 @@ def _build_drawdown_chart(prices_data, chart_assets, frontier_weights, show_fron
                 hovertemplate=f'<b>{asset}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.2f}}%<extra></extra>',
             ))
 
-        ret_df = prices_df.pct_change()
+        ret_df = prices_df.pct_change().clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)
         for fname, fcolor in _FC.items():
             if not (show_frontiers or {}).get(fname, False):
                 continue
@@ -1578,6 +1583,55 @@ def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
                   'borderBottom':'1px solid #f0f4fb',
                   'background':'white' if i % 2 == 0 else '#fafcff'})
         rows.append(row)
+
+    # ── Righe portafoglio: P1/P2/P3 creati in Analisi Portafoglio ────────────
+    # Mostrati SOTTO gli asset già all'ingresso (prima di calcolare la frontiera):
+    # spuntandoli si mostra il loro andamento nel grafico sotto la frontiera.
+    # L'indice checkbox F1/F2/F3 è lo slot usato da update_perf_chart; pre-calcolo
+    # i pesi F1/F2/F3 sono già P1/P2/P3 (ripristinati da _clear_stale_frontier).
+    _PORT_ROWS = [('P1', 'F1', '#0066cc', pre_p1, '#f0f6ff'),
+                  ('P2', 'F2', '#2ca02c', pre_p2, '#f0fff4'),
+                  ('P3', 'F3', '#e6550d', pre_p3, '#fff5f0')]
+    port_rows = []
+    for pkey, fidx, pcolor, pw, pbg in _PORT_ROWS:
+        if not pw:
+            continue
+        tot = round(sum(float(x or 0) for x in pw.values()), 1)
+        port_rows.append(html.Div([
+            html.Div(
+                html.Span(f'Portafoglio {pkey}',
+                          style={'fontSize':'8px','color':pcolor,'fontWeight':'700',
+                                 'overflow':'hidden','whiteSpace':'nowrap','textOverflow':'ellipsis'}),
+                style={'width':'25%','height':'28px','display':'flex','alignItems':'center','paddingLeft':'4px'}
+            ),
+            html.Div(
+                dcc.Checklist(
+                    id={'type':'fe-chart-port','index':fidx},
+                    options=[{'label':'','value':fidx}], value=[],
+                    inputStyle={'accentColor': pcolor},
+                    style={'display':'flex','justifyContent':'center'},
+                ),
+                style={'width':'7%','display':'flex','justifyContent':'center','alignItems':'center'}
+            ),
+            html.Div('—', style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'}),
+            html.Div('—', style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'}),
+            html.Div('—', style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'}),
+            html.Div(_w_cell(tot if fidx == 'F1' else None, '#0066cc'),
+                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
+            html.Div(_w_cell(tot if fidx == 'F2' else None, '#2ca02c'),
+                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
+            html.Div(_w_cell(tot if fidx == 'F3' else None, '#e6550d'),
+                     style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
+        ], style={'display':'flex','alignItems':'center','height':'28px',
+                  'borderBottom':'1px solid #e0e8f8', 'background': pbg}))
+    if port_rows:
+        rows.append(html.Div(style={'height':'3px','background':'#ccd9ee','margin':'2px 0'}))
+        rows.append(html.Div(
+            html.Span("Portafogli creati — spunta per confrontarne l'andamento",
+                      style={'fontSize':'7px','color':'#8899bb','fontStyle':'italic'}),
+            style={'padding':'2px 4px','background':'#f8faff','borderBottom':'1px solid #e0e8f8'}))
+        rows.extend(port_rows)
+
     return rows, f'{len(assets)} asset'
 
 
@@ -1722,11 +1776,57 @@ def preview_asset_points(chart_vals, risk, stock_data, rawdata, date_start, date
             hovertemplate=f'<b>{asset}</b><br>{risk_lbl}<br>Rendimento: {ret_a*100:.2f}%<extra></extra>',
         ))
 
+    # ── P1/P2/P3 dal portafoglio come punti (rend./rischio), se esistono ──────
+    # Stessa logica del calcolo: mostra i portafogli creati in Analisi Portafoglio
+    # come punti di confronto anche PRIMA di calcolare la frontiera.
+    _P_COLORS = {'P1': '#0066cc', 'P2': '#2ca02c', 'P3': '#e6550d'}
+    ns_ref = _read_user_json()
+    if ns_ref:
+        try:
+            cov_ref = returns_df.cov() * 252
+            mu_ref  = returns_df.mean() * 252
+        except Exception:
+            cov_ref, mu_ref = None, None
+        for pname, pcolor in _P_COLORS.items():
+            if cov_ref is None:
+                break
+            raw_w = {d: float(v.get(pname) or 0)
+                     for d, v in ns_ref.items() if v.get(pname, 0)}
+            avail_w = {d: w for d, w in raw_w.items() if d in returns_df.columns and w > 0}
+            if not avail_w:
+                continue
+            tot = sum(avail_w.values())
+            if tot <= 0:
+                continue
+            w_norm = {d: w / tot for d, w in avail_w.items()}
+            w_arr  = np.array([w_norm[d] for d in avail_w])
+            assets = list(avail_w.keys())
+            r_p    = float(sum(w_norm[d] * mu_ref[d] for d in assets))
+            cov_sub = cov_ref.loc[assets, assets].values
+            var_p   = float(w_arr @ cov_sub @ w_arr)
+            v_p     = float(np.sqrt(max(var_p, 0)))
+            if _cvar_pct is not None:
+                v_p = _port_cvar(w_arr, returns_df[assets].dropna(), _cvar_pct)
+            hover_lines = '<br>'.join(f'{d}: {w*100:.1f}%' for d, w in w_norm.items())
+            fig.add_trace(go.Scatter(
+                x=[v_p * 100], y=[r_p * 100],
+                mode='markers+text', name=pname,
+                marker=dict(size=14, symbol='diamond', color=pcolor,
+                            line=dict(color='white', width=1.5)),
+                text=[pname], textposition='top center',
+                textfont=dict(size=9, color=pcolor, family='Inter, sans-serif'),
+                showlegend=True,
+                hovertemplate=(f'<b>{pname} (portafoglio)</b><br>'
+                               f'Rischio: {v_p*100:.2f}%<br>'
+                               f'Rendimento: {r_p*100:.2f}%<br>'
+                               f'{hover_lines}<extra></extra>'),
+            ))
+
     if not fig.data:
         return go.Figure().update_layout(
             paper_bgcolor='white', plot_bgcolor='#f8faff',
             font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
-            annotations=[dict(text='Spunta gli asset (📊) per vederli sul grafico, poi clicca Calcola Frontiera',
+            annotations=[dict(text='Spunta gli asset (📊) o crea portafogli, poi clicca Calcola Frontiera',
                               xref='paper', yref='paper', x=0.5, y=0.5,
                               showarrow=False, font=dict(size=13, color='#6b7a99'))])
 

@@ -42,6 +42,11 @@ _PORT_PKL = os.path.normpath(os.path.join(
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 _NU = no_update
 
+# Tetto ai rendimenti giornalieri: oltre ±50%/giorno è un tick corrotto che fa
+# esplodere le metriche. _get_df qui legge sia rendimenti sia prezzi, quindi il
+# clip si applica SOLO alle variabili dei rendimenti (non ai prezzi).
+_MAX_DAILY_RET = 0.5
+
 def _get_df(js):
     if not js:
         return None
@@ -506,6 +511,8 @@ def build_asset_grid(stock_json, selected, p1, p2, p3):
                         style={'padding': '12px', 'color': '#888', 'fontSize': '12px'}), []
     try:
         returns = _get_df(stock_json)
+        if returns is not None:
+            returns = returns.clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)   # tick corrotti
     except Exception as _e:
         print(f'[rendimenti] build_asset_grid error: {traceback.format_exc()}')
         return html.Div(f'Errore nel caricamento dei dati: {type(_e).__name__}: {_e}',
@@ -844,6 +851,8 @@ def compute_performance(n_clicks, selected_items, stock_json, prices_json,
 
     try:
         close_returns   = _get_df(stock_json)
+        if close_returns is not None:
+            close_returns = close_returns.clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)   # tick corrotti
         original_prices = _get_df(prices_json)
     except Exception as e:
         print(f'[rendimenti] compute_performance error: {e}')
