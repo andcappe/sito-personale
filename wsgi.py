@@ -934,6 +934,8 @@ if rendimenti_srv:
     _register_auth(rendimenti_srv)
 if opzioni_srv:
     _register_auth(opzioni_srv)
+if analisitattica_srv:
+    _register_auth(analisitattica_srv)
 if fred_srv:
     _register_auth(fred_srv)
 
