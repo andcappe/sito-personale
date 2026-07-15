@@ -667,6 +667,37 @@ _SENT_TICKERS = {
 }
 
 
+# Serie DERIVATE: non si scaricano, si calcolano dai ticker qui sopra. Sono
+# selezionabili come indice principale e come indice di confronto.
+_SENT_DERIVED = {
+    "VIX9D-VIX": "Differenziale  VIX 9g − VIX 30g",
+    "VIX9D/VIX": "Rapporto  VIX 9g / VIX 30g",
+}
+
+
+def _sent_label(key):
+    """Etichetta di un ticker scaricato o di una serie derivata."""
+    return _SENT_TICKERS.get(key) or _SENT_DERIVED.get(key) or key
+
+
+def _add_derived(px):
+    """Aggiunge a px le serie derivate della struttura a termine breve."""
+    if "^VIX9D" in px.columns and "^VIX" in px.columns:
+        px = px.copy()
+        px["VIX9D-VIX"] = px["^VIX9D"] - px["^VIX"]
+        px["VIX9D/VIX"] = px["^VIX9D"] / px["^VIX"].replace(0, np.nan)
+    return px
+
+
+def _attraversa_zero(s):
+    """True se la serie cambia segno o passa vicinissima allo zero: in quel caso
+    rapporti e rebase % su di essa esplodono e non vanno calcolati."""
+    v = np.asarray(s.dropna().values, dtype=float)
+    if v.size == 0:
+        return True
+    return bool(np.nanmin(v) <= 0 <= np.nanmax(v))
+
+
 def download_sentiment():
     """2 anni EOD dei ticker macro/vol. (Il Put/Call CBOE via CSV pubblico non è
     più disponibile: si aggancia qui su px['Equity_PC'] se colleghi una sorgente.)"""
@@ -816,29 +847,35 @@ def _add_ratio_diff(fig, px, ticker, compare, row=None, col=None):
     """Per ogni serie di confronto: rapporto principale/confronto (asse sx, tinta unita)
     e differenziale principale − confronto (asse dx, tratteggiato, stesso colore).
     Ritorna False se non c'è nulla da disegnare."""
-    label = _SENT_TICKERS.get(ticker, ticker)
+    label = _sent_label(ticker)
     ratios, diffs = [], []
     for j, tk in enumerate(compare):
         sub = px[[ticker, tk]].dropna()
         if sub.empty:
             continue
-        ratio = sub[ticker] / sub[tk].replace(0, np.nan)
-        diff  = sub[ticker] - sub[tk]
         c = _CMP_PAL[j % len(_CMP_PAL)]
-        lbl = _SENT_TICKERS.get(tk, tk)
-        fig.add_trace(go.Scatter(x=ratio.index, y=ratio.values,
-            name=f"Rapporto  {label} / {lbl}", line=dict(color=c, width=1.8),
-            hovertemplate="Rapporto: %{y:.3f}<br>%{x|%d/%m/%y}<extra></extra>"),
-            row=row, col=col, secondary_y=False)
+        lbl = _sent_label(tk)
+        diff = sub[ticker] - sub[tk]
         fig.add_trace(go.Scatter(x=diff.index, y=diff.values,
             name=f"Differenziale  {label} − {lbl}",
             line=dict(color=c, width=1.2, dash='dot'),
             hovertemplate="Differenziale: %{y:+.2f}<br>%{x|%d/%m/%y}<extra></extra>"),
             row=row, col=col, secondary_y=True)
-        ratios.append(ratio.dropna().values)
         diffs.append(diff.dropna().values)
-    if not ratios:
+        # Il rapporto si calcola solo se il denominatore non passa per lo zero:
+        # su una serie come il differenziale VIX 9g−30g esploderebbe a ±infinito.
+        if _attraversa_zero(sub[tk]):
+            continue
+        ratio = sub[ticker] / sub[tk]
+        fig.add_trace(go.Scatter(x=ratio.index, y=ratio.values,
+            name=f"Rapporto  {label} / {lbl}", line=dict(color=c, width=1.8),
+            hovertemplate="Rapporto: %{y:.3f}<br>%{x|%d/%m/%y}<extra></extra>"),
+            row=row, col=col, secondary_y=False)
+        ratios.append(ratio.dropna().values)
+    if not diffs:
         return False
+    if not ratios:                     # nessun rapporto calcolabile: solo differenziali
+        ratios = [np.array([1.0])]
     _centra_soglie(fig, ratios, diffs,
                    "1,00 / 0 — sopra: il principale sta più in alto del confronto",
                    row=row, col=col)
@@ -929,6 +966,8 @@ _IND_TYPES = {
     'rsi':    'RSI',
     'macd':   'MACD',
     'stoch':  'Stocastico',
+    'ivrank': 'IV Rank',
+    'ivpct':  'IV Percentile',
     'roc':    'Momentum ROC',
     'zscore': 'Z-Score',
     'perc':   'Percentile',
@@ -937,8 +976,41 @@ _IND_TYPES = {
     'dist':   'Distanza da SMA %',
     'dd':     'Drawdown %',
 }
-_IND_DEFAULT_PERIOD = {'rsi': 14, 'macd': 12, 'stoch': 14, 'roc': 20, 'zscore': 252,
+_IND_DEFAULT_PERIOD = {'rsi': 14, 'macd': 12, 'stoch': 14, 'ivrank': 252, 'ivpct': 252,
+                       'roc': 20, 'zscore': 252,
                        'perc': 252, 'bb': 20, 'vol': 20, 'dist': 50, 'dd': 252}
+
+# Zone dell'IV Rank / IV Percentile lette dal punto di vista del VENDITORE di premio:
+# in alto i premi sono cari (si vende), in basso sono compressi (si compra). È il
+# rovescio della lettura azionaria "alto = ipercomprato = male" — su una misura di
+# volatilità implicita quella lettura sarebbe fuorviante.
+_IV_ZONE = [
+    (75.0, '#137333', 'Premi cari → vendi premio'),
+    (50.0, '#999999', 'Mediana'),
+    (25.0, '#c5221f', 'Premi compressi → compra opzioni'),
+]
+
+
+def _iv_rank(s, n=252):
+    """IV Rank: dove sta il valore di oggi nel RANGE min–max del periodo (0–100).
+    Formula: (oggi − min) / (max − min) × 100."""
+    lo, hi = s.rolling(n).min(), s.rolling(n).max()
+    return (s - lo) / (hi - lo).replace(0, np.nan) * 100
+
+
+def _iv_percentile(s, n=252):
+    """IV Percentile: quante sedute del periodo hanno avuto un valore INFERIORE a
+    quello di oggi, in % (0–100). Diverso dall'IV Rank: non guarda solo gli estremi,
+    guarda tutta la distribuzione — un singolo picco storico gonfia il range e
+    schiaccia l'IV Rank, mentre l'IV Percentile resta rappresentativo."""
+    return s.rolling(n).apply(lambda w: (w < w[-1]).mean() * 100, raw=True)
+
+
+def _add_iv_zones(fig, row, col):
+    for y, color, desc in _IV_ZONE:
+        fig.add_hline(y=y, line_color=color, line_dash='dot', line_width=1,
+                      annotation_text=f'{y:.0f} · {desc}', annotation_position='top left',
+                      annotation_font=dict(size=8, color=color), row=row, col=col)
 
 
 def _rsi(s, n=14):
@@ -963,9 +1035,11 @@ def _stoch(s, n=14, d=3):
 _CMP_PAL = ["#c5221f", "#137333", "#e65100", "#6a1b9a", "#00838f", "#5d4037"]
 
 
-def _sent_detail_chart(px, ticker, slots, compare=None, scala='abs'):
+def _sent_detail_chart(px, ticker, slots, compare=None, scala='abs', smooth=1):
     """Grafico grande di un indice + un pannello per ogni slot (tipo, periodo).
     slots = lista di (tipo, periodo). compare = altri indici da sovrapporre.
+    smooth = giorni della media mobile di smoothing sulle serie del pannello
+    principale (1 = nessuno smoothing, serie grezze).
     scala:
       'abs'     = valori assoluti come scaricati (confronto sull'asse destro);
       'pct'     = variazione % dal 1° giorno comune, tutti sullo stesso asse;
@@ -983,8 +1057,19 @@ def _sent_detail_chart(px, ticker, slots, compare=None, scala='abs'):
         manca_confronto = False
     pct     = (scala == 'pct')
     rapdiff = (scala == 'rapdiff')
-    s = px[ticker].dropna()
-    label = _SENT_TICKERS.get(ticker, ticker)
+    # Smoothing: media mobile sulle SERIE degli indici del pannello principale.
+    # Gli indicatori sotto restano sui dati grezzi (`s`): su una serie smussata
+    # IV Rank, stocastico & co. sottostimerebbero proprio gli estremi che servono.
+    try:
+        k = int(smooth or 1)
+    except (TypeError, ValueError):
+        k = 1
+    k = max(1, min(k, 250))
+    pxs = px.rolling(k, min_periods=1).mean() if k > 1 else px
+    s = px[ticker].dropna()                 # grezza → indicatori
+    s_top = pxs[ticker].dropna()            # smussata → pannello principale
+    label = _sent_label(ticker)
+    suffisso = f"  ·  media mobile {k} gg" if k > 1 else ""
     nsub = len(slots)
     heights = ([0.55] + [0.45 / nsub] * nsub) if nsub else [1.0]
     # Doppio asse quando le due grandezze non condividono la scala: valori assoluti
@@ -1001,37 +1086,55 @@ def _sent_detail_chart(px, ticker, slots, compare=None, scala='abs'):
                      if compare else label)
         if manca_confronto:
             top_title += "  ·  scegli un indice di confronto per rapporto e differenziale"
+    top_title += suffisso
     titles = [top_title] + [f"{_IND_TYPES[t]} ({p})" for t, p in slots]
     specs = [[{"secondary_y": due_assi}]] + [[{"secondary_y": False}]] * nsub
     fig = make_subplots(rows=1 + nsub, cols=1, shared_xaxes=True, vertical_spacing=0.045,
                         row_heights=heights, subplot_titles=titles, specs=specs)
 
     if rapdiff:
-        _add_ratio_diff(fig, px, ticker, compare, row=1, col=1)
+        _add_ratio_diff(fig, pxs, ticker, compare, row=1, col=1)
     elif pct:
         # Rebase a 0% dal 1° giorno in cui TUTTE le serie mostrate hanno un dato.
         cols = [ticker] + compare
-        sub = px[cols].dropna()
+        sub = pxs[cols].dropna()
         if not sub.empty:
-            norm = (sub / sub.iloc[0] - 1) * 100
-            fig.add_trace(go.Scatter(x=norm.index, y=norm[ticker].values, name=label,
-                line=dict(color='#1a3a5c', width=2.3)), row=1, col=1)
-            for j, tk in enumerate(compare):
-                fig.add_trace(go.Scatter(x=norm.index, y=norm[tk].values,
-                    name=_SENT_TICKERS.get(tk, tk),
-                    line=dict(color=_CMP_PAL[j % len(_CMP_PAL)], width=1.5)), row=1, col=1)
+            # Una serie che attraversa lo zero (es. il differenziale VIX 9g−30g) non
+            # è ribasabile in %: si dividerebbe per un valore vicino a zero e la curva
+            # schizzerebbe a migliaia di punti percentuali. La si esclude e lo si dice.
+            plottabili = [c for c in cols if not _attraversa_zero(sub[c])]
+            escluse    = [c for c in cols if c not in plottabili]
+            norm = (sub[plottabili] / sub[plottabili].iloc[0] - 1) * 100
+            for j, tk in enumerate(plottabili):
+                principale = (tk == ticker)
+                fig.add_trace(go.Scatter(x=norm.index, y=norm[tk].values, name=_sent_label(tk),
+                    line=dict(color='#1a3a5c' if principale
+                              else _CMP_PAL[(j - 1) % len(_CMP_PAL)],
+                              width=2.3 if principale else 1.5)), row=1, col=1)
             fig.add_hline(y=0, line_color='#999', line_dash='dot', line_width=1, row=1, col=1)
             fig.update_yaxes(title_text='Variazione %', title_font=dict(size=9), row=1, col=1)
+            if escluse:
+                fig.add_annotation(
+                    text='Escluse dal rebase % (attraversano lo zero): '
+                         + ', '.join(_sent_label(c) for c in escluse)
+                         + ' — usa Valore assoluto',
+                    xref='x domain', yref='y domain', x=0.01, y=0.02, showarrow=False,
+                    font=dict(size=9, color='#c5221f'), align='left', row=1, col=1)
     else:
-        # Valori assoluti, come scaricati.
-        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode='lines', name=label,
+        # Valori assoluti, come scaricati (smussati se hai impostato una media).
+        if k > 1:
+            # la serie grezza resta sotto, in trasparenza: si vede cosa toglie la media
+            fig.add_trace(go.Scatter(x=s.index, y=s.values, mode='lines', name=f'{label} (grezzo)',
+                line=dict(color='#9fb0c6', width=0.8)), row=1, col=1, secondary_y=False)
+        fig.add_trace(go.Scatter(x=s_top.index, y=s_top.values, mode='lines',
+            name=label + (f' · media {k}gg' if k > 1 else ''),
             line=dict(color='#1a3a5c', width=1.7 if not compare else 2.3)),
             row=1, col=1, secondary_y=False)
         if compare:
             for j, tk in enumerate(compare):
-                c = px[tk].dropna()
+                c = pxs[tk].dropna()
                 fig.add_trace(go.Scatter(x=c.index, y=c.values,
-                    name=_SENT_TICKERS.get(tk, tk),
+                    name=_sent_label(tk),
                     line=dict(color=_CMP_PAL[j % len(_CMP_PAL)], width=1.5)),
                     row=1, col=1, secondary_y=True)
             fig.update_yaxes(title_text=label, title_font=dict(size=9),
@@ -1039,9 +1142,9 @@ def _sent_detail_chart(px, ticker, slots, compare=None, scala='abs'):
             fig.update_yaxes(title_text='Confronto (valore assoluto)', title_font=dict(size=9),
                              row=1, col=1, secondary_y=True)
         else:
-            fig.add_trace(go.Scatter(x=s.index, y=s.rolling(50).mean(), name='SMA 50',
+            fig.add_trace(go.Scatter(x=s_top.index, y=s_top.rolling(50).mean(), name='SMA 50',
                 line=dict(color='#f0a500', width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=s.index, y=s.rolling(200).mean(), name='SMA 200',
+            fig.add_trace(go.Scatter(x=s_top.index, y=s_top.rolling(200).mean(), name='SMA 200',
                 line=dict(color='#c5221f', width=1, dash='dot')), row=1, col=1)
         # Soglie di regime: solo sugli indici in scala VIX e solo qui, dove l'asse
         # è in scala reale (in variazione % i livelli assoluti non varrebbero).
@@ -1063,6 +1166,15 @@ def _sent_detail_chart(px, ticker, slots, compare=None, scala='abs'):
                 showlegend=False), row=r, col=1)
             fig.add_hline(y=80, line_color='#c5221f', line_dash='dot', line_width=1, row=r, col=1)
             fig.add_hline(y=20, line_color='#137333', line_dash='dot', line_width=1, row=r, col=1)
+        elif kind in ('ivrank', 'ivpct'):
+            v = _iv_rank(s, period) if kind == 'ivrank' else _iv_percentile(s, period)
+            fig.add_trace(go.Scatter(x=v.index, y=v.values,
+                line=dict(color='#00695c' if kind == 'ivrank' else '#6a1b9a', width=1.3),
+                fill='tozeroy',
+                fillcolor='rgba(0,105,92,0.06)' if kind == 'ivrank' else 'rgba(106,27,154,0.06)',
+                showlegend=False), row=r, col=1)
+            _add_iv_zones(fig, r, 1)
+            fig.update_yaxes(range=[0, 100], row=r, col=1)
         elif kind == 'macd':
             macd, sg = _macd(s, period, round(period * 26 / 12), max(2, round(period * 9 / 12)))
             fig.add_trace(go.Bar(x=(macd - sg).index, y=(macd - sg).values,
@@ -1414,6 +1526,12 @@ app.layout = html.Div([
                                     inputStyle={'marginRight': '3px'},
                                     labelStyle={'marginRight': '10px', 'cursor': 'pointer'},
                                     style={'fontSize': '11px'}),
+                                _lbl('Smoothing (gg):'),
+                                dcc.Input(id='opt-sent-smooth', type='number', value=1,
+                                          min=1, max=250, step=1, debounce=True,
+                                          style={'width': '60px', 'fontSize': '11px',
+                                                 'padding': '3px 5px', 'border': '1px solid #aaa',
+                                                 'borderRadius': '3px'}),
                                 _lbl('Indicatori (tipo · periodo):'),
                                 _sent_slot(1, 'rsi', 14),
                                 _sent_slot(2, 'macd', 12),
@@ -1452,12 +1570,15 @@ app.layout = html.Div([
 )
 def _load_sentiment(_n, cur_sel):
     try:
-        px = download_sentiment()
+        px = _add_derived(download_sentiment())
         fig = _build_sentiment_charts(px)
         term = _vix_term_chart(px)
         tbl = _build_sentiment_table(px)
-        avail = [k for k in _SENT_TICKERS if k in px.columns and not px[k].dropna().empty]
-        opts = [{'label': _SENT_TICKERS[k], 'value': k} for k in avail]
+        # Nei menu: prima gli indici scaricati, poi le serie derivate (differenziale
+        # e rapporto della struttura a termine), utilizzabili anche come confronto.
+        avail = [k for k in list(_SENT_TICKERS) + list(_SENT_DERIVED)
+                 if k in px.columns and not px[k].dropna().empty]
+        opts = [{'label': _sent_label(k), 'value': k} for k in avail]
         sel = cur_sel if cur_sel in avail else (avail[0] if avail else None)
         last = px.dropna(how='all').index[-1].strftime('%d/%m/%Y')
         return (fig, term, px.to_json(orient='split', date_format='iso'),
@@ -1473,20 +1594,21 @@ def _load_sentiment(_n, cur_sel):
     Input('opt-sent-select', 'value'),
     Input('opt-sent-compare', 'value'),
     Input('opt-sent-scala', 'value'),
+    Input('opt-sent-smooth', 'value'),
     Input('opt-sent-t1', 'value'), Input('opt-sent-p1', 'value'),
     Input('opt-sent-t2', 'value'), Input('opt-sent-p2', 'value'),
     Input('opt-sent-t3', 'value'), Input('opt-sent-p3', 'value'),
     State('opt-sent-store', 'data'),
     prevent_initial_call=True,
 )
-def _sent_detail(ticker, compare, scala, t1, p1, t2, p2, t3, p3, data):
+def _sent_detail(ticker, compare, scala, smooth, t1, p1, t2, p2, t3, p3, data):
     if not data or not ticker:
         raise PreventUpdate
     slots = [(t, p) for t, p in ((t1, p1), (t2, p2), (t3, p3)) if t and t != 'none' and p]
     import io as _io
     px = pd.read_json(_io.StringIO(data), orient='split')
     px.index = pd.to_datetime(px.index)
-    return _sent_detail_chart(px, ticker, slots, compare, scala or 'abs')
+    return _sent_detail_chart(px, ticker, slots, compare, scala or 'abs', smooth or 1)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SEZIONE 6 — CALLBACKS
