@@ -807,6 +807,10 @@ _VIX_LEVELS = [
     (40.0,  "#c5221f", "Panico — stress di mercato"),
 ]
 _VIX_SCALE = {"^VIX9D", "^VIX", "^VIX3M"}
+# Tutti gli indici di volatilità implicita. Su questi la lettura degli oscillatori
+# è ROVESCIATA rispetto all'azionario: valore alto = premi gonfiati = zona del
+# VENDITORE di opzioni (verde), valore basso = premi compressi (rosso).
+_VOL_TICKERS = {"^VIX", "^VVIX", "^SKEW", "^VIX9D", "^VIX3M", "^VXN", "^RVX"}
 
 
 def _add_vix_levels(fig, row=None, col=None, brief=False, secondary_y=None):
@@ -935,11 +939,10 @@ def _build_sentiment_charts(px):
     fig = make_subplots(rows=rows_n, cols=cols,
                         subplot_titles=[lbl for _, lbl in series],
                         vertical_spacing=0.09, horizontal_spacing=0.06)
-    _vol = {"^VIX", "^VVIX", "^SKEW", "^VIX9D", "^VIX3M", "^VXN", "^RVX"}
     for i, (key, lbl) in enumerate(series):
         r, c = i // cols + 1, i % cols + 1
         s = px[key].dropna()
-        is_vol = key in _vol
+        is_vol = key in _VOL_TICKERS
         fig.add_trace(go.Scatter(
             x=s.index, y=s.values, mode="lines",
             line=dict(color="#c5221f" if is_vol else "#1a3a5c", width=1.4),
@@ -1161,11 +1164,17 @@ def _sent_detail_chart(px, ticker, slots, compare=None, scala='abs', smooth=1):
         elif kind == 'stoch':
             k, d_ = _stoch(s, period)
             fig.add_trace(go.Scatter(x=k.index, y=k.values, line=dict(color='#1565c0', width=1.2),
-                showlegend=False), row=r, col=1)
+                name='%K', showlegend=False), row=r, col=1)
             fig.add_trace(go.Scatter(x=d_.index, y=d_.values, line=dict(color='#e65100', width=1),
-                showlegend=False), row=r, col=1)
-            fig.add_hline(y=80, line_color='#c5221f', line_dash='dot', line_width=1, row=r, col=1)
-            fig.add_hline(y=20, line_color='#137333', line_dash='dot', line_width=1, row=r, col=1)
+                name='%D', showlegend=False), row=r, col=1)
+            # Colori delle bande per SIGNIFICATO, non per posizione: sul VIX & co. la
+            # zona alta è "premi cari → vendi" (verde), non "ipercomprato" (rosso).
+            if ticker in _VOL_TICKERS:
+                hi_col, lo_col = '#137333', '#c5221f'      # 80 vendi vol, 20 compra
+            else:
+                hi_col, lo_col = '#c5221f', '#137333'      # 80 ipercomprato, 20 ipervenduto
+            fig.add_hline(y=80, line_color=hi_col, line_dash='dot', line_width=1, row=r, col=1)
+            fig.add_hline(y=20, line_color=lo_col, line_dash='dot', line_width=1, row=r, col=1)
         elif kind in ('ivrank', 'ivpct'):
             v = _iv_rank(s, period) if kind == 'ivrank' else _iv_percentile(s, period)
             fig.add_trace(go.Scatter(x=v.index, y=v.values,

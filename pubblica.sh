@@ -1,39 +1,50 @@
 #!/bin/bash
-# Pubblica tutte le modifiche su DigitalOcean e GitHub
+# Pubblica il sito su DigitalOcean.
+# Deploy = commit + push del repo "Sito personale" (origin = andcappe/sito-personale),
+# che DigitalOcean App Platform ricostruisce in automatico ad ogni push su main.
 # Uso: ./pubblica.sh "descrizione delle modifiche"
+#
+# NOTA: le vecchie versioni di questo script pubblicavano il repo ANNIDATO in
+# portafoglio/ (andcappe/analisi-portafoglio), che è il deploy legacy di quando il
+# sito era solo la dashboard portafoglio: così le altre sei dashboard non arrivavano
+# mai in produzione. Ora si pubblica il repo giusto e c'è una guardia che lo verifica.
 
 set -e
 
 MSG="${1:-Aggiornamento}"
-PROFILO_DIR="$(cd "$(dirname "$0")/profilo" && pwd)"
-PORTAFOGLIO_DIR="$(cd "$(dirname "$0")/portafoglio" && pwd)"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
 
-# Sincronizza sempre profilo.html
-cp "$PROFILO_DIR/index.html" "$PORTAFOGLIO_DIR/profilo.html"
+# ── Guardia: dev'essere il repo del sito, non il repo legacy ─────────────────
+ORIGIN="$(git remote get-url origin 2>/dev/null || echo '')"
+case "$ORIGIN" in
+  *sito-personale*) : ;;
+  *)
+    echo "✖ Abort: origin non è 'sito-personale' ma:"
+    echo "    $ORIGIN"
+    echo "  Lancia lo script dalla cartella 'SITO_WEB/Sito personale/'."
+    exit 1 ;;
+esac
 
-# ── Repo portafoglio (DigitalOcean) ─────────────────────────────────────────
-echo "▶ Pubblico su DigitalOcean..."
-cd "$PORTAFOGLIO_DIR"
-git add -A -- ':!sessions/' ':!avvia.sh'
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+
+# Aggiorna la copia di profilo.html usata dal deploy legacy standalone (innocua qui,
+# tiene solo il file allineato alla homepage vera in profilo/index.html).
+cp "$ROOT/profilo/index.html" "$ROOT/portafoglio/profilo.html"
+
+# I market_data*.pkl sono cache riscritta dallo scheduler notturno: restano fuori dai
+# commit automatici (su DO li ripristina R2). Per aggiornare i dati seed, committali a
+# mano prima di lanciare lo script.
+echo "▶ Pubblico su andreacappelletti.app (repo sito-personale, branch $BRANCH)..."
+git add -A -- ':!portafoglio/sessions/market_data*.pkl' ':!sessions/'
+
 if git diff --cached --quiet; then
-  echo "  Nessuna modifica."
+  echo "  Nessuna modifica da pubblicare."
 else
   git commit -m "$MSG"
-  git push
-  echo "  ✓ Deploy avviato su andreacappelletti.app"
-fi
-
-# ── Repo profilo (GitHub Pages) ─────────────────────────────────────────────
-echo "▶ Pubblico sito personale..."
-cd "$PROFILO_DIR"
-git add index.html
-if git diff --cached --quiet; then
-  echo "  Nessuna modifica al sito."
-else
-  git commit -m "$MSG"
-  git push
-  echo "  ✓ Sito personale aggiornato."
+  git push origin "$BRANCH"
+  echo "  ✓ Push effettuato: DigitalOcean sta ricostruendo (un paio di minuti)."
 fi
 
 echo ""
-echo "✅ Tutto pubblicato!"
+echo "✅ Fatto. Verifica su https://andreacappelletti.app/ quando il build è finito."
