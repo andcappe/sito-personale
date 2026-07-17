@@ -342,6 +342,33 @@ def _buyhold_cum(rets_df, weights):
     val = sum((w0[a] / s) * g[a] for a in w0)       # valore del portafoglio (Series)
     return val / val.iloc[0] - 1                     # ribasa a 0 a inizio finestra
 
+def _rebalanced_cum(rets_df, weights):
+    """Curva cumulata con RIBILANCIAMENTO ANNUALE. I pesi indicati (normalizzati)
+    sono i pesi TARGET: vengono ripristinati all'inizio di ogni anno solare, ed entro
+    l'anno driftano coi rendimenti (buy&hold intra-anno). A differenza di _buyhold_cum,
+    che lascia i pesi driftare per tutta la finestra, qui a fine anno si torna ai target.
+    rets_df: rendimenti giornalieri nella finestra; weights: {asset: peso%}.
+    Ritorna una Series cumulata ribasata a 0 all'inizio, oppure None."""
+    tot = sum(w for w in weights.values() if w and w > 0)
+    if tot <= 0 or rets_df is None or rets_df.empty:
+        return None
+    active = [a for a, w in weights.items()
+              if w and w > 0 and a in rets_df.columns]
+    if not active:
+        return None
+    wt = pd.Series({a: weights[a] / tot for a in active})   # pesi target normalizzati
+    r  = rets_df[active].fillna(0.0)
+    port_ret = pd.Series(0.0, index=r.index)
+    for _, sub in r.groupby(r.index.year):
+        growth      = (1 + sub).cumprod()
+        prev_growth = growth.shift(1)
+        prev_growth.iloc[0] = 1.0                   # inizio anno: pesi = target
+        num   = prev_growth.mul(wt, axis=1)         # peso (non normalizzato) a inizio giornata
+        w_day = num.div(num.sum(axis=1), axis=0)    # pesi correnti driftati, normalizzati
+        port_ret.loc[sub.index] = (w_day * sub).sum(axis=1)
+    cum = (1 + port_ret).cumprod()
+    return cum / cum.iloc[0] - 1                     # ribasa a 0 a inizio finestra
+
 def calculate_historical_cvar(returns_series, window, tail_pct=0.05):
     # Rendimenti composti rolling a N giorni
     n_day_ret = (1 + returns_series).rolling(window, min_periods=window).apply(np.prod, raw=True) - 1
@@ -2424,11 +2451,21 @@ def get_portfolio_analysis_tab(options_tickers):
                                        'font-weight': 'bold', 'font-size': '10px',
                                        'box-shadow': '0 2px 6px rgba(192,57,43,0.4)'}),
                     html.Div([
+                        html.Label('Ribil. annuale:',
+                                   style={'font-size': '9px', 'font-weight': 'bold',
+                                          'color': '#1a3a5c', 'margin-right': '4px',
+                                          'white-space': 'nowrap'},
+                                   title='I portafogli sono Buy & Hold di default; '
+                                         'spunta un portafoglio per ribilanciarne i pesi '
+                                         'ai target all\'inizio di ogni anno.'),
                         dcc.Checklist(
-                            id='buyhold-checkbox',
-                            options=[{'label': ' Buy & Hold', 'value': 'bh'}],
-                            value=[],
-                            inputStyle={'margin-right': '4px'},
+                            id='rebal-checkbox',
+                            options=[{'label': ' P1', 'value': 'rb1'},
+                                     {'label': ' P2', 'value': 'rb2'},
+                                     {'label': ' P3', 'value': 'rb3'}],
+                            value=[], inline=True,
+                            inputStyle={'margin-right': '3px'},
+                            labelStyle={'margin-right': '8px'},
                             style={'font-size': '10px', 'font-weight': 'bold',
                                    'color': '#1a3a5c', 'white-space': 'nowrap'},
                         ),
@@ -5634,7 +5671,7 @@ def sync_date_range(stock_data, start_date, end_date):
     State('insufficient-data-store', 'data'),
     State('selected-column',         'value'),
     State('stock-data',              'data'),
-    State('buyhold-checkbox',        'value'),
+    State('rebal-checkbox',          'value'),
     prevent_initial_call=True,
 )
 def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_end, date_range, selected_assets,
@@ -5643,7 +5680,7 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
                  all_ir_checkbox_values, all_sharpe_checkbox_values, all_tev_checkbox_values,
                  all_dd_checkbox_values, all_vol_checkbox_values,
                  all_var90_checkbox_values, all_var95_checkbox_values, vol_window,
-                 insufficient_data, selected_column, stock_data, buyhold_value):
+                 insufficient_data, selected_column, stock_data, rebal_value):
 
     ctx = callback_context
     if not ctx.triggered:
@@ -5805,7 +5842,9 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
     else:
         color_index = 0
 
-    _bh_on = bool(buyhold_value)
+    # Portafogli con ribilanciamento annuale attivo (spunta per-portafoglio): {1,2,3}.
+    # Senza spunta il portafoglio è Buy & Hold (comportamento STANDARD della curva).
+    _rebal_set = {int(v[-1]) for v in (rebal_value or []) if v and v[-1].isdigit()}
     for col in selected_assets:
         if col in df_with_portfolios.columns and col != benchmark_col:
             series = df_with_portfolios[col]
@@ -5818,7 +5857,11 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
                     first_valid = filtered_df[active].dropna(how='any').index.min()
                     if pd.notna(first_valid):
                         series = series.loc[first_valid:]
-                        if _bh_on:   # Buy & Hold: curva sui pesi scontati indietro (metodo B)
+                        if pnum in _rebal_set:   # Ribilanciamento annuale (opzione spuntata)
+                            bh_cum = _rebalanced_cum(
+                                filtered_df.loc[first_valid:, active],
+                                {a: w_dict[a] for a in active})
+                        else:                    # STANDARD: Buy & Hold (pesi scontati indietro, metodo B)
                             bh_cum = _buyhold_cum(
                                 filtered_df.loc[first_valid:, active],
                                 {a: w_dict[a] for a in active})
