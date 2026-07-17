@@ -205,16 +205,17 @@ def eurostat_get(dataset: str, params: dict, geo: str) -> pd.Series | None:
         return None
 
 
-def eurostat_hicp_extended(geo: str) -> pd.Series | None:
+def eurostat_hicp_extended(geo: str, indic: str = "TOTAL") -> pd.Series | None:
     """
     Scarica HICP indice da ei_cphi_m (flash estimate) — aggiornato fino al mese corrente.
-    Usato per estendere prc_hicp_midx che ha ~1 mese di ritardo.
-    Restituisce indice ricampionato su base 2015=100 per compatibilità.
+    Usato per estendere prc_hicp_midx che si è fermato a fine 2025 (base 2025).
+    indic: "TOTAL" = All Items, "TOT_X_NRG_FOOD" = Core (ex energia/alimentari).
+    Restituisce indice su base 2025=100 (va riscalato su 2015=100 dal chiamante).
     """
     base = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data"
     # Prima prova EA20, poi EA19
     for g in [geo, "EA20", "EA19"]:
-        url = f"{base}/ei_cphi_m?indic=TOTAL&unit=HICP2025&geo={g}&lang=en"
+        url = f"{base}/ei_cphi_m?indic={indic}&unit=HICP2025&geo={g}&lang=en"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "EurostatDash/1.0"})
             with urllib.request.urlopen(req, timeout=20) as r:
@@ -241,6 +242,36 @@ def eurostat_hicp_extended(geo: str) -> pd.Series | None:
         except Exception:
             continue
     return None
+
+
+def hicp_esteso(geo: str, coicop: str = "CP00", indic: str = "TOTAL",
+                label: str = "HICP") -> pd.Series | None:
+    """HICP da prc_hicp_midx (base 2015=100, definitivo) esteso con il flash ei_cphi_m
+    per i mesi più recenti. coicop/indic identificano la stessa serie nei due dataset:
+    "CP00"/"TOTAL" = All Items, "TOT_X_NRG_FOOD"/"TOT_X_NRG_FOOD" = Core.
+
+    Serve perché prc_hicp_midx unit=I15 si è di fatto FERMATO a fine 2025 con il
+    passaggio di Eurostat alla base 2025=100: da solo lascia l'inflazione EUR indietro
+    di mesi. Il flash è su base 2025=100 e viene riscalato sul periodo di
+    sovrapposizione, così la serie resta continua in base 2015=100. Stesso raccordo
+    già usato nella sezione shock/Phillips (curva IS-PC): tenerli allineati."""
+    hicp = eurostat_get("prc_hicp_midx", {"coicop": coicop, "unit": "I15"}, geo)
+    if hicp is None and geo not in ("EA20", "EA19"):
+        hicp = eurostat_get("prc_hicp_midx", {"coicop": coicop, "unit": "I15"}, "EA20")
+    flash = eurostat_hicp_extended(geo, indic)
+    if flash is not None and hicp is not None:
+        overlap = hicp.index.intersection(flash.index)
+        if len(overlap) >= 6:
+            ratio = hicp.reindex(overlap).mean() / flash.reindex(overlap).mean()
+            flash_scaled = flash * ratio
+            new_idx = flash_scaled.index[flash_scaled.index > hicp.index.max()]
+            if len(new_idx):
+                hicp = pd.concat([hicp, flash_scaled.reindex(new_idx)]).sort_index()
+                print(f"    ✓ {label} esteso con flash fino a "
+                      f"{hicp.index.max().strftime('%Y-%m')}")
+    elif flash is not None and hicp is None:
+        hicp = flash
+    return hicp
 
 
 def build_eurostat_dataframe(geo: str) -> pd.DataFrame:
@@ -308,8 +339,8 @@ def build_monetary_eur_df(geo: str, api_key: str) -> pd.DataFrame:
 
     # ── Serie Eurostat (HICP + PIL) ───────────────────────────────────────────
     print(f"  ▶ EUR Monetary — Eurostat [{geo}]...")
-    hicp_all  = eurostat_get("prc_hicp_midx", {"coicop": "CP00",            "unit": "I15"}, geo)
-    hicp_core = eurostat_get("prc_hicp_midx", {"coicop": "TOT_X_NRG_FOOD", "unit": "I15"}, geo)
+    hicp_all  = hicp_esteso(geo, "CP00", "TOTAL", "HICP All Items")   # + flash ei_cphi_m
+    hicp_core = hicp_esteso(geo, "TOT_X_NRG_FOOD", "TOT_X_NRG_FOOD", "HICP Core")
     pil_r_raw = eurostat_get("namq_10_gdp",   {"na_item": "B1GQ", "unit": "CLV15_MEUR", "s_adj": "SCA"}, geo)
     pil_n_raw = eurostat_get("namq_10_gdp",   {"na_item": "B1GQ", "unit": "CP_MEUR",    "s_adj": "SCA"}, geo)
 
