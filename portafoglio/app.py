@@ -116,11 +116,19 @@ _FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
 _FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES', 'VALUTE']
 _PERSONALE_OPT = {'label': '👤 Personale', 'value': '__personale__'}
 
+def _dataset_xlsx_paths():
+    """Path dei .xlsx dei dataset in Files/, esclusi i file di lock temporanei (~$)
+    che Excel crea quando un foglio è aperto: non sono dataset validi e vanno saltati
+    ovunque si iterino i file (elenco dropdown, download iniziale, scheduler)."""
+    if not _FILES_DIR.exists():
+        return []
+    return sorted(f for f in _FILES_DIR.glob('*.xlsx') if not f.name.startswith('~$'))
+
 def _list_files():
     """Restituisce lista di opzioni dcc.Dropdown dai .xlsx in Files/."""
-    if not _FILES_DIR.exists():
+    files = _dataset_xlsx_paths()
+    if not files:
         return [{'label': 'ETF', 'value': 'ETF.xlsx'}]
-    files = [f for f in _FILES_DIR.glob('*.xlsx') if not f.name.startswith('~$')]
     files.sort(key=lambda f: _FILE_ORDER.index(f.stem.upper()) if f.stem.upper() in _FILE_ORDER else 99)
     return [{'label': f.stem, 'value': f.name} for f in files] or \
            [{'label': 'ETF', 'value': 'ETF.xlsx'}]
@@ -5174,7 +5182,11 @@ def toggle_update_hint(stock_data, update_clicks):
     Output('weights-grid-container', 'children'),
     Output('asset-count-display',    'children'),
     Input('update-portfolio-button', 'n_clicks'),
-    State('stock-data',    'data'),
+    # stock-data è Input: così alla PRIMA apertura la lista si costruisce una volta
+    # sola, quando update_output carica i dati (vedi PreventUpdate sotto). Al RITORNO
+    # da un'altra tab lo store riparte vuoto ma la memoria (_DL_BUFFER) è piena, e la
+    # lista si ricostruisce da lì all'init (prevent_initial_call=False).
+    Input('stock-data',    'data'),
     State('asset-checklist', 'data'),
     State({'type': 'graph-select-checkbox',  'index': ALL}, 'value'),
     State({'type': 'ir-select-checkbox',     'index': ALL}, 'value'),
@@ -5202,6 +5214,7 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
         style={'color': '#888', 'font-style': 'italic', 'font-size': '11px', 'padding': '12px 8px'}
     )
     # Se stock-data non è nello store, prova direttamente dal buffer in memoria
+    # (caso RITORNO da un'altra tab: store vuoto ma dati già caricati).
     if not stock_data_json:
         with _DL_LOCK:
             buf = dict(_DL_BUFFER)
@@ -5211,7 +5224,13 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
             if not options_tickers:
                 options_tickers = [{'label': c, 'value': c} for c in cr.columns]
     if not stock_data_json or not options_tickers:
-        return [_placeholder], ''
+        # PRIMA apertura: né store né memoria hanno dati. Non mostrare il placeholder
+        # (sarebbe un render inutile): aspetta che update_output carichi stock-data,
+        # il cui cambio (Input) fa ripartire questa callback una sola volta coi dati.
+        # Se però è l'utente a premere Update senza dati, il placeholder serve.
+        if update_clicks:
+            return [_placeholder], ''
+        raise PreventUpdate
 
     # Ripristina selezioni precedenti
     saved_selected = []
@@ -6609,7 +6628,7 @@ def _startup_load():
     # Scarica in background tutti i file xlsx per cui manca il pkl
     def _bg_all():
         start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
-        xlsx_files = sorted(_FILES_DIR.glob('*.xlsx')) if _FILES_DIR.exists() else [Path(_XLSX)]
+        xlsx_files = _dataset_xlsx_paths() or [Path(_XLSX)]
         for xlsx_path in xlsx_files:
             filename  = xlsx_path.name
             cache_pkl = _file_cache_path(filename)
@@ -6764,9 +6783,7 @@ def _scheduled_update():
     """Aggiornamento notturno: scarica dati per tutti i file in Files/."""
     start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
     active_file = _active_file_store.get('filename', 'ETF.xlsx')
-    xlsx_files = sorted(_FILES_DIR.glob('*.xlsx')) if _FILES_DIR.exists() else []
-    if not xlsx_files:
-        xlsx_files = [Path(_XLSX)]
+    xlsx_files = _dataset_xlsx_paths() or [Path(_XLSX)]
     for xlsx_path in xlsx_files:
         filename = xlsx_path.name
         try:
@@ -6782,7 +6799,7 @@ def _scheduled_update():
 
 def _scheduled_arima():
     """Calcolo ARIMA+GARCH a mezzanotte su tutti i file in Files/."""
-    xlsx_files = sorted(_FILES_DIR.glob('*.xlsx')) if _FILES_DIR.exists() else [Path(_XLSX)]
+    xlsx_files = _dataset_xlsx_paths() or [Path(_XLSX)]
     for xlsx_path in xlsx_files:
         filename = xlsx_path.name
         cache_pkl = _file_cache_path(filename)
@@ -6882,7 +6899,11 @@ def restore_file_selector(nav_reload):
     _u = _get_username()
     is_pers = (_read_tipo(_u) == 'personale')
     opts = _list_files_with_personale() if is_pers else _list_files()
-    return opts, ('__personale__' if is_pers else 'ETF.xlsx')
+    # Nel caso DEFAULT il selettore è già su 'ETF.xlsx' (valore del layout): non lo
+    # ri-tocchiamo, altrimenti il cambio riscatena on_file_selected e gli asset che
+    # update_output ha appena caricato verrebbero ricaricati una seconda volta.
+    # Solo il caso "personale" richiede di cambiare l'etichetta (→ PreventUpdate lì).
+    return opts, ('__personale__' if is_pers else no_update)
 
 
 try:
