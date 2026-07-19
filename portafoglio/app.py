@@ -348,7 +348,10 @@ def _buyhold_cum(rets_df, weights):
     if s <= 0:
         return None
     val = sum((w0[a] / s) * g[a] for a in w0)       # valore del portafoglio (Series)
-    return val / val.iloc[0] - 1                     # ribasa a 0 a inizio finestra
+    cum = val / val.iloc[0] - 1                      # ribasa a 0 a inizio finestra
+    # Rendimento parametrato al capitale investito: pesi <100% → quota a liquidità
+    # (rend. 0) → rendimento ridotto; pesi >100% → leva → rendimento amplificato.
+    return cum * (tot / 100.0)
 
 def _rebalanced_cum(rets_df, weights):
     """Curva cumulata con RIBILANCIAMENTO ANNUALE. I pesi indicati (normalizzati)
@@ -375,7 +378,10 @@ def _rebalanced_cum(rets_df, weights):
         w_day = num.div(num.sum(axis=1), axis=0)    # pesi correnti driftati, normalizzati
         port_ret.loc[sub.index] = (w_day * sub).sum(axis=1)
     cum = (1 + port_ret).cumprod()
-    return cum / cum.iloc[0] - 1                     # ribasa a 0 a inizio finestra
+    result = cum / cum.iloc[0] - 1                   # ribasa a 0 a inizio finestra
+    # Rendimento parametrato al capitale investito: <100% → liquidità (rend. ridotto),
+    # >100% → leva (rend. amplificato).
+    return result * (tot / 100.0)
 
 def calculate_historical_cvar(returns_series, window, tail_pct=0.05):
     # Rendimenti composti rolling a N giorni
