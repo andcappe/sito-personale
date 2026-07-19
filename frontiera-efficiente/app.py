@@ -1304,6 +1304,7 @@ app.layout = html.Div([
     dcc.Store(id='fe-arima-reqid',     data=None),
     dcc.Interval(id='fe-arima-poll',   interval=600, n_intervals=0, disabled=True),
     dcc.Store(id='fe-sync-sig',        data=''),
+    dcc.Store(id='fe-auto-calc-flag',  data=None),   # frontiera già auto-calcolata all'apertura?
     dcc.Interval(id='fe-live-sync',    interval=2000, n_intervals=0, disabled=False),
 
     # ── Modal Importa/Esporta Portafoglio ─────────────────────────────────────
@@ -1391,17 +1392,39 @@ app.layout = html.Div([
 # Callbacks
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _fe_current_sig(ns):
+    """Firma di current.json usata per il sync live: cambia se cambiano asset, spunte
+    o pesi P1/P2/P3. Stessa formula in on_page_load e fe_live_sync, così il primo giro
+    del sync all'apertura riconosce 'nessun cambiamento' e non ri-scrive i dati
+    (evita il doppio/triplo caricamento di griglia/anteprima all'apertura)."""
+    if not ns:
+        return ''
+    return repr((
+        tuple(sorted(ns.keys())),
+        tuple(sorted(d for d, v in ns.items() if v.get('checked'))),
+        tuple(sorted((d, round(float(v.get('P1') or 0), 4),
+                          round(float(v.get('P2') or 0), 4),
+                          round(float(v.get('P3') or 0), 4))
+                     for d, v in ns.items()
+                     if (v.get('P1') or v.get('P2') or v.get('P3')))),
+    ))
+
+
 @app.callback(
     Output('fe-stock-data',    'data',     allow_duplicate=True),
     Output('fe-prices-data',   'data',     allow_duplicate=True),
     Output('fe-loaded-flag',   'data',     allow_duplicate=True),
     Output('fe-last-updated',  'children', allow_duplicate=True),
     Output('fe-data-source',   'data',     allow_duplicate=True),
+    Output('fe-sync-sig',      'data',     allow_duplicate=True),
     Input('_fe-page-load',     'data'),
     prevent_initial_call='initial_duplicate',
 )
 def on_page_load(_):
     import uuid as _uuid
+    # Firma iniziale coerente col sync live: impedisce a fe_live_sync di ri-scrivere
+    # subito i dati appena caricati (causa del doppio/triplo caricamento all'apertura).
+    _sig0 = _fe_current_sig(_read_user_json())
 
     def _restore_arima(arima_raw):
         if arima_raw and isinstance(arima_raw, dict):
@@ -1423,7 +1446,7 @@ def on_page_load(_):
         label = f'Da analisi di portafoglio ({n} asset)' + (f' — {saved_at}' if saved_at else '')
         return (returns.to_json(orient='split', date_format='iso'),
                 prices.to_json(orient='split', date_format='iso'),
-                True, label, 'default')
+                True, label, 'default', _sig0)
 
     # 2. Dati personali utente salvati in sessione precedente
     u_prices, u_returns, u_saved_at, u_arima = _read_user_data()
@@ -1433,7 +1456,7 @@ def on_page_load(_):
         _restore_arima(u_arima)
         return (u_returns.to_json(orient='split', date_format='iso'),
                 u_prices.to_json(orient='split', date_format='iso'),
-                True, label, 'user')
+                True, label, 'user', _sig0)
 
     raise PreventUpdate
 
@@ -1671,6 +1694,26 @@ def build_grid_on_load(loaded, stock_data, _sync_sig, rawdata):
     pre_select = [d for d, v in ns.items()
                   if v.get('checked') or v.get('P1', 0) or v.get('P2', 0) or v.get('P3', 0)] if ns else []
     return _build_grid_rows(returns_df, pre_select=pre_select, pre_weights=pre_weights)
+
+
+# ── Calcolo AUTOMATICO della frontiera all'apertura ──────────────────────────
+# Appena la griglia (con i pesi P1/P2/P3 letti da current.json) è pronta, "preme"
+# Calcola Frontiera una volta sola: così all'apertura si vedono subito la frontiera
+# e i portafogli, senza click. Il flag fe-auto-calc-flag impedisce il loop, perché
+# calc_and_render riscrive la griglia (→ fe-asset-count) e ri-triggererebbe questa.
+@app.callback(
+    Output('fe-calc-btn',       'n_clicks', allow_duplicate=True),
+    Output('fe-auto-calc-flag', 'data',     allow_duplicate=True),
+    Input('fe-asset-count',     'children'),
+    State('fe-auto-calc-flag',  'data'),
+    State('fe-stock-data',      'data'),
+    State('fe-calc-btn',        'n_clicks'),
+    prevent_initial_call=True,
+)
+def auto_calc_on_open(_asset_count, done, stock_data, cur_clicks):
+    if done or not stock_data:
+        raise PreventUpdate
+    return (cur_clicks or 0) + 1, True
 
 
 # Quando cambia la LISTA asset (es. cancelli un asset in Analisi Portafoglio),
@@ -2180,14 +2223,15 @@ def calc_and_render(n, stock_data, prices_data,
         fcolor  = _FC[fname]
         cml_col = _CML_C[fname]
         if not df_f.empty:
-            cd = [[fname, i] for i in range(len(df_f))]
+            cd = [[fname, i, i + 1] for i in range(len(df_f))]
             fig.add_trace(go.Scatter(
                 x=df_f['Volatility'] * 100, y=df_f['Return'] * 100,
                 mode='lines+markers', name=f'Frontiera {fname}',
                 line=dict(color=fcolor, width=2),
                 marker=dict(size=6),
                 customdata=cd,
-                hovertemplate=f'<b>{fname}</b><br>Rischio: %{{x:.2f}}%<br>Rendimento: %{{y:.2f}}%<extra></extra>',
+                hovertemplate=f'<b>{fname} · Portafoglio %{{customdata[2]}}</b>'
+                              f'<br>Rischio: %{{x:.2f}}%<br>Rendimento: %{{y:.2f}}%<extra></extra>',
             ))
         if ms is not None and ms['Sharpe'] > 0:
             vr = np.linspace(0, ms['Volatility'] * 1.8, 100)
@@ -2756,13 +2800,14 @@ def on_arima_done(req_id, stock_data, prices_data,
         fcolor  = _FC[fname]
         cml_col = _CML_C[fname]
         if not df_f.empty:
-            cd = [[fname, i] for i in range(len(df_f))]
+            cd = [[fname, i, i + 1] for i in range(len(df_f))]
             fig.add_trace(go.Scatter(
                 x=df_f['Volatility']*100, y=df_f['Return']*100,
                 mode='lines+markers', name=f'Frontiera {fname}',
                 line=dict(color=fcolor, width=2), marker=dict(size=6),
                 customdata=cd,
-                hovertemplate=f'<b>{fname}</b><br>Rischio:%{{x:.2f}}%<br>Ren:%{{y:.2f}}%<extra></extra>',
+                hovertemplate=f'<b>{fname} · Portafoglio %{{customdata[2]}}</b>'
+                              f'<br>Rischio:%{{x:.2f}}%<br>Ren:%{{y:.2f}}%<extra></extra>',
             ))
         if ms is not None and ms['Sharpe'] > 0:
             vr = np.linspace(0, ms['Volatility']*1.8, 100)
@@ -3214,23 +3259,15 @@ _cb_p3    = _make_selall_cb('fe-selall-p3',   'fe-p3')
 )
 def fe_live_sync(_, sig):
     ns = _read_user_json()
-    print(f"[fe_live_sync] username={_get_username()} ns_keys={len(ns)} checked={[k for k,v in ns.items() if v.get('checked')]} P1={[k for k,v in ns.items() if v.get('P1',0)]}", flush=True)
     if not ns:
         raise PreventUpdate
 
-    # Firma divisa in due livelli:
+    # Firma su due livelli:
     # 1. asset_sig: solo nomi asset → cambia se si aggiunge/rimuove un titolo
     # 2. full_sig: asset + spunte + pesi → cambia anche se si modifica solo un peso
+    #    (stessa formula di on_page_load via _fe_current_sig)
     asset_sig = repr(tuple(sorted(ns.keys())))
-    full_sig  = repr((
-        tuple(sorted(ns.keys())),
-        tuple(sorted(d for d, v in ns.items() if v.get('checked'))),
-        tuple(sorted((d, round(float(v.get('P1') or 0), 4),
-                          round(float(v.get('P2') or 0), 4),
-                          round(float(v.get('P3') or 0), 4))
-                     for d, v in ns.items()
-                     if (v.get('P1') or v.get('P2') or v.get('P3')))),
-    ))
+    full_sig  = _fe_current_sig(ns)
     old_full = (sig or '')
     if full_sig == old_full:
         raise PreventUpdate
