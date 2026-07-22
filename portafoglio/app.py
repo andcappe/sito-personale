@@ -5796,7 +5796,6 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
         return {}, 'Nessun dato caricato', ''
 
     benchmark_returns = df_with_portfolios[benchmark_col]
-    benchmark_cumulative_returns = (1 + benchmark_returns).cumprod() - 1
 
     # Calcola IR/Sharpe/TEV solo per gli asset effettivamente selezionati
     _need_ir     = {s.replace('_InformationRatio', '') for s in selected_irs    if s}
@@ -5835,7 +5834,6 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
 
     # Versione ridotta per il rendering (max 500 punti per trace)
     df_plot = _thin(df_final)
-    benchmark_cumulative_returns = _thin(benchmark_cumulative_returns)
 
     fig = make_subplots(
         rows=7, cols=1, shared_xaxes=False, vertical_spacing=0.03,
@@ -5855,11 +5853,41 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
     selected_assets = selected_assets or []
 
     # Subplot 1: Cumulative Returns
+    # Portafogli con ribilanciamento annuale attivo (spunta per-portafoglio): {1,2,3}.
+    # Senza spunta il portafoglio è Buy & Hold (comportamento STANDARD della curva).
+    _rebal_set = {int(v[-1]) for v in (rebal_value or []) if v and v[-1].isdigit()}
+
+    def _cum_for(col):
+        """Cumulata di una colonna, calcolata SEMPRE allo stesso modo sia come curva
+        normale sia come benchmark: per i portafogli Buy & Hold (o ribil. annuale se
+        spuntato), per gli asset il semplice (1+r).cumprod()-1. Così un portafoglio
+        scelto come benchmark mantiene ESATTAMENTE la stessa cumulata di quando è una
+        curva normale (prima il benchmark usava un cumprod dei rendimenti pesati — un
+        ribilanciamento giornaliero — e la sua curva cambiava forma)."""
+        series = df_with_portfolios[col]
+        if col.startswith('Port'):
+            pnum   = int(col[-1])
+            w_dict = {1: weights_p1_data, 2: weights_p2_data, 3: weights_p3_data}.get(pnum, {}) or {}
+            active = [a for a, w in w_dict.items() if w and w > 0 and a in filtered_df.columns]
+            if active:
+                first_valid = filtered_df[active].dropna(how='any').index.min()
+                if pd.notna(first_valid):
+                    series = series.loc[first_valid:]
+                    if pnum in _rebal_set:   # Ribilanciamento annuale (opzione spuntata)
+                        bh_cum = _rebalanced_cum(filtered_df.loc[first_valid:, active],
+                                                 {a: w_dict[a] for a in active})
+                    else:                    # STANDARD: Buy & Hold (metodo B)
+                        bh_cum = _buyhold_cum(filtered_df.loc[first_valid:, active],
+                                              {a: w_dict[a] for a in active})
+                    if bh_cum is not None:
+                        return bh_cum
+        return (1 + series).cumprod() - 1
+
     if benchmark_col in selected_assets:
         bench_name = f'{benchmark_col} Cum. Returns'
         is_sel = (selected_column == bench_name)
-        fig.add_trace(go.Scatter(x=benchmark_cumulative_returns.index,
-                                  y=benchmark_cumulative_returns,
+        bench_cum = _thin(_cum_for(benchmark_col))
+        fig.add_trace(go.Scatter(x=bench_cum.index, y=bench_cum,
                                   name=bench_name,
                                   line=dict(color='red', width=8 if is_sel else 2),
                                   legend='legend'), row=1, col=1)
@@ -5867,30 +5895,9 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
     else:
         color_index = 0
 
-    # Portafogli con ribilanciamento annuale attivo (spunta per-portafoglio): {1,2,3}.
-    # Senza spunta il portafoglio è Buy & Hold (comportamento STANDARD della curva).
-    _rebal_set = {int(v[-1]) for v in (rebal_value or []) if v and v[-1].isdigit()}
     for col in selected_assets:
         if col in df_with_portfolios.columns and col != benchmark_col:
-            series = df_with_portfolios[col]
-            bh_cum = None
-            if col.startswith('Port'):
-                pnum    = int(col[-1])
-                w_dict  = {1: weights_p1_data, 2: weights_p2_data, 3: weights_p3_data}.get(pnum, {}) or {}
-                active  = [a for a, w in w_dict.items() if w and w > 0 and a in filtered_df.columns]
-                if active:
-                    first_valid = filtered_df[active].dropna(how='any').index.min()
-                    if pd.notna(first_valid):
-                        series = series.loc[first_valid:]
-                        if pnum in _rebal_set:   # Ribilanciamento annuale (opzione spuntata)
-                            bh_cum = _rebalanced_cum(
-                                filtered_df.loc[first_valid:, active],
-                                {a: w_dict[a] for a in active})
-                        else:                    # STANDARD: Buy & Hold (pesi scontati indietro, metodo B)
-                            bh_cum = _buyhold_cum(
-                                filtered_df.loc[first_valid:, active],
-                                {a: w_dict[a] for a in active})
-            cum_ret    = _thin(bh_cum if bh_cum is not None else (1 + series).cumprod() - 1)
+            cum_ret    = _thin(_cum_for(col))
             trace_name = f'{col} Cum. Returns'
             is_sel     = (selected_column == trace_name)
             if is_sel:
@@ -6083,8 +6090,17 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
     fig.update_yaxes(title_text='Volatilità (ann.)',  row=6, col=1)
     fig.update_yaxes(title_text='VaR',                row=7, col=1)
 
+    # uirevision legata alla STRUTTURA del grafico (nomi delle serie nell'ordine in cui
+    # sono disegnate). Finché cambiano solo i dati (stesse selezioni) la chiave resta
+    # uguale e Plotly conserva zoom/pan/visibilità. Se cambia la struttura — es. si
+    # sceglie un portafoglio come benchmark, che sposta la sua curva in testa e riordina
+    # tutte le altre — la chiave cambia e Plotly ridisegna da zero invece di riconciliare
+    # le trace per posizione: evita il "morph" delle curve verso serie sbagliate (il tilt
+    # che riattribuiva/ricreava le serie degli asset) e non lascia serie nascoste incastrate.
+    _ui_key = '|'.join(_t.name or '' for _t in fig.data)
+
     fig.update_layout(
-        uirevision='graph',
+        uirevision=_ui_key,
         hovermode='closest',
         height=1900, showlegend=True,
         legend=dict(title=dict(text='<b>Asset</b>', font=dict(size=11)),
