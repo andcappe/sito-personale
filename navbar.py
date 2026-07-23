@@ -20,6 +20,7 @@ _TABS = [
     ("Analisi Tattica",      "/analisitattica/"),
     ("Macro Economia",       "/fred/"),
     ("Fondi Pensione",       "/fondipensione/"),
+    ("Calendario",           "/calendario/"),
 ]
 
 
