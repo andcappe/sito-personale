@@ -5545,8 +5545,11 @@ def update_pil(usa_data, eur_data, mon_data, mon_source,
     )
 
     if "yoy" in view:
+        # I dati PIL sono trimestrali ma qui sono già a frequenza MENSILE (to_monthly
+        # espande i trimestri con ffill), quindi la variazione anno su anno è shift(12),
+        # non shift(4): con shift(4) si confrontavano mesi a 4 mesi di distanza — errato.
         yoy_d = {
-            col: ((df[col] - df[col].shift(4)) / df[col].shift(4).abs() * 100).loc[start:end]
+            col: ((df[col] - df[col].shift(12)) / df[col].shift(12).abs() * 100).loc[start:end]
             for col in avail
         }
         fig_yoy = make_line_chart(
