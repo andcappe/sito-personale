@@ -95,7 +95,11 @@ def to_monthly(s: pd.Series, freq: str) -> pd.Series:
     elif freq == "Q":
         s.index = s.index.to_period("Q").to_timestamp()
         s = s[~s.index.duplicated(keep="last")]
-        full = pd.date_range(s.index.min(), s.index.max(), freq="MS")
+        # FRED/Eurostat datano il trimestre al mese d'inizio (Q2 → 1° aprile):
+        # estendiamo l'ultimo trimestre a tutti e 3 i suoi mesi, altrimenti il
+        # grafico si fermerebbe ad aprile pur avendo già il dato del Q2 completo.
+        last_q_end = s.index.max() + pd.offsets.MonthBegin(2)
+        full = pd.date_range(s.index.min(), last_q_end, freq="MS")
         return s.reindex(full).ffill()
     elif freq in ("W", "BW", "D"):
         return s.resample("MS").last()

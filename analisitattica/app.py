@@ -11,11 +11,13 @@ UNICA per utente, condivisa con tutte le altre sezioni del sito.
 import os
 import io
 import json
+import time
 import sys as _sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -325,6 +327,340 @@ def get_arima_analysis_tab(options_tickers):
     ])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 2 — Posizionamento COT (Commitments of Traders, CFTC)
+#
+# Fonte: CFTC Public Reporting (Socrata Open Data API), aggiornato ogni venerdì.
+#   • TFF  (Traders in Financial Futures) — indici azionari, valute, tassi:
+#       Asset Manager / Institutional  = fondi pensione, comuni, assicurazioni
+#                                        (posizioni medio/lungo o di copertura)
+#       Leveraged Money                = hedge fund, CTA, gestori speculativi
+#                                        (posizioni attive e direzionali)
+#   • Disaggregated                       — materie prime (oro, petrolio, agricoli):
+#       Managed Money                  = speculazione gestita da hedge fund
+# Posizione NETTA = contratti long − short di ciascuna categoria.
+# ─────────────────────────────────────────────────────────────────────────────
+_COT_TFF_URL = 'https://publicreporting.cftc.gov/resource/gpe5-46if.json'
+_COT_DIS_URL = 'https://publicreporting.cftc.gov/resource/72hh-3qpy.json'
+
+# chiave interna → (categoria, etichetta IT, dataset, contract_market_name esatto)
+_COT_INSTRUMENTS = {
+    # ── Indici azionari (TFF) ─────────────────────────────────────────────
+    'sp500':   ('Indici azionari', 'S&P 500',      'tff', 'E-MINI S&P 500'),
+    'nasdaq':  ('Indici azionari', 'Nasdaq 100',   'tff', 'NASDAQ MINI'),
+    'russell': ('Indici azionari', 'Russell 2000', 'tff', 'RUSSELL E-MINI'),
+    # ── Valute (TFF) ──────────────────────────────────────────────────────
+    'eur': ('Valute', 'Euro FX',             'tff', 'EURO FX'),
+    'jpy': ('Valute', 'Yen giapponese',      'tff', 'JAPANESE YEN'),
+    'gbp': ('Valute', 'Sterlina britannica', 'tff', 'BRITISH POUND'),
+    'chf': ('Valute', 'Franco svizzero',     'tff', 'SWISS FRANC'),
+    'cad': ('Valute', 'Dollaro canadese',    'tff', 'CANADIAN DOLLAR'),
+    'aud': ('Valute', 'Dollaro australiano', 'tff', 'AUSTRALIAN DOLLAR'),
+    # ── Tassi d'interesse (TFF) ───────────────────────────────────────────
+    'ust2':  ('Tassi', 'Treasury 2 anni',   'tff', 'UST 2Y NOTE'),
+    'ust5':  ('Tassi', 'Treasury 5 anni',   'tff', 'UST 5Y NOTE'),
+    'ust10': ('Tassi', 'Treasury 10 anni',  'tff', 'UST 10Y NOTE'),
+    'ustb':  ('Tassi', 'Treasury Bond 30a', 'tff', 'UST BOND'),
+    'ff':    ('Tassi', 'Fed Funds 30gg',    'tff', 'FED FUNDS'),
+    # ── Materie prime (Disaggregated → Managed Money) ─────────────────────
+    'gold':     ('Materie prime', 'Oro',          'dis', 'GOLD'),
+    'silver':   ('Materie prime', 'Argento',      'dis', 'SILVER'),
+    'copper':   ('Materie prime', 'Rame',         'dis', 'COPPER- #1'),
+    'wti':      ('Materie prime', 'Petrolio WTI', 'dis', 'CRUDE OIL, LIGHT SWEET-WTI'),
+    'natgas':   ('Materie prime', 'Gas naturale', 'dis', 'NAT GAS NYME'),
+    'platinum': ('Materie prime', 'Platino',      'dis', 'PLATINUM'),
+    'corn':     ('Materie prime', 'Mais',         'dis', 'CORN'),
+    'wheat':    ('Materie prime', 'Grano',        'dis', 'WHEAT-SRW'),
+    'soy':      ('Materie prime', 'Soia',         'dis', 'SOYBEANS'),
+    'sugar':    ('Materie prime', 'Zucchero',     'dis', 'SUGAR NO. 11'),
+    'coffee':   ('Materie prime', 'Caffè',        'dis', 'COFFEE C'),
+    'cotton':   ('Materie prime', 'Cotone',       'dis', 'COTTON NO. 2'),
+}
+
+_COT_CAT_ICON = {'Indici azionari': '📈', 'Valute': '💱',
+                 'Tassi': '🏦', 'Materie prime': '🛢️'}
+_COT_CAT_ORDER = ['Indici azionari', 'Valute', 'Tassi', 'Materie prime']
+
+# cache in-processo: chiave → (timestamp_epoch, DataFrame). TTL 6h — i dati CFTC
+# escono una volta a settimana (venerdì), quindi il refetch frequente è inutile.
+_COT_CACHE = {}
+_COT_TTL   = 6 * 3600
+
+# Ticker Yahoo Finance del sottostante da disegnare sotto al posizionamento.
+# Per gli INDICI azionari si usa l'indice cash (^GSPC, ^NDX, ^RUT) invece del
+# future mini: serie continua e pulita, coerente con il riferimento del COT.
+# Per valute/tassi/materie prime il future CME è già il contratto del COT.
+_COT_PRICE_TICKER = {
+    'sp500': '^GSPC', 'nasdaq': '^NDX', 'russell': '^RUT',
+    'eur': '6E=F', 'jpy': '6J=F', 'gbp': '6B=F',
+    'chf': '6S=F', 'cad': '6C=F', 'aud': '6A=F',
+    'ust2': 'ZT=F', 'ust5': 'ZF=F', 'ust10': 'ZN=F', 'ustb': 'ZB=F', 'ff': 'ZQ=F',
+    'gold': 'GC=F', 'silver': 'SI=F', 'copper': 'HG=F', 'wti': 'CL=F', 'natgas': 'NG=F',
+    'platinum': 'PL=F', 'corn': 'ZC=F', 'wheat': 'ZW=F', 'soy': 'ZS=F',
+    'sugar': 'SB=F', 'coffee': 'KC=F', 'cotton': 'CT=F',
+}
+# etichetta del pannello prezzo quando differisce dal nome del contratto COT
+_COT_PRICE_NAME = {
+    'sp500': 'S&P 500 (indice)', 'nasdaq': 'Nasdaq 100 (indice)',
+    'russell': 'Russell 2000 (indice)',
+}
+_COT_PRICE_CACHE = {}
+_COT_PRICE_TTL   = 12 * 3600
+
+
+def _cot_options():
+    """Opzioni dropdown ordinate per categoria, con icona e nome IT."""
+    opts = []
+    for cat in _COT_CAT_ORDER:
+        for key, (c, label, kind, contract) in _COT_INSTRUMENTS.items():
+            if c == cat:
+                opts.append({'label': f"{_COT_CAT_ICON.get(cat, '')}  {label}", 'value': key})
+    return opts
+
+
+def _cot_fetch(key, force=False):
+    """Scarica (e mette in cache) lo storico posizioni per uno strumento."""
+    now = time.time()
+    hit = _COT_CACHE.get(key)
+    if hit and not force and (now - hit[0]) < _COT_TTL:
+        return hit[1]
+    cat, label, kind, contract = _COT_INSTRUMENTS[key]
+    if kind == 'tff':
+        url = _COT_TFF_URL
+        sel = ('report_date_as_yyyy_mm_dd,asset_mgr_positions_long,'
+               'asset_mgr_positions_short,lev_money_positions_long,'
+               'lev_money_positions_short')
+    else:
+        url = _COT_DIS_URL
+        sel = ('report_date_as_yyyy_mm_dd,m_money_positions_long_all,'
+               'm_money_positions_short_all')
+    params = {
+        '$select': sel,
+        '$where': f"contract_market_name='{contract}'",
+        '$order': 'report_date_as_yyyy_mm_dd ASC',
+        '$limit': 3000,
+    }
+    r = requests.get(url, params=params, timeout=25)
+    r.raise_for_status()
+    df = pd.DataFrame(r.json())
+    if df.empty:
+        _COT_CACHE[key] = (now, df)
+        return df
+    df['date'] = pd.to_datetime(df['report_date_as_yyyy_mm_dd'])
+    for c in df.columns:
+        if c not in ('report_date_as_yyyy_mm_dd', 'date'):
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+    if kind == 'tff':
+        df['am_net'] = df['asset_mgr_positions_long'] - df['asset_mgr_positions_short']
+        df['lm_net'] = df['lev_money_positions_long'] - df['lev_money_positions_short']
+    else:
+        df['mm_net'] = df['m_money_positions_long_all'] - df['m_money_positions_short_all']
+    df = df.sort_values('date').set_index('date')
+    _COT_CACHE[key] = (now, df)
+    return df
+
+
+def _cot_price(key, start):
+    """Prezzo di chiusura del sottostante (future CME) da Yahoo Finance, cache 12h."""
+    ticker = _COT_PRICE_TICKER.get(key)
+    if not ticker:
+        return None
+    now = time.time()
+    hit = _COT_PRICE_CACHE.get(ticker)
+    if hit and (now - hit[0]) < _COT_PRICE_TTL:
+        return hit[1]
+    s = None
+    try:
+        import yfinance as yf
+        data = yf.download(ticker, start=str(start.date()), progress=False,
+                           auto_adjust=True, threads=False)
+        if data is not None and not data.empty and 'Close' in data:
+            close = data['Close']
+            if isinstance(close, pd.DataFrame):          # colonne MultiIndex → 1ª col
+                close = close.iloc[:, 0]
+            close = close.dropna()
+            s = close if not close.empty else None
+    except Exception:
+        s = None
+    _COT_PRICE_CACHE[ticker] = (now, s)
+    return s
+
+
+def _cot_empty_fig(msg):
+    fig = go.Figure()
+    fig.add_annotation(text=msg, showarrow=False, font=dict(size=14, color='#888'),
+                       xref='paper', yref='paper', x=0.5, y=0.5)
+    fig.update_layout(height=540, plot_bgcolor='white', paper_bgcolor='white',
+                      xaxis=dict(visible=False), yaxis=dict(visible=False))
+    return fig
+
+
+def _cot_summary(kind, df, label):
+    """Riepilogo (card) dell'ultimo dato settimanale con variazione."""
+    if df is None or df.empty:
+        return ''
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else last
+    d = df.index[-1].strftime('%d/%m/%Y')
+
+    def _num(v):
+        return f"{v:,.0f}".replace(',', '.')
+
+    def card(title, net, net_prev, color):
+        delta = net - net_prev
+        arrow = '▲' if delta > 0 else ('▼' if delta < 0 else '■')
+        dcol = '#1b7a34' if delta > 0 else ('#c0392b' if delta < 0 else '#666')
+        pos = 'NET LONG' if net >= 0 else 'NET SHORT'
+        return html.Div([
+            html.Div(title, style={'font-size': '11px', 'font-weight': '700',
+                                   'color': color, 'margin-bottom': '4px'}),
+            html.Div(_num(net), style={'font-size': '20px', 'font-weight': '700',
+                                       'color': '#1a3a5c'}),
+            html.Div(pos, style={'font-size': '10px', 'font-weight': '700',
+                                 'color': '#1b7a34' if net >= 0 else '#c0392b'}),
+            html.Div(f"{arrow} {'+' if delta >= 0 else ''}{_num(delta)} vs sett. prec.",
+                     style={'font-size': '10px', 'color': dcol, 'margin-top': '3px'}),
+        ], style={'flex': '1', 'padding': '10px 14px', 'background': '#f8fafd',
+                  'border': '1px solid #e3e9f2', 'border-radius': '6px'})
+
+    if kind == 'tff':
+        cards = [
+            card('Asset Manager (istituzionali)', last['am_net'], prev['am_net'], '#1a3a5c'),
+            card('Leveraged Money (hedge fund)',  last['lm_net'], prev['lm_net'], '#c0392b'),
+        ]
+    else:
+        cards = [card('Managed Money (hedge fund)', last['mm_net'], prev['mm_net'], '#1a3a5c')]
+    return html.Div([
+        html.Div(f"Ultimo dato CFTC: {d}",
+                 style={'font-size': '11px', 'color': '#555', 'margin-bottom': '6px',
+                        'font-weight': '600'}),
+        html.Div(cards, style={'display': 'flex', 'gap': '10px'}),
+    ])
+
+
+def _cot_fig_and_summary(key, lookback):
+    cat, label, kind, contract = _COT_INSTRUMENTS[key]
+    try:
+        df = _cot_fetch(key)
+    except Exception as e:
+        return _cot_empty_fig(f'Errore nel recupero dei dati CFTC: {e}'), ''
+    if df is None or df.empty:
+        return _cot_empty_fig('Nessun dato COT disponibile per questo strumento'), ''
+    full = df
+    if lookback and int(lookback) > 0:
+        cutoff = df.index.max() - pd.DateOffset(years=int(lookback))
+        df = df.loc[df.index >= cutoff]
+    if df.empty:
+        df = full.tail(2)
+
+    # prezzo del sottostante (pannello inferiore) sullo stesso arco temporale
+    price = _cot_price(key, df.index.min())
+    has_price = price is not None and not price.empty
+    price_label = _COT_PRICE_NAME.get(key, label)
+
+    if has_price:
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.07,
+            row_heights=[0.6, 0.4],
+            subplot_titles=('Posizione netta COT (Long − Short)', f'Prezzo — {price_label}'))
+    else:
+        fig = make_subplots(rows=1, cols=1)
+
+    # ── Riga 1: posizionamento netto (long − short) ──────────────────────
+    if kind == 'tff':
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['am_net'], name='Asset Manager (istituzionali)',
+            mode='lines', line=dict(color='#1a3a5c', width=2.2),
+            hovertemplate='%{x|%d %b %Y}<br>Asset Manager: %{y:,.0f}<extra></extra>'),
+            row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['lm_net'], name='Leveraged Money (hedge fund / CTA)',
+            mode='lines', line=dict(color='#c0392b', width=2.2),
+            hovertemplate='%{x|%d %b %Y}<br>Leveraged Money: %{y:,.0f}<extra></extra>'),
+            row=1, col=1)
+    else:
+        net = df['mm_net']
+        colors = ['#1b7a34' if v >= 0 else '#c0392b' for v in net]
+        fig.add_trace(go.Bar(
+            x=df.index, y=net, name='Managed Money (hedge fund)', marker_color=colors,
+            hovertemplate='%{x|%d %b %Y}<br>Managed Money netto: %{y:,.0f}<extra></extra>'),
+            row=1, col=1)
+    fig.add_hline(y=0, line=dict(color='#555', width=1), row=1, col=1)
+
+    # ── Riga 2: prezzo del sottostante ───────────────────────────────────
+    if has_price:
+        fig.add_trace(go.Scatter(
+            x=price.index, y=price.values, name=f'Prezzo {price_label}',
+            mode='lines', line=dict(color='#111', width=1.6), showlegend=False,
+            hovertemplate='%{x|%d %b %Y}<br>Prezzo: %{y:,.2f}<extra></extra>'),
+            row=2, col=1)
+
+    fig.update_layout(
+        title=dict(text=f"Posizionamento COT — {label}",
+                   font=dict(size=15, color='#1a3a5c')),
+        height=640 if has_price else 520, plot_bgcolor='white', paper_bgcolor='white',
+        margin=dict(l=65, r=20, t=70, b=40),
+        legend=dict(orientation='h', yanchor='bottom', y=1.03, xanchor='left', x=0),
+        hovermode='x unified')
+    fig.update_xaxes(showgrid=True, gridcolor='#eef1f5')
+    fig.update_yaxes(showgrid=True, gridcolor='#eef1f5', zeroline=False)
+    fig.update_yaxes(title_text='Contratti netti', row=1, col=1)
+    if has_price:
+        fig.update_yaxes(title_text='Prezzo', row=2, col=1)
+    return fig, _cot_summary(kind, full, label)
+
+
+def get_cot_tab():
+    """Layout della tab Posizionamento COT."""
+    opts = _cot_options()
+    return html.Div([
+        html.Div([
+            html.H3('Posizionamento COT',
+                    style={'margin-right': '20px', 'white-space': 'nowrap', 'font-size': '16px'}),
+            html.Div([
+                html.Label("Strumento:", style={'margin-right': '6px', 'font-size': '11px',
+                                                 'white-space': 'nowrap'}),
+                dcc.Dropdown(id='cot-instrument', options=opts, value='sp500',
+                             clearable=False, style={'width': '250px', 'font-size': '11px'}),
+            ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '14px'}),
+            html.Div([
+                html.Label("Periodo:", style={'margin-right': '6px', 'font-size': '11px'}),
+                dcc.RadioItems(id='cot-lookback',
+                               options=[{'label': ' 1a', 'value': 1}, {'label': ' 2a', 'value': 2},
+                                        {'label': ' 3a', 'value': 3}, {'label': ' 5a', 'value': 5},
+                                        {'label': ' Tutto', 'value': 0}],
+                               value=2, inline=True, style={'font-size': '11px'},
+                               inputStyle={'margin-right': '3px'},
+                               labelStyle={'margin-right': '9px'}),
+            ], style={'display': 'flex', 'align-items': 'center', 'border': '1px solid #ccc',
+                      'border-radius': '4px', 'padding': '3px 8px', 'margin-right': '12px',
+                      'background': '#f5f5f5'}),
+            html.Button('🔄 Aggiorna', id='cot-refresh', n_clicks=0,
+                        title='Forza il ri-scaricamento dei dati dalla CFTC',
+                        style={'background-color': '#1a3a5c', 'color': 'white', 'border': 'none',
+                               'padding': '8px 16px', 'border-radius': '4px', 'cursor': 'pointer',
+                               'font-weight': 'bold', 'font-size': '12px'}),
+        ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap',
+                  'gap': '4px', 'margin-bottom': '8px'}),
+
+        html.Div('Fonte: CFTC — Commitments of Traders, pubblicato ogni venerdì. '
+                 'Per indici azionari, valute e tassi (report TFF) sono mostrate le posizioni '
+                 'nette di Asset Manager (fondi pensione/comuni/assicurazioni, medio-lungo termine) '
+                 'e Leveraged Money (hedge fund/CTA, speculativi). Per le materie prime '
+                 '(report Disaggregated) è mostrato il Managed Money (speculazione hedge fund).',
+                 style={'font-size': '10px', 'color': '#777', 'margin-bottom': '10px',
+                        'line-height': '1.4', 'max-width': '920px'}),
+
+        html.Hr(style={'margin': '4px 0 10px'}),
+
+        html.Div(id='cot-summary', style={'margin-bottom': '10px'}),
+        dcc.Loading(id='loading-cot', type='circle', color='#1a3a5c', children=[
+            dcc.Graph(id='cot-chart', style={'width': '100%', 'height': '660px'},
+                      config={'responsive': True, 'displaylogo': False}),
+        ]),
+    ])
+
+
 # Stile tab (uguale ad Analisi di Portafoglio)
 _TAB_STYLE = {'font-size': '12px', 'padding': '8px 18px'}
 _TAB_SEL   = {'font-size': '12px', 'padding': '8px 18px',
@@ -454,9 +790,16 @@ def serve_layout():
                      children=[
                          dcc.Tab(label='📉 Analisi ARIMA', value='tab-arima',
                                  style=_TAB_STYLE, selected_style=_TAB_SEL),
+                         dcc.Tab(label='📊 Posizionamento COT', value='tab-cot',
+                                 style=_TAB_STYLE, selected_style=_TAB_SEL),
                      ]),
-            # Contenuto della tab ARIMA (altre tab si aggiungeranno qui in futuro)
-            html.Div(id='tab-arima-content', children=get_arima_analysis_tab(opts)),
+            # Contenuto delle tab: tutte restano nel DOM e si mostrano/nascondono
+            # via callback (Input at-tabs), così le callback ARIMA che dipendono
+            # dai suoi componenti restano sempre agganciate.
+            html.Div(id='tab-arima-content', children=get_arima_analysis_tab(opts),
+                     style={'display': 'block'}),
+            html.Div(id='tab-cot-content', children=get_cot_tab(),
+                     style={'display': 'none'}),
         ], className='page-wrap'),
         # Pannello File montato ALLA RADICE → galleggia sopra a tutto
         _file_modal(),
@@ -956,6 +1299,38 @@ def at_fp_del(all_n):
     fn = trg.get('index') if isinstance(trg, dict) else None
     ok, msg = _delete_profilo(fn)
     return _render_file_list(), msg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 2 — Posizionamento COT: switch tab + aggiornamento grafico
+# ─────────────────────────────────────────────────────────────────────────────
+@app.callback(
+    Output('tab-arima-content', 'style'),
+    Output('tab-cot-content', 'style'),
+    Input('at-tabs', 'value'),
+)
+def _at_switch_tab(tab):
+    show = {'display': 'block'}
+    hide = {'display': 'none'}
+    if tab == 'tab-cot':
+        return hide, show
+    return show, hide
+
+
+@app.callback(
+    Output('cot-chart', 'figure'),
+    Output('cot-summary', 'children'),
+    Input('cot-instrument', 'value'),
+    Input('cot-lookback', 'value'),
+    Input('cot-refresh', 'n_clicks'),
+)
+def _update_cot(key, lookback, n):
+    if not key:
+        raise PreventUpdate
+    # il pulsante 🔄 forza il refetch invalidando la cache dello strumento
+    if callback_context.triggered_id == 'cot-refresh':
+        _COT_CACHE.pop(key, None)
+    return _cot_fig_and_summary(key, lookback)
 
 
 if __name__ == '__main__':
