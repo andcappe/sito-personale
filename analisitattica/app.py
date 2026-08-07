@@ -406,6 +406,9 @@ _COT_PRICE_NAME = {
 }
 _COT_PRICE_CACHE = {}
 _COT_PRICE_TTL   = 12 * 3600
+# Scarichiamo sempre lo storico completo (i report COT TFF/Disaggregated partono dal 2006):
+# così il prezzo copre tutto l'orizzonte e lo ritagliamo a valle sulla finestra mostrata.
+_COT_PRICE_START = '2005-01-01'
 
 
 def _cot_options():
@@ -460,8 +463,13 @@ def _cot_fetch(key, force=False):
     return df
 
 
-def _cot_price(key, start):
-    """Prezzo di chiusura del sottostante (future CME) da Yahoo Finance, cache 12h."""
+def _cot_price(key):
+    """Prezzo di chiusura del sottostante da Yahoo Finance (storico completo), cache 12h.
+
+    Si scarica sempre tutto lo storico (da _COT_PRICE_START) e si affetta a valle
+    sulla finestra mostrata: così l'S&P 500 copre l'intero orizzonte temporale
+    qualunque sia il periodo selezionato, senza dipendere dall'ordine delle chiamate.
+    """
     ticker = _COT_PRICE_TICKER.get(key)
     if not ticker:
         return None
@@ -472,7 +480,7 @@ def _cot_price(key, start):
     s = None
     try:
         import yfinance as yf
-        data = yf.download(ticker, start=str(start.date()), progress=False,
+        data = yf.download(ticker, start=_COT_PRICE_START, progress=False,
                            auto_adjust=True, threads=False)
         if data is not None and not data.empty and 'Close' in data:
             close = data['Close']
@@ -538,7 +546,41 @@ def _cot_summary(kind, df, label):
     ])
 
 
-def _cot_fig_and_summary(key, lookback):
+_COT_WIN = 52   # settimane (1 anno) usate da COT Index e Z-score
+
+
+def _cot_index_series(s, win=_COT_WIN, minp=26):
+    """COT Index (Williams): 0 = minimo, 100 = massimo della finestra mobile."""
+    lo = s.rolling(win, min_periods=minp).min()
+    hi = s.rolling(win, min_periods=minp).max()
+    rng = hi - lo
+    return (100.0 * (s - lo) / rng).where(rng > 0)
+
+
+def _cot_z_series(s, win=_COT_WIN, minp=26):
+    """Z-score: scostamento in deviazioni standard dalla media della finestra mobile."""
+    m = s.rolling(win, min_periods=minp).mean()
+    sd = s.rolling(win, min_periods=minp).std()
+    return ((s - m) / sd).where(sd > 0)
+
+
+def _drawdown_series(price):
+    """Drawdown %: distanza dal massimo progressivo (0 sui picchi, negativo sotto)."""
+    return (price / price.cummax() - 1.0) * 100.0
+
+
+def _stoch_series(close, n, smooth=3):
+    """Stocastico %K su n giorni (prezzi di chiusura), filtrato con media mobile a `smooth` giorni."""
+    lo = close.rolling(n, min_periods=max(2, n // 3)).min()
+    hi = close.rolling(n, min_periods=max(2, n // 3)).max()
+    rng = hi - lo
+    k = (100.0 * (close - lo) / rng).where(rng > 0)
+    if smooth and smooth > 1:
+        k = k.rolling(smooth, min_periods=1).mean()
+    return k
+
+
+def _cot_fig_and_summary(key, year_range):
     cat, label, kind, contract = _COT_INSTRUMENTS[key]
     try:
         df = _cot_fetch(key)
@@ -547,67 +589,242 @@ def _cot_fig_and_summary(key, lookback):
     if df is None or df.empty:
         return _cot_empty_fig('Nessun dato COT disponibile per questo strumento'), ''
     full = df
-    if lookback and int(lookback) > 0:
-        cutoff = df.index.max() - pd.DateOffset(years=int(lookback))
-        df = df.loc[df.index >= cutoff]
+    # year_range = [anno_inizio, anno_fine] scelti dallo slider; ritaglio la finestra
+    # mostrata mantenendo full per il calcolo di COT Index / Z-score / stocastico.
+    if year_range and len(year_range) == 2:
+        y0, y1 = sorted(int(v) for v in year_range)
+        start = pd.Timestamp(year=y0, month=1, day=1)
+        end = pd.Timestamp(year=y1, month=12, day=31, hour=23, minute=59, second=59)
+        df = df.loc[(df.index >= start) & (df.index <= end)]
     if df.empty:
         df = full.tail(2)
 
-    # prezzo del sottostante (pannello inferiore) sullo stesso arco temporale
-    price = _cot_price(key, df.index.min())
+    # prezzo del sottostante (asse secondario): storico completo ritagliato sulla
+    # finestra COT mostrata, così copre tutto l'orizzonte temporale del grafico.
+    # Teniamo anche lo storico intero (price_full) per lo stocastico a 120 giorni.
+    price_full = _cot_price(key)
+    price = None
+    if price_full is not None and not price_full.empty:
+        price = price_full[(price_full.index >= df.index.min()) &
+                           (price_full.index <= df.index.max())]
     has_price = price is not None and not price.empty
     price_label = _COT_PRICE_NAME.get(key, label)
 
-    if has_price:
-        fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.07,
-            row_heights=[0.6, 0.4],
-            subplot_titles=('Posizione netta COT (Long − Short)', f'Prezzo — {price_label}'))
-    else:
-        fig = make_subplots(rows=1, cols=1)
+    def _yr(series):
+        """Range Y ritagliato su [min − 10, max + 10] per riempire il pannello."""
+        s = series.dropna()
+        if s.empty:
+            return None
+        return [float(s.min()) - 10, float(s.max()) + 10]
 
-    # ── Riga 1: posizionamento netto (long − short) ──────────────────────
+    def _add_price(row):
+        """Aggiunge l'S&P 500 (o il sottostante) sull'asse secondario del pannello."""
+        if has_price:
+            fig.add_trace(go.Scatter(
+                x=price.index, y=price.values, name=f'Prezzo {price_label}',
+                mode='lines', line=dict(color='#444', width=1.5),
+                showlegend=(row == 1),
+                hovertemplate='%{x|%d %b %Y}<br>Prezzo: %{y:,.2f}<extra></extra>'),
+                row=row, col=1, secondary_y=True)
+
+    def _fmt_price_axis(row):
+        if has_price:
+            fig.update_yaxes(title_text=f'{price_label}', showgrid=False, zeroline=False,
+                             row=row, col=1, secondary_y=True)
+        else:
+            fig.update_yaxes(visible=False, row=row, col=1, secondary_y=True)
+
+    disp = df.index
+
+    def _add_cot_index(series_full, color, row, name):
+        """COT Index (0–100) calcolato sullo storico completo e ritagliato sulla finestra."""
+        ci = _cot_index_series(series_full).reindex(disp)
+        fig.add_trace(go.Scatter(
+            x=disp, y=ci, name=name, showlegend=False, mode='lines',
+            line=dict(color=color, width=1.8),
+            hovertemplate='%{x|%d %b %Y}<br>' + name + ': %{y:.0f}<extra></extra>'),
+            row=row, col=1)
+
+    def _add_zscore(series_full, color, row, name):
+        z = _cot_z_series(series_full).reindex(disp)
+        fig.add_trace(go.Scatter(
+            x=disp, y=z, name=name, showlegend=False, mode='lines',
+            line=dict(color=color, width=1.8),
+            hovertemplate='%{x|%d %b %Y}<br>' + name + ': %{y:.2f}<extra></extra>'),
+            row=row, col=1)
+
+    def _fmt_index_axis(row):
+        fig.add_hline(y=80, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
+        fig.add_hline(y=20, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
+        fig.update_yaxes(title_text='COT Index', range=[0, 100], showgrid=True,
+                         gridcolor='#eef1f5', row=row, col=1)
+
+    def _fmt_z_axis(row):
+        fig.add_hline(y=0, line=dict(color='#999', width=1), row=row, col=1)
+        fig.add_hline(y=2, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
+        fig.add_hline(y=-2, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
+        fig.update_yaxes(title_text='Z-score', showgrid=True, gridcolor='#eef1f5', row=row, col=1)
+
+    def _add_drawdown(row):
+        """Drawdown % del sottostante dal massimo progressivo della finestra mostrata."""
+        dd = _drawdown_series(price)
+        fig.add_trace(go.Scatter(
+            x=dd.index, y=dd.values, name=f'Drawdown {price_label}', showlegend=False,
+            mode='lines', line=dict(color='#8a1a1a', width=1.3),
+            fill='tozeroy', fillcolor='rgba(192,57,43,0.15)',
+            hovertemplate='%{x|%d %b %Y}<br>Drawdown: %{y:.1f}%<extra></extra>'),
+            row=row, col=1)
+        fig.update_yaxes(title_text='Drawdown', ticksuffix='%', showgrid=True,
+                         gridcolor='#eef1f5', row=row, col=1)
+
+    def _add_stoch(row):
+        """Stocastico %K del sottostante con filtro dedicato per finestra.
+
+        30gg → media 5; 60gg → media 10; 120gg → media 20; 240gg → media 30.
+        Le due linee lunghe (120gg rossa, 240gg blu) sono più marcate e disegnate
+        per ultime così restano in primo piano.
+        """
+        # (n_giorni, media_filtro, colore, spessore)
+        for n, smooth, color, width in ((30, 5, '#0f8a8a', 1.4),
+                                        (60, 10, '#e08a1e', 1.4),
+                                        (120, 20, '#c0392b', 2.8),
+                                        (240, 30, '#1a4fd6', 2.8)):
+            st = _stoch_series(price_full, n, smooth=smooth).reindex(price.index)
+            fig.add_trace(go.Scatter(
+                x=st.index, y=st.values, name=f'Stocastico {n}gg', showlegend=True,
+                mode='lines', line=dict(color=color, width=width),
+                hovertemplate=f'%{{x|%d %b %Y}}<br>Stocastico {n}gg: %{{y:.0f}}<extra></extra>'),
+                row=row, col=1)
+        fig.add_hline(y=80, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
+        fig.add_hline(y=20, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
+        fig.update_yaxes(title_text='Stocastico', range=[0, 100], showgrid=True,
+                         gridcolor='#eef1f5', row=row, col=1)
+
     if kind == 'tff':
+        # Pannelli in ordine: Asset Manager, Leveraged Money (posizionamento + prezzo),
+        # poi Drawdown e Stocastico sul sottostante, infine COT Index e Z-score.
+        titles  = ['Asset Manager — istituzionali', 'Leveraged Money — hedge fund / CTA']
+        specs   = [[{'secondary_y': True}], [{'secondary_y': True}]]
+        heights = [1.0, 1.0]
+        if has_price:
+            titles  += [f'Drawdown {price_label} (%)',
+                        f'Stocastico {price_label} — 240 gg (media 30) · 120 gg (media 20) · 60 gg (media 10) · 30 gg (media 5)']
+            specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
+            heights += [0.70, 0.70]
+            r_dd, r_st, r_ci, r_z = 3, 4, 5, 6
+        else:
+            r_dd = r_st = None
+            r_ci, r_z = 3, 4
+        titles  += ['COT Index (0–100, finestra 1 anno)',
+                    'Z-score (deviazioni standard, finestra 1 anno)']
+        specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
+        heights += [0.70, 0.70]
+        _tot = sum(heights)
+        fig = make_subplots(
+            rows=len(specs), cols=1, shared_xaxes=True, vertical_spacing=0.045,
+            row_heights=[h / _tot for h in heights], specs=specs,
+            subplot_titles=tuple(titles))
         fig.add_trace(go.Scatter(
             x=df.index, y=df['am_net'], name='Asset Manager (istituzionali)',
             mode='lines', line=dict(color='#1a3a5c', width=2.2),
             hovertemplate='%{x|%d %b %Y}<br>Asset Manager: %{y:,.0f}<extra></extra>'),
-            row=1, col=1)
+            row=1, col=1, secondary_y=False)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['lm_net'], name='Leveraged Money (hedge fund / CTA)',
             mode='lines', line=dict(color='#c0392b', width=2.2),
             hovertemplate='%{x|%d %b %Y}<br>Leveraged Money: %{y:,.0f}<extra></extra>'),
-            row=1, col=1)
+            row=2, col=1, secondary_y=False)
+        _add_price(1)
+        _add_price(2)
+        for r, series in ((1, df['am_net']), (2, df['lm_net'])):
+            fig.add_hline(y=0, line=dict(color='#999', width=1), row=r, col=1, secondary_y=False)
+            fig.update_yaxes(title_text='Contratti netti', showgrid=True, gridcolor='#eef1f5',
+                             zeroline=False, row=r, col=1, secondary_y=False)
+            yr = _yr(series)
+            if yr:
+                fig.update_yaxes(range=yr, row=r, col=1, secondary_y=False)
+            _fmt_price_axis(r)
+        if has_price:
+            _add_drawdown(r_dd)
+            _add_stoch(r_st)
+        _add_cot_index(full['am_net'], '#1a3a5c', r_ci, 'COT Index AM')
+        _add_cot_index(full['lm_net'], '#c0392b', r_ci, 'COT Index LM')
+        _fmt_index_axis(r_ci)
+        _add_zscore(full['am_net'], '#1a3a5c', r_z, 'Z-score AM')
+        _add_zscore(full['lm_net'], '#c0392b', r_z, 'Z-score LM')
+        _fmt_z_axis(r_z)
+        fig.update_annotations(font_size=12)
+        height = 1400 if has_price else 1000
     else:
+        # Materie prime: Managed Money + Drawdown + Stocastico + COT Index + Z-score.
+        titles  = ['Managed Money — hedge fund']
+        specs   = [[{'secondary_y': True}]]
+        heights = [1.3]
+        if has_price:
+            titles  += [f'Drawdown {price_label} (%)',
+                        f'Stocastico {price_label} — 240 gg (media 30) · 120 gg (media 20) · 60 gg (media 10) · 30 gg (media 5)']
+            specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
+            heights += [0.70, 0.70]
+            r_dd, r_st, r_ci, r_z = 2, 3, 4, 5
+        else:
+            r_dd = r_st = None
+            r_ci, r_z = 2, 3
+        titles  += ['COT Index (0–100, finestra 1 anno)',
+                    'Z-score (deviazioni standard, finestra 1 anno)']
+        specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
+        heights += [0.80, 0.80]
+        _tot = sum(heights)
+        fig = make_subplots(
+            rows=len(specs), cols=1, shared_xaxes=True, vertical_spacing=0.05,
+            row_heights=[h / _tot for h in heights], specs=specs,
+            subplot_titles=tuple(titles))
         net = df['mm_net']
         colors = ['#1b7a34' if v >= 0 else '#c0392b' for v in net]
         fig.add_trace(go.Bar(
             x=df.index, y=net, name='Managed Money (hedge fund)', marker_color=colors,
             hovertemplate='%{x|%d %b %Y}<br>Managed Money netto: %{y:,.0f}<extra></extra>'),
-            row=1, col=1)
-    fig.add_hline(y=0, line=dict(color='#555', width=1), row=1, col=1)
-
-    # ── Riga 2: prezzo del sottostante ───────────────────────────────────
-    if has_price:
-        fig.add_trace(go.Scatter(
-            x=price.index, y=price.values, name=f'Prezzo {price_label}',
-            mode='lines', line=dict(color='#111', width=1.6), showlegend=False,
-            hovertemplate='%{x|%d %b %Y}<br>Prezzo: %{y:,.2f}<extra></extra>'),
-            row=2, col=1)
+            row=1, col=1, secondary_y=False)
+        _add_price(1)
+        fig.add_hline(y=0, line=dict(color='#999', width=1), row=1, col=1, secondary_y=False)
+        fig.update_yaxes(title_text='Contratti netti (Long − Short)', showgrid=True,
+                         gridcolor='#eef1f5', zeroline=False, row=1, col=1, secondary_y=False)
+        yr = _yr(net)
+        if yr:
+            fig.update_yaxes(range=yr, row=1, col=1, secondary_y=False)
+        _fmt_price_axis(1)
+        if has_price:
+            _add_drawdown(r_dd)
+            _add_stoch(r_st)
+        _add_cot_index(full['mm_net'], '#1b7a34', r_ci, 'COT Index')
+        _fmt_index_axis(r_ci)
+        _add_zscore(full['mm_net'], '#1b7a34', r_z, 'Z-score')
+        _fmt_z_axis(r_z)
+        fig.update_annotations(font_size=12)
+        height = 1250 if has_price else 900
 
     fig.update_layout(
         title=dict(text=f"Posizionamento COT — {label}",
                    font=dict(size=15, color='#1a3a5c')),
-        height=640 if has_price else 520, plot_bgcolor='white', paper_bgcolor='white',
-        margin=dict(l=65, r=20, t=70, b=40),
-        legend=dict(orientation='h', yanchor='bottom', y=1.03, xanchor='left', x=0),
+        height=height, plot_bgcolor='white', paper_bgcolor='white',
+        margin=dict(l=70, r=70, t=80, b=40),
+        legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='left', x=0),
         hovermode='x unified')
     fig.update_xaxes(showgrid=True, gridcolor='#eef1f5')
-    fig.update_yaxes(showgrid=True, gridcolor='#eef1f5', zeroline=False)
-    fig.update_yaxes(title_text='Contratti netti', row=1, col=1)
-    if has_price:
-        fig.update_yaxes(title_text='Prezzo', row=2, col=1)
     return fig, _cot_summary(kind, full, label)
+
+
+# Slider periodo: dallo storico COT (report TFF/Disaggregated dal 2006) all'anno corrente.
+_COT_YEAR_MIN = 2006
+_COT_YEAR_MAX = pd.Timestamp.today().year
+
+
+def _cot_year_marks():
+    """Tacche dello slider: un'etichetta ogni 2 anni ('06, '08, …) + estremo destro."""
+    st = {'font-size': '9px', 'color': '#777'}
+    marks = {y: {'label': f"'{str(y)[2:]}", 'style': st}
+             for y in range(_COT_YEAR_MIN, _COT_YEAR_MAX + 1, 2)}
+    marks[_COT_YEAR_MAX] = {'label': f"'{str(_COT_YEAR_MAX)[2:]}", 'style': st}
+    return marks
 
 
 def get_cot_tab():
@@ -624,16 +841,17 @@ def get_cot_tab():
                              clearable=False, style={'width': '250px', 'font-size': '11px'}),
             ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '14px'}),
             html.Div([
-                html.Label("Periodo:", style={'margin-right': '6px', 'font-size': '11px'}),
-                dcc.RadioItems(id='cot-lookback',
-                               options=[{'label': ' 1a', 'value': 1}, {'label': ' 2a', 'value': 2},
-                                        {'label': ' 3a', 'value': 3}, {'label': ' 5a', 'value': 5},
-                                        {'label': ' Tutto', 'value': 0}],
-                               value=2, inline=True, style={'font-size': '11px'},
-                               inputStyle={'margin-right': '3px'},
-                               labelStyle={'margin-right': '9px'}),
+                html.Label("Periodo:", style={'margin-right': '12px', 'font-size': '11px',
+                                              'white-space': 'nowrap'}),
+                html.Div([
+                    dcc.RangeSlider(
+                        id='cot-range', min=_COT_YEAR_MIN, max=_COT_YEAR_MAX, step=1,
+                        value=[_COT_YEAR_MAX - 2, _COT_YEAR_MAX], allowCross=False,
+                        marks=_cot_year_marks(),
+                        tooltip={'placement': 'bottom', 'always_visible': False}),
+                ], style={'width': '360px'}),
             ], style={'display': 'flex', 'align-items': 'center', 'border': '1px solid #ccc',
-                      'border-radius': '4px', 'padding': '3px 8px', 'margin-right': '12px',
+                      'border-radius': '4px', 'padding': '3px 14px 3px 10px', 'margin-right': '12px',
                       'background': '#f5f5f5'}),
             html.Button('🔄 Aggiorna', id='cot-refresh', n_clicks=0,
                         title='Forza il ri-scaricamento dei dati dalla CFTC',
@@ -655,7 +873,7 @@ def get_cot_tab():
 
         html.Div(id='cot-summary', style={'margin-bottom': '10px'}),
         dcc.Loading(id='loading-cot', type='circle', color='#1a3a5c', children=[
-            dcc.Graph(id='cot-chart', style={'width': '100%', 'height': '660px'},
+            dcc.Graph(id='cot-chart', style={'width': '100%', 'height': '1400px'},
                       config={'responsive': True, 'displaylogo': False}),
         ]),
     ])
@@ -1321,16 +1539,16 @@ def _at_switch_tab(tab):
     Output('cot-chart', 'figure'),
     Output('cot-summary', 'children'),
     Input('cot-instrument', 'value'),
-    Input('cot-lookback', 'value'),
+    Input('cot-range', 'value'),
     Input('cot-refresh', 'n_clicks'),
 )
-def _update_cot(key, lookback, n):
+def _update_cot(key, year_range, n):
     if not key:
         raise PreventUpdate
     # il pulsante 🔄 forza il refetch invalidando la cache dello strumento
     if callback_context.triggered_id == 'cot-refresh':
         _COT_CACHE.pop(key, None)
-    return _cot_fig_and_summary(key, lookback)
+    return _cot_fig_and_summary(key, year_range)
 
 
 if __name__ == '__main__':
