@@ -435,8 +435,12 @@ def _cot_fetch(key, force=False):
                'lev_money_positions_short')
     else:
         url = _COT_DIS_URL
+        # Managed Money (speculatori) + lato Commercial (hedger) = Producer/Merchant
+        # + Swap Dealers. NB: il campo short degli swap ha il doppio underscore.
         sel = ('report_date_as_yyyy_mm_dd,m_money_positions_long_all,'
-               'm_money_positions_short_all')
+               'm_money_positions_short_all,prod_merc_positions_long,'
+               'prod_merc_positions_short,swap_positions_long_all,'
+               'swap__positions_short_all')
     params = {
         '$select': sel,
         '$where': f"contract_market_name='{contract}'",
@@ -458,6 +462,15 @@ def _cot_fetch(key, force=False):
         df['lm_net'] = df['lev_money_positions_long'] - df['lev_money_positions_short']
     else:
         df['mm_net'] = df['m_money_positions_long_all'] - df['m_money_positions_short_all']
+        # Commercial (hedger) = Producer/Merchant + Swap Dealers, netto long − short
+        comm_cols = ('prod_merc_positions_long', 'prod_merc_positions_short',
+                     'swap_positions_long_all', 'swap__positions_short_all')
+        if all(c in df.columns for c in comm_cols):
+            comm_long = (df['prod_merc_positions_long'].fillna(0)
+                         + df['swap_positions_long_all'].fillna(0))
+            comm_short = (df['prod_merc_positions_short'].fillna(0)
+                          + df['swap__positions_short_all'].fillna(0))
+            df['comm_net'] = comm_long - comm_short
     df = df.sort_values('date').set_index('date')
     _COT_CACHE[key] = (now, df)
     return df
@@ -537,7 +550,10 @@ def _cot_summary(kind, df, label):
             card('Leveraged Money (hedge fund)',  last['lm_net'], prev['lm_net'], '#c0392b'),
         ]
     else:
-        cards = [card('Managed Money (hedge fund)', last['mm_net'], prev['mm_net'], '#1a3a5c')]
+        cards = [card('Managed Money (hedge fund)', last['mm_net'], prev['mm_net'], '#1b7a34')]
+        if 'comm_net' in df.columns and pd.notna(last.get('comm_net')):
+            cards.append(card('Commercial (Producer/Merchant + Swap)',
+                              last['comm_net'], prev['comm_net'], '#1a3a5c'))
     return html.Div([
         html.Div(f"Ultimo dato CFTC: {d}",
                  style={'font-size': '11px', 'color': '#555', 'margin-bottom': '6px',
@@ -637,8 +653,8 @@ def _cot_fig_and_summary(key, year_range):
     disp = df.index
 
     def _add_cot_index(series_full, color, row, name):
-        """COT Index (0–100) calcolato sullo storico completo e ritagliato sulla finestra."""
-        ci = _cot_index_series(series_full).reindex(disp)
+        """COT Index (0–100) sullo storico completo, lisciato a 8 settimane e ritagliato."""
+        ci = _cot_index_series(series_full).rolling(8, min_periods=1).mean().reindex(disp)
         fig.add_trace(go.Scatter(
             x=disp, y=ci, name=name, showlegend=False, mode='lines',
             line=dict(color=color, width=1.8),
@@ -646,7 +662,8 @@ def _cot_fig_and_summary(key, year_range):
             row=row, col=1)
 
     def _add_zscore(series_full, color, row, name):
-        z = _cot_z_series(series_full).reindex(disp)
+        """Z-score sullo storico completo, lisciato a 8 settimane e ritagliato."""
+        z = _cot_z_series(series_full).rolling(8, min_periods=1).mean().reindex(disp)
         fig.add_trace(go.Scatter(
             x=disp, y=z, name=name, showlegend=False, mode='lines',
             line=dict(color=color, width=1.8),
@@ -664,6 +681,54 @@ def _cot_fig_and_summary(key, year_range):
         fig.add_hline(y=2, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
         fig.add_hline(y=-2, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
         fig.update_yaxes(title_text='Z-score', showgrid=True, gridcolor='#eef1f5', row=row, col=1)
+
+    def _add_wow(row, pairs):
+        """Variazione settimanale dei contratti netti (diff sett-su-sett), lisciata
+        con media a 4 settimane; la diff grezza è tracciata tenue sotto.
+
+        pairs = [(series_full, colore, nome), ...]. Calcolata sullo storico completo
+        e ritagliata alla finestra, così la media a 4 settimane è continua anche al
+        bordo sinistro del periodo mostrato.
+        """
+        for series_full, color, name in pairs:
+            raw = series_full.diff()
+            ma = raw.rolling(4, min_periods=1).mean()
+            fig.add_trace(go.Scatter(
+                x=disp, y=raw.reindex(disp), name=f'Δsett {name}', showlegend=False,
+                mode='lines', line=dict(color=color, width=0.8), opacity=0.30,
+                hoverinfo='skip'),
+                row=row, col=1)
+            fig.add_trace(go.Scatter(
+                x=disp, y=ma.reindex(disp), name=f'Δsett {name} (media 4 sett.)',
+                showlegend=False, mode='lines', line=dict(color=color, width=2.0),
+                hovertemplate='%{x|%d %b %Y}<br>Δ4s ' + name + ': %{y:,.0f}<extra></extra>'),
+                row=row, col=1)
+        fig.add_hline(y=0, line=dict(color='#999', width=1), row=row, col=1)
+        fig.update_yaxes(title_text='Δ contratti / sett.', showgrid=True,
+                         gridcolor='#eef1f5', zeroline=False, row=row, col=1)
+
+    def _add_sum(row):
+        """Somma AM + LM (contratti netti totali) con media a 4 settimane.
+
+        Essendo già posizioni nette, la somma dà il posizionamento netto complessivo
+        di istituzionali e hedge fund. Asse Y su [min − 10, max + 10] come i pannelli
+        di posizionamento.
+        """
+        am_ma = full['am_net'].rolling(4, min_periods=1).mean()
+        lm_ma = full['lm_net'].rolling(4, min_periods=1).mean()
+        s = (am_ma + lm_ma).reindex(disp)
+        fig.add_trace(go.Scatter(
+            x=disp, y=s, name='Somma AM + LM', showlegend=False,
+            mode='lines', line=dict(color='#6a3d9a', width=2.2),
+            fill='tozeroy', fillcolor='rgba(106,61,154,0.10)',
+            hovertemplate='%{x|%d %b %Y}<br>AM + LM: %{y:,.0f}<extra></extra>'),
+            row=row, col=1)
+        fig.add_hline(y=0, line=dict(color='#999', width=1), row=row, col=1)
+        fig.update_yaxes(title_text='AM + LM (netti)', showgrid=True, gridcolor='#eef1f5',
+                         zeroline=False, row=row, col=1)
+        yr = _yr(s)
+        if yr:
+            fig.update_yaxes(range=yr, row=row, col=1)
 
     def _add_drawdown(row):
         """Drawdown % del sottostante dal massimo progressivo della finestra mostrata."""
@@ -702,21 +767,27 @@ def _cot_fig_and_summary(key, year_range):
 
     if kind == 'tff':
         # Pannelli in ordine: Asset Manager, Leveraged Money (posizionamento + prezzo),
+        # Somma AM + LM, Variazione settimanale contratti (media 4 sett.),
         # poi Drawdown e Stocastico sul sottostante, infine COT Index e Z-score.
-        titles  = ['Asset Manager — istituzionali', 'Leveraged Money — hedge fund / CTA']
-        specs   = [[{'secondary_y': True}], [{'secondary_y': True}]]
-        heights = [1.0, 1.0]
+        titles  = ['Asset Manager — istituzionali (media 4 sett.)',
+                   'Leveraged Money — hedge fund / CTA (media 4 sett.)',
+                   'Somma AM + LM (contratti netti totali, media 4 sett.)',
+                   'Variazione settimanale contratti netti (media 4 sett.) — AM e LM']
+        specs   = [[{'secondary_y': True}], [{'secondary_y': True}],
+                   [{'secondary_y': False}], [{'secondary_y': False}]]
+        heights = [1.0, 1.0, 1.0, 1.40]   # AM, LM, somma, variazione settimanale (doppia)
+        r_sum, r_wow = 3, 4
         if has_price:
             titles  += [f'Drawdown {price_label} (%)',
                         f'Stocastico {price_label} — 240 gg (media 30) · 120 gg (media 20) · 60 gg (media 10) · 30 gg (media 5)']
             specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
             heights += [0.70, 0.70]
-            r_dd, r_st, r_ci, r_z = 3, 4, 5, 6
+            r_dd, r_st, r_ci, r_z = 5, 6, 7, 8
         else:
             r_dd = r_st = None
-            r_ci, r_z = 3, 4
-        titles  += ['COT Index (0–100, finestra 1 anno)',
-                    'Z-score (deviazioni standard, finestra 1 anno)']
+            r_ci, r_z = 5, 6
+        titles  += ['COT Index (0–100, finestra 1 anno, media 8 sett.)',
+                    'Z-score (deviazioni standard, finestra 1 anno, media 8 sett.)']
         specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
         heights += [0.70, 0.70]
         _tot = sum(heights)
@@ -724,19 +795,23 @@ def _cot_fig_and_summary(key, year_range):
             rows=len(specs), cols=1, shared_xaxes=True, vertical_spacing=0.045,
             row_heights=[h / _tot for h in heights], specs=specs,
             subplot_titles=tuple(titles))
+        # posizionamento AM/LM lisciato con media a 4 settimane (calcolata su full,
+        # ritagliata alla finestra per continuità al bordo sinistro)
+        am_disp = full['am_net'].rolling(4, min_periods=1).mean().reindex(disp)
+        lm_disp = full['lm_net'].rolling(4, min_periods=1).mean().reindex(disp)
         fig.add_trace(go.Scatter(
-            x=df.index, y=df['am_net'], name='Asset Manager (istituzionali)',
+            x=disp, y=am_disp, name='Asset Manager (istituzionali)',
             mode='lines', line=dict(color='#1a3a5c', width=2.2),
             hovertemplate='%{x|%d %b %Y}<br>Asset Manager: %{y:,.0f}<extra></extra>'),
             row=1, col=1, secondary_y=False)
         fig.add_trace(go.Scatter(
-            x=df.index, y=df['lm_net'], name='Leveraged Money (hedge fund / CTA)',
+            x=disp, y=lm_disp, name='Leveraged Money (hedge fund / CTA)',
             mode='lines', line=dict(color='#c0392b', width=2.2),
             hovertemplate='%{x|%d %b %Y}<br>Leveraged Money: %{y:,.0f}<extra></extra>'),
             row=2, col=1, secondary_y=False)
         _add_price(1)
         _add_price(2)
-        for r, series in ((1, df['am_net']), (2, df['lm_net'])):
+        for r, series in ((1, am_disp), (2, lm_disp)):
             fig.add_hline(y=0, line=dict(color='#999', width=1), row=r, col=1, secondary_y=False)
             fig.update_yaxes(title_text='Contratti netti', showgrid=True, gridcolor='#eef1f5',
                              zeroline=False, row=r, col=1, secondary_y=False)
@@ -744,6 +819,9 @@ def _cot_fig_and_summary(key, year_range):
             if yr:
                 fig.update_yaxes(range=yr, row=r, col=1, secondary_y=False)
             _fmt_price_axis(r)
+        _add_sum(r_sum)
+        _add_wow(r_wow, [(full['am_net'], '#1a3a5c', 'Asset Manager'),
+                         (full['lm_net'], '#c0392b', 'Leveraged Money')])
         if has_price:
             _add_drawdown(r_dd)
             _add_stoch(r_st)
@@ -754,53 +832,94 @@ def _cot_fig_and_summary(key, year_range):
         _add_zscore(full['lm_net'], '#c0392b', r_z, 'Z-score LM')
         _fmt_z_axis(r_z)
         fig.update_annotations(font_size=12)
-        height = 1400 if has_price else 1000
+        height = 2100 if has_price else 1700
     else:
-        # Materie prime: Managed Money + Drawdown + Stocastico + COT Index + Z-score.
-        titles  = ['Managed Money — hedge fund']
-        specs   = [[{'secondary_y': True}]]
-        heights = [1.3]
+        # Materie prime: Managed Money (speculatori) e Commercial (hedger = Producer/
+        # Merchant + Swap Dealers), poi Variazione settimanale, Drawdown e Stocastico
+        # sul sottostante, infine COT Index e Z-score. Se il Commercial non è
+        # disponibile si mostra il solo Managed Money.
+        has_comm = 'comm_net' in df.columns and df['comm_net'].notna().any()
+        mm_disp = full['mm_net'].rolling(4, min_periods=1).mean().reindex(disp)
+        if has_comm:
+            titles  = ['Managed Money — hedge fund (media 4 sett.)',
+                       'Commercial — Producer/Merchant + Swap Dealers (media 4 sett.)']
+            specs   = [[{'secondary_y': True}], [{'secondary_y': True}]]
+            heights = [1.0, 1.0]
+            pos_rows = 2
+        else:
+            titles  = ['Managed Money — hedge fund (media 4 sett.)']
+            specs   = [[{'secondary_y': True}]]
+            heights = [1.3]
+            pos_rows = 1
+        titles  += ['Variazione settimanale contratti netti (media 4 sett.)']
+        specs   += [[{'secondary_y': False}]]
+        heights += [1.40]
+        r_wow = pos_rows + 1
         if has_price:
             titles  += [f'Drawdown {price_label} (%)',
                         f'Stocastico {price_label} — 240 gg (media 30) · 120 gg (media 20) · 60 gg (media 10) · 30 gg (media 5)']
             specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
             heights += [0.70, 0.70]
-            r_dd, r_st, r_ci, r_z = 2, 3, 4, 5
+            r_dd, r_st = r_wow + 1, r_wow + 2
+            r_ci, r_z = r_wow + 3, r_wow + 4
         else:
             r_dd = r_st = None
-            r_ci, r_z = 2, 3
-        titles  += ['COT Index (0–100, finestra 1 anno)',
-                    'Z-score (deviazioni standard, finestra 1 anno)']
+            r_ci, r_z = r_wow + 1, r_wow + 2
+        titles  += ['COT Index (0–100, finestra 1 anno, media 8 sett.)',
+                    'Z-score (deviazioni standard, finestra 1 anno, media 8 sett.)']
         specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
         heights += [0.80, 0.80]
         _tot = sum(heights)
         fig = make_subplots(
-            rows=len(specs), cols=1, shared_xaxes=True, vertical_spacing=0.05,
+            rows=len(specs), cols=1, shared_xaxes=True, vertical_spacing=0.045,
             row_heights=[h / _tot for h in heights], specs=specs,
             subplot_titles=tuple(titles))
-        net = df['mm_net']
-        colors = ['#1b7a34' if v >= 0 else '#c0392b' for v in net]
-        fig.add_trace(go.Bar(
-            x=df.index, y=net, name='Managed Money (hedge fund)', marker_color=colors,
-            hovertemplate='%{x|%d %b %Y}<br>Managed Money netto: %{y:,.0f}<extra></extra>'),
+        # posizionamento Managed Money, lisciato a 4 settimane
+        fig.add_trace(go.Scatter(
+            x=disp, y=mm_disp, name='Managed Money (hedge fund)',
+            mode='lines', line=dict(color='#1b7a34', width=2.2),
+            hovertemplate='%{x|%d %b %Y}<br>Managed Money: %{y:,.0f}<extra></extra>'),
             row=1, col=1, secondary_y=False)
         _add_price(1)
         fig.add_hline(y=0, line=dict(color='#999', width=1), row=1, col=1, secondary_y=False)
-        fig.update_yaxes(title_text='Contratti netti (Long − Short)', showgrid=True,
-                         gridcolor='#eef1f5', zeroline=False, row=1, col=1, secondary_y=False)
-        yr = _yr(net)
+        fig.update_yaxes(title_text='Contratti netti', showgrid=True, gridcolor='#eef1f5',
+                         zeroline=False, row=1, col=1, secondary_y=False)
+        yr = _yr(mm_disp)
         if yr:
             fig.update_yaxes(range=yr, row=1, col=1, secondary_y=False)
         _fmt_price_axis(1)
+        if has_comm:
+            comm_disp = full['comm_net'].rolling(4, min_periods=1).mean().reindex(disp)
+            fig.add_trace(go.Scatter(
+                x=disp, y=comm_disp, name='Commercial (Producer/Merchant + Swap)',
+                mode='lines', line=dict(color='#1a3a5c', width=2.2),
+                hovertemplate='%{x|%d %b %Y}<br>Commercial: %{y:,.0f}<extra></extra>'),
+                row=2, col=1, secondary_y=False)
+            _add_price(2)
+            fig.add_hline(y=0, line=dict(color='#999', width=1), row=2, col=1, secondary_y=False)
+            fig.update_yaxes(title_text='Contratti netti', showgrid=True, gridcolor='#eef1f5',
+                             zeroline=False, row=2, col=1, secondary_y=False)
+            yr = _yr(comm_disp)
+            if yr:
+                fig.update_yaxes(range=yr, row=2, col=1, secondary_y=False)
+            _fmt_price_axis(2)
+        wow_pairs = [(full['mm_net'], '#1b7a34', 'Managed Money')]
+        if has_comm:
+            wow_pairs.append((full['comm_net'], '#1a3a5c', 'Commercial'))
+        _add_wow(r_wow, wow_pairs)
         if has_price:
             _add_drawdown(r_dd)
             _add_stoch(r_st)
-        _add_cot_index(full['mm_net'], '#1b7a34', r_ci, 'COT Index')
+        _add_cot_index(full['mm_net'], '#1b7a34', r_ci, 'COT Index MM')
+        if has_comm:
+            _add_cot_index(full['comm_net'], '#1a3a5c', r_ci, 'COT Index Commercial')
         _fmt_index_axis(r_ci)
-        _add_zscore(full['mm_net'], '#1b7a34', r_z, 'Z-score')
+        _add_zscore(full['mm_net'], '#1b7a34', r_z, 'Z-score MM')
+        if has_comm:
+            _add_zscore(full['comm_net'], '#1a3a5c', r_z, 'Z-score Commercial')
         _fmt_z_axis(r_z)
         fig.update_annotations(font_size=12)
-        height = 1250 if has_price else 900
+        height = int(290 * _tot)
 
     fig.update_layout(
         title=dict(text=f"Posizionamento COT — {label}",
@@ -865,7 +984,8 @@ def get_cot_tab():
                  'Per indici azionari, valute e tassi (report TFF) sono mostrate le posizioni '
                  'nette di Asset Manager (fondi pensione/comuni/assicurazioni, medio-lungo termine) '
                  'e Leveraged Money (hedge fund/CTA, speculativi). Per le materie prime '
-                 '(report Disaggregated) è mostrato il Managed Money (speculazione hedge fund).',
+                 '(report Disaggregated) sono mostrati il Managed Money (speculazione hedge fund) '
+                 'e il Commercial (hedger = Producer/Merchant + Swap Dealers).',
                  style={'font-size': '10px', 'color': '#777', 'margin-bottom': '10px',
                         'line-height': '1.4', 'max-width': '920px'}),
 
@@ -1538,6 +1658,7 @@ def _at_switch_tab(tab):
 @app.callback(
     Output('cot-chart', 'figure'),
     Output('cot-summary', 'children'),
+    Output('cot-chart', 'style'),
     Input('cot-instrument', 'value'),
     Input('cot-range', 'value'),
     Input('cot-refresh', 'n_clicks'),
@@ -1548,7 +1669,10 @@ def _update_cot(key, year_range, n):
     # il pulsante 🔄 forza il refetch invalidando la cache dello strumento
     if callback_context.triggered_id == 'cot-refresh':
         _COT_CACHE.pop(key, None)
-    return _cot_fig_and_summary(key, year_range)
+    fig, summary = _cot_fig_and_summary(key, year_range)
+    h = int(getattr(fig.layout, 'height', None) or 1400)
+    style = {'width': '100%', 'height': f'{h}px'}
+    return fig, summary, style
 
 
 if __name__ == '__main__':
