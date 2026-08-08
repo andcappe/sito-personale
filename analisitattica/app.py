@@ -688,24 +688,35 @@ def _cot_fig_and_summary(key, year_range):
 
         pairs = [(series_full, colore, nome), ...]. Calcolata sullo storico completo
         e ritagliata alla finestra, così la media a 4 settimane è continua anche al
-        bordo sinistro del periodo mostrato.
+        bordo sinistro del periodo mostrato. Asse Y su [min − 10, max + 10] delle sole
+        medie a 4 settimane: le diff grezze possono essere tagliate, così le medie
+        riempiono il pannello e restano leggibili.
         """
+        shown = []
         for series_full, color, name in pairs:
             raw = series_full.diff()
             ma = raw.rolling(4, min_periods=1).mean()
+            raw_d = raw.reindex(disp)
+            ma_d = ma.reindex(disp)
+            shown.append(ma_d)
             fig.add_trace(go.Scatter(
-                x=disp, y=raw.reindex(disp), name=f'Δsett {name}', showlegend=False,
+                x=disp, y=raw_d, name=f'Δsett {name}', showlegend=False,
                 mode='lines', line=dict(color=color, width=0.8), opacity=0.30,
                 hoverinfo='skip'),
                 row=row, col=1)
             fig.add_trace(go.Scatter(
-                x=disp, y=ma.reindex(disp), name=f'Δsett {name} (media 4 sett.)',
+                x=disp, y=ma_d, name=f'Δsett {name} (media 4 sett.)',
                 showlegend=False, mode='lines', line=dict(color=color, width=2.0),
                 hovertemplate='%{x|%d %b %Y}<br>Δ4s ' + name + ': %{y:,.0f}<extra></extra>'),
                 row=row, col=1)
         fig.add_hline(y=0, line=dict(color='#999', width=1), row=row, col=1)
         fig.update_yaxes(title_text='Δ contratti / sett.', showgrid=True,
                          gridcolor='#eef1f5', zeroline=False, row=row, col=1)
+        if shown:
+            allv = pd.concat(shown).dropna()
+            if not allv.empty:
+                fig.update_yaxes(range=[float(allv.min()) - 10, float(allv.max()) + 10],
+                                 row=row, col=1)
 
     def _add_sum(row):
         """Somma AM + LM (contratti netti totali) con media a 4 settimane.
@@ -927,7 +938,7 @@ def _cot_fig_and_summary(key, year_range):
         height=height, plot_bgcolor='white', paper_bgcolor='white',
         margin=dict(l=70, r=70, t=80, b=40),
         legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='left', x=0),
-        hovermode='x unified')
+        hovermode='closest')
     fig.update_xaxes(showgrid=True, gridcolor='#eef1f5')
     return fig, _cot_summary(kind, full, label)
 
@@ -1450,7 +1461,7 @@ def run_arima_tab_analysis(n_clicks, selected_asset, horizon, max_p, max_q, crit
             showlegend=True,
             legend=dict(x=1.01, y=1, xanchor='left', yanchor='top', font=dict(size=9),
                         bgcolor='rgba(255,255,255,0.8)', bordercolor='#ccc', borderwidth=1),
-            margin=dict(t=70, b=30, l=55, r=175), hovermode='x unified',
+            margin=dict(t=70, b=30, l=55, r=175), hovermode='closest',
         )
         for row_n, col_n, lbl in [(1, 1, 'Log Prezzo'), (2, 1, 'Ciclicità'), (2, 2, 'Δ Ciclicità'),
                                   (3, 1, 'ACF'), (3, 2, 'PACF'),
