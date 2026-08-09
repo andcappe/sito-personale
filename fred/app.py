@@ -1011,6 +1011,221 @@ SHOCK_SERIES = {
 }
 
 
+# =============================================================================
+#  CACHE CONDIVISA SETTIMANALE DEI DATI MACRO  (FRED / BCE / Eurostat)
+# -----------------------------------------------------------------------------
+#  Obiettivo: NON far riscaricare a ogni utente le serie standard. Una sola
+#  build a settimana (sab 06:00 Europe/Rome, scheduler in fondo al file) scarica
+#  tutti i dataset "standard" e li salva in fred/sessions/macro_cache.pkl,
+#  sincronizzato su R2 da cloud_storage (sopravvive ai restart/deploy di DO).
+#
+#  I tab leggono da qui in modo TRASPARENTE: avvolgiamo (wrap) le primitive di
+#  download già esistenti. Se la chiamata usa un dataset standard (identità con
+#  DEFAULT_SERIES / YIELD_SERIES / GDP_SERIES / ADL_USA_SERIES / SHOCK_SERIES,
+#  oppure un geo dell'Eurozona) e la cache ce l'ha → ritorna una COPIA dalla
+#  cache. Le "serie particolari" (upload xlsx o qualunque dizionario ad hoc)
+#  NON matchano → download live come prima. Fallback live sempre garantito.
+# =============================================================================
+import threading as _thr_cache
+import pickle as _pk_cache
+
+_MACRO_CACHE_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sessions')
+_MACRO_CACHE_F    = os.path.join(_MACRO_CACHE_DIR, 'macro_cache.pkl')
+_MACRO_MAX_AGE    = 7 * 24 * 3600          # 7 giorni → oltre = "vecchia": ricostruisci al boot
+_MACRO_MIN_GAP    = 6 * 3600               # se la cache è incompleta ricostruisci, ma non
+                                            # più di una volta ogni 6h (restart ravvicinati)
+_MACRO_CACHE      = {}                      # {chiave: DataFrame}  (in memoria)
+_MACRO_CACHE_TS   = 0.0                     # epoch dell'ultima build
+_MACRO_BUILD_LOCK = _thr_cache.Lock()       # evita build concorrenti (boot + scheduler)
+
+
+def _macro_cache_load():
+    """Carica la cache condivisa da disco in memoria (best-effort, non solleva)."""
+    global _MACRO_CACHE, _MACRO_CACHE_TS
+    try:
+        if os.path.exists(_MACRO_CACHE_F):
+            with open(_MACRO_CACHE_F, 'rb') as _f:
+                blob = _pk_cache.load(_f)
+            _MACRO_CACHE    = blob.get('data', {}) or {}
+            _MACRO_CACHE_TS = float(blob.get('ts', os.path.getmtime(_MACRO_CACHE_F)))
+    except Exception as _e:
+        print(f"⚠ [macro-cache] load fallito: {_e}", flush=True)
+
+
+def _macro_get(key):
+    """DataFrame (COPIA) dalla cache condivisa, o None se assente/vuoto.
+    La copia è obbligatoria: alcuni callback aggiungono colonne al df."""
+    df = _MACRO_CACHE.get(key)
+    if df is not None and not df.empty:
+        return df.copy()
+    return None
+
+
+# ── Riferimenti alle primitive REALI, catturati PRIMA del wrapping ───────────
+_live_build_dataframe       = build_dataframe
+_live_build_daily_dataframe = build_daily_dataframe
+_live_build_monetary_eur_df = build_monetary_eur_df
+_live_build_eurostat_df     = build_eurostat_dataframe
+_live_bce_get_yields_df     = bce_get_yields_df
+
+
+def _macro_std_key(series_dict):
+    """Chiave cache se series_dict È uno dei dataset standard (per IDENTITÀ),
+    altrimenti None → download live (serie particolari / upload xlsx)."""
+    if series_dict is DEFAULT_SERIES:   return 'monetario_usa'
+    if series_dict is GDP_SERIES:       return 'pil_usa'
+    if series_dict is ADL_USA_SERIES:   return 'adl_usa'
+    if series_dict is YIELD_SERIES:     return 'yields_usa'
+    if series_dict is SHOCK_SERIES:     return 'shock'
+    return None
+
+
+def build_dataframe(series_dict, api_key):           # noqa: F811 (wrap intenzionale)
+    ck = _macro_std_key(series_dict)
+    if ck is not None:
+        c = _macro_get(ck)
+        if c is not None:
+            return c
+    return _live_build_dataframe(series_dict, api_key)
+
+
+def build_daily_dataframe(series_dict, api_key):      # noqa: F811
+    ck = _macro_std_key(series_dict)
+    if ck is not None:
+        c = _macro_get(ck)
+        if c is not None:
+            return c
+    return _live_build_daily_dataframe(series_dict, api_key)
+
+
+def build_monetary_eur_df(geo, api_key):              # noqa: F811
+    c = _macro_get(f'monetario_eur_{geo}')
+    if c is not None:
+        return c
+    return _live_build_monetary_eur_df(geo, api_key)
+
+
+def build_eurostat_dataframe(geo):                    # noqa: F811
+    c = _macro_get(f'eurostat_{geo}')
+    if c is not None:
+        return c
+    return _live_build_eurostat_df(geo)
+
+
+def bce_get_yields_df():                              # noqa: F811
+    c = _macro_get('yields_eur')
+    if c is not None:
+        return c
+    return _live_bce_get_yields_df()
+
+
+def _build_macro_cache(reason='schedulato'):
+    """Scarica UNA volta tutti i dataset standard e riscrive la cache condivisa
+    (pickle atomico + push su R2). Usa SEMPRE le primitive live (_live_*)."""
+    global _MACRO_CACHE, _MACRO_CACHE_TS
+    import time as _t
+    if not _MACRO_BUILD_LOCK.acquire(blocking=False):
+        print("… [macro-cache] build già in corso, salto", flush=True)
+        return
+    try:
+        print(f"▶ [macro-cache] build ({reason})…", flush=True)
+        key  = FRED_API_KEY
+        data = {}
+
+        def _try(name, fn):
+            try:
+                df = fn()
+                if df is not None and not df.empty:
+                    data[name] = df
+                    print(f"  ✓ {name}: {df.shape[0]}×{df.shape[1]}", flush=True)
+                else:
+                    print(f"  ⚠ {name}: vuoto", flush=True)
+            except Exception as _e:
+                print(f"  ✗ {name}: {_e}", flush=True)
+
+        # ── USA (FRED) ────────────────────────────────────────────────────────
+        _try('monetario_usa', lambda: _live_build_dataframe(DEFAULT_SERIES, key))
+        _try('pil_usa',       lambda: _live_build_dataframe(GDP_SERIES, key))
+        _try('adl_usa',       lambda: _live_build_dataframe(ADL_USA_SERIES, key))
+        _try('yields_usa',    lambda: _live_build_daily_dataframe(YIELD_SERIES, key))
+        _try('shock',         lambda: _live_build_daily_dataframe(SHOCK_SERIES, key))
+        # ── Curva rendimenti BCE ──────────────────────────────────────────────
+        _try('yields_eur',    _live_bce_get_yields_df)
+        # ── Eurozona: monetario + Eurostat per ogni geo ───────────────────────
+        for _g in EUROSTAT_GEO:
+            _try(f'monetario_eur_{_g}', lambda g=_g: _live_build_monetary_eur_df(g, key))
+            _try(f'eurostat_{_g}',      lambda g=_g: _live_build_eurostat_df(g))
+
+        if not data:
+            print("⚠ [macro-cache] nessun dato scaricato — cache NON aggiornata", flush=True)
+            return
+
+        # MERGE, non sostituzione: se un download fallisce (FRED giù, rate limit)
+        # si tiene il dataset già in cache invece di perderlo.
+        merged = dict(_MACRO_CACHE)
+        merged.update(data)
+        if len(merged) > len(data):
+            print(f"  ℹ {len(merged) - len(data)} dataset conservati dalla cache "
+                  f"precedente (download fallito questo giro)", flush=True)
+        data = merged
+
+        blob = {'data': data, 'ts': _t.time()}
+        try:
+            os.makedirs(_MACRO_CACHE_DIR, exist_ok=True)
+            _tmp = _MACRO_CACHE_F + '.tmp'
+            with open(_tmp, 'wb') as _f:
+                _pk_cache.dump(blob, _f)
+            os.replace(_tmp, _MACRO_CACHE_F)          # scrittura atomica
+        except Exception as _e:
+            print(f"⚠ [macro-cache] salvataggio fallito: {_e}", flush=True)
+            return
+
+        _MACRO_CACHE, _MACRO_CACHE_TS = data, blob['ts']
+
+        try:                                          # push su R2 (best-effort)
+            import cloud_storage
+            cloud_storage.push(_MACRO_CACHE_F)
+        except Exception as _e:
+            print(f"⚠ [macro-cache] push R2 fallito: {_e}", flush=True)
+
+        print(f"✓ [macro-cache] pronta — {len(data)} dataset ({reason})", flush=True)
+    finally:
+        _MACRO_BUILD_LOCK.release()
+
+
+def _macro_expected_keys():
+    """Chiavi che una cache completa deve contenere. Le serie USA valgono solo
+    se fredapi è installato (in locale spesso non c'è → niente rebuild inutili)."""
+    keys = {'yields_eur'}
+    if FRED_AVAILABLE:
+        keys |= {'monetario_usa', 'pil_usa', 'adl_usa', 'yields_usa', 'shock'}
+    for g in EUROSTAT_GEO:
+        keys |= {f'monetario_eur_{g}', f'eurostat_{g}'}
+    return keys
+
+
+def _macro_prewarm():
+    """Al boot: carica la cache (ripristinata da R2 in wsgi.pull_all, o da disco).
+    Ricostruisce in background se manca, se è più vecchia di 7 giorni oppure se è
+    incompleta (build precedente parziale) — in quest'ultimo caso al massimo ogni 6h."""
+    import time as _t
+    _macro_cache_load()
+    age     = (_t.time() - _MACRO_CACHE_TS) if _MACRO_CACHE_TS else 1e18
+    mancanti = _macro_expected_keys() - set(_MACRO_CACHE)
+    if _MACRO_CACHE and age < _MACRO_MAX_AGE and not mancanti:
+        print(f"✓ [macro-cache] presente e completa ({len(_MACRO_CACHE)} dataset, "
+              f"~{age/3600:.0f}h fa) — nessun rebuild", flush=True)
+        return
+    if _MACRO_CACHE and age < _MACRO_MAX_AGE:            # solo incompleta
+        if age < _MACRO_MIN_GAP:
+            print(f"… [macro-cache] incompleta ({len(mancanti)} dataset mancanti) ma "
+                  f"ricostruita {age/3600:.1f}h fa — riprovo al prossimo restart", flush=True)
+            return
+        _build_macro_cache(reason=f'boot: cache incompleta ({len(mancanti)} mancanti)')
+        return
+    _build_macro_cache(reason='boot: cache assente o vecchia')
+
+
 def _shock_tab_layout():
     from dash import html, dcc
 
@@ -4978,28 +5193,12 @@ def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_sh
     prevent_initial_call=False,
 )
 def load_yields(n_clicks, api_key):
-    # Cache su disco (12h): il download live FRED+BCE è lento (~40s), qui è istantaneo.
-    import os as _os, time as _t, pickle as _pk
-    _cache_f = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'yields_cache.pkl')
-    df_usa = df_eur = None
-    try:
-        if _os.path.exists(_cache_f) and (_t.time() - _os.path.getmtime(_cache_f) < 43200):
-            with open(_cache_f, 'rb') as _f:
-                df_usa, df_eur = _pk.load(_f)
-            print("  ✓ Curva tassi da cache")
-    except Exception:
-        df_usa = df_eur = None
-    if df_usa is None:
-        api_key = (api_key or FRED_API_KEY).strip()
-        print("\n▶ Download tassi da FRED...")
-        df_usa = build_daily_dataframe(YIELD_SERIES, api_key)
-        print("\n▶ Download curva rendimenti dalla BCE...")
-        df_eur = bce_get_yields_df()
-        try:
-            with open(_cache_f, 'wb') as _f:
-                _pk.dump((df_usa, df_eur), _f)
-        except Exception:
-            pass
+    # Dati standard dalla cache condivisa settimanale (build_daily_dataframe e
+    # bce_get_yields_df sono avvolti da _macro_get); su cache-miss il fallback è
+    # il download live FRED + BCE.
+    api_key = (api_key or FRED_API_KEY).strip()
+    df_usa = build_daily_dataframe(YIELD_SERIES, api_key)
+    df_eur = bce_get_yields_df()
 
     if df_usa.empty and df_eur.empty:
         return None, None, "❌ Download fallito — verifica connessione", 0, 1, [0, 1], {}
@@ -13661,24 +13860,26 @@ def _fred_preselect_tab(_n, search):
     raise PreventUpdate
 
 
-# Pre-carica la cache della curva tassi all'avvio (background, non blocca il boot)
-def _prewarm_yields():
-    import os as _os, time as _t, pickle as _pk
-    _cache_f = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'yields_cache.pkl')
-    try:
-        if _os.path.exists(_cache_f) and (_t.time() - _os.path.getmtime(_cache_f) < 43200):
-            return
-        df_usa = build_daily_dataframe(YIELD_SERIES, FRED_API_KEY)
-        df_eur = bce_get_yields_df()
-        with open(_cache_f, 'wb') as _f:
-            _pk.dump((df_usa, df_eur), _f)
-        print("✓ [FRED] cache curva tassi pre-caricata", flush=True)
-    except Exception as _e:
-        print(f"⚠ [FRED] prewarm yields fallito: {_e}", flush=True)
-
-
+# ── Boot: cache condivisa Macro (background, non blocca il boot) ─────────────
 import threading as _thr
-_thr.Thread(target=_prewarm_yields, daemon=True).start()
+_thr.Thread(target=_macro_prewarm, daemon=True).start()
+
+# ── Scheduler settimanale: ricostruisce la cache ogni sabato 06:00 Europe/Rome
+#    (il weekend cattura tutti i rilasci FRED della settimana). Stesso strumento
+#    già usato in portafoglio/app.py. Con gunicorn workers=1 gira una sola volta.
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler as _BgSched
+    _macro_scheduler = _BgSched(timezone='Europe/Rome')
+    _macro_scheduler.add_job(
+        lambda: _build_macro_cache(reason='schedulato sab 06:00'),
+        'cron', day_of_week='sat', hour=6, minute=0,
+        id='macro_cache_weekly', replace_existing=True,
+        misfire_grace_time=3600, coalesce=True,
+    )
+    _macro_scheduler.start()
+    print("✓ [macro-cache] scheduler settimanale attivo (sab 06:00 Europe/Rome)", flush=True)
+except Exception as _e:
+    print(f"⚠ [macro-cache] scheduler non avviato: {_e}", flush=True)
 
 
 if __name__ == "__main__":

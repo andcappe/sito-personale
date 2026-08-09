@@ -31,7 +31,9 @@ from pathlib import Path
 _ROOT = Path(os.path.dirname(os.path.abspath(__file__)))
 
 # Cartelle (relative alla root) i cui file vengono replicati sul bucket.
-_SYNC_PREFIXES = ('sessions/', 'portafoglio/sessions/')
+# 'fred/sessions/' = cache condivisa settimanale dei dati Macro (macro_cache.pkl):
+# costruita una volta a settimana, deve sopravvivere ai restart/deploy di DO.
+_SYNC_PREFIXES = ('sessions/', 'portafoglio/sessions/', 'fred/sessions/')
 
 _client = None
 _client_lock = threading.Lock()
