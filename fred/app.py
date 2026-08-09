@@ -16,6 +16,13 @@ from plotly.subplots import make_subplots
 from dash import Dash, html, dcc, callback_context, Output, Input, State, ALL, no_update
 from dash.exceptions import PreventUpdate
 
+# ── path del sito per importare i moduli condivisi (navbar, settings) ──
+import sys as _sys
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in _sys.path:
+    _sys.path.insert(0, _ROOT)
+from settings.browser_css import BROWSER_RESET_CSS  # noqa: E402  (reset CSS unico del sito)
+
 try:
     from fredapi import Fred
     FRED_AVAILABLE = True
@@ -1658,7 +1665,7 @@ app = Dash(__name__, suppress_callback_exceptions=True,
            ],
            requests_pathname_prefix='/fred/', routes_pathname_prefix='/fred/')
 
-app.index_string = """
+app.index_string = ("""
 <!DOCTYPE html>
 <html>
 <head>
@@ -1667,6 +1674,18 @@ app.index_string = """
 {%favicon%}
 {%css%}
 <style>
+""" + BROWSER_RESET_CSS + """
+/* ── Multi-tab (main-tabs + sotto-tab) coerenti col resto del sito: 11px Inter ── */
+#main-tabs .tab {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 11px !important;
+    padding: 8px 14px !important;
+}
+#main-tabs .tab--selected {
+    font-weight: 700 !important;
+    color: #1a3a6b !important;
+    border-top: 3px solid #1a3a6b !important;
+}
 @keyframes pulse {
     0%   { opacity: 1;   transform: scale(1);    }
     50%  { opacity: 0.5; transform: scale(1.15); }
@@ -1694,7 +1713,7 @@ html.fred-embed #main-tabs > div:first-child { display: none !important; }
 </footer>
 </body>
 </html>
-"""
+""")
 
 DEFAULT_LABELS = [v[0] for v in DEFAULT_SERIES.values()]
 
