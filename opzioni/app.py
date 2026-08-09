@@ -205,6 +205,71 @@ def compute_exposure(calls_df, puts_df, spot, T, r):
         'total_dex': total_dex,
     }
 
+
+def compute_oi_maxpain(calls_df, puts_df, spot):
+    """Open Interest per Strike + Max Pain.
+
+    - Aggrega l'open interest di call e put per ogni strike: la concentrazione dei
+      contratti aperti identifica supporti (picco di put OI) e resistenze (picco di
+      call OI) naturali.
+    - Max Pain: il prezzo di scadenza a cui scade il maggior valore di opzioni senza
+      valore (OTM) — cioè quello che minimizza il valore pagato dai writer — e agisce
+      da 'magnete' per il sottostante. Per un prezzo di regolamento S:
+          pagato_call = Σ_{K<S} OI_call(K)·(S−K)
+          pagato_put  = Σ_{K>S} OI_put(K)·(K−S)
+      Max Pain = argmin_S (pagato_call + pagato_put), con S tra gli strike quotati.
+
+    Ritorna un dict o None se non c'è open interest utile.
+    """
+    def _oi_map(df):
+        m = {}
+        if df is None:
+            return m
+        for _, row in df.iterrows():
+            try:
+                K  = float(row['strike'])
+                oi = int(row.get('openInterest', 0) or 0)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if oi <= 0 or K <= 0:
+                continue
+            m[K] = m.get(K, 0) + oi
+        return m
+
+    call_oi = _oi_map(calls_df)
+    put_oi  = _oi_map(puts_df)
+    strikes = sorted(set(call_oi) | set(put_oi))
+    if not strikes:
+        return None
+
+    call_v = [call_oi.get(K, 0) for K in strikes]
+    put_v  = [put_oi.get(K, 0)  for K in strikes]
+
+    # Max Pain: ogni strike come possibile prezzo di regolamento a scadenza
+    pains = []
+    for S in strikes:
+        pay_call = sum(call_oi.get(K, 0) * (S - K) for K in strikes if K < S)
+        pay_put  = sum(put_oi.get(K, 0)  * (K - S) for K in strikes if K > S)
+        pains.append(pay_call + pay_put)
+    max_pain = strikes[int(np.argmin(pains))]
+
+    total_call = sum(call_v)
+    total_put  = sum(put_v)
+    pcr        = (total_put / total_call) if total_call > 0 else None
+
+    return {
+        'strikes': strikes,
+        'call_oi': call_v,
+        'put_oi': put_v,
+        'pain_curve': pains,
+        'max_pain': max_pain,
+        'support':    (max(put_oi,  key=put_oi.get)  if put_oi  else None),
+        'resistance': (max(call_oi, key=call_oi.get) if call_oi else None),
+        'total_call_oi': total_call,
+        'total_put_oi': total_put,
+        'pcr': pcr,
+    }
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SEZIONE 3 — IV SURFACE / SKEW / TERM STRUCTURE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1436,6 +1501,49 @@ app.layout = html.Div([
                             config={'displayModeBar': False})),
                     ], style={'paddingTop': '12px'})),
 
+            dcc.Tab(label='OI & Max Pain', value='oi',
+                    style=_TAB_STYLE, selected_style=_TAB_SEL,
+                    children=html.Div([
+                        dcc.Store(id='opt-oi-store'),
+                        html.Div([
+                            _lbl('Scadenze:'),
+                            dcc.RadioItems(id='opt-oi-scope',
+                                options=[{'label': ' Scadenza selezionata', 'value': 'single'},
+                                         {'label': ' Aggregato (tutte le scadenze)', 'value': 'all'}],
+                                value='single', inline=True,
+                                inputStyle={'marginRight': '3px'},
+                                labelStyle={'marginRight': '14px', 'cursor': 'pointer'},
+                                style={'fontSize': '11px'}),
+                            html.Button(
+                                [html.I(className='fa-solid fa-layer-group',
+                                         style={'marginRight': '6px'}),
+                                 'Carica tutte le scadenze'],
+                                id='opt-oi-load-btn', n_clicks=0, style={
+                                    'background': '#4a1a7c', 'color': 'white', 'border': 'none',
+                                    'padding': '6px 14px', 'borderRadius': '5px', 'cursor': 'pointer',
+                                    'fontWeight': '700', 'fontSize': '11px'}),
+                            html.Div(id='opt-oi-load-status',
+                                     style={'fontSize': '11px', 'color': '#666'}),
+                        ], style={'display': 'flex', 'alignItems': 'center', 'gap': '12px',
+                                  'flexWrap': 'wrap', 'paddingTop': '12px'}),
+                        html.Div(id='opt-oi-summary', style={
+                            'display': 'flex', 'gap': '12px', 'margin': '10px 0',
+                            'flexWrap': 'wrap'}),
+                        dcc.Loading(type='circle', children=dcc.Graph(
+                            id='opt-oi-chart', style={'height': '440px'},
+                            config={'displayModeBar': False})),
+                        html.Div([
+                            html.B('Open Interest per Strike & Max Pain. '),
+                            'La concentrazione dei contratti aperti identifica supporto e '
+                            'resistenza naturali. Il Max Pain individua il prezzo di scadenza '
+                            'a cui scade il maggior valore di opzioni senza valore (OTM), '
+                            'agendo come un magnete per il sottostante.',
+                        ], style={
+                            'fontSize': '11px', 'color': '#555', 'lineHeight': '1.5',
+                            'background': '#f8fafd', 'border': '1px solid #e3e8ef',
+                            'borderRadius': '6px', 'padding': '10px 14px', 'marginTop': '10px'}),
+                    ], style={'paddingTop': '4px'})),
+
             dcc.Tab(label='IV Skew & Superficie', value='surface',
                     style=_TAB_STYLE, selected_style=_TAB_SEL,
                     children=html.Div([
@@ -2217,6 +2325,161 @@ def update_gex(chain, stock_data, expiry, rf):
             'border': '1px solid #ccc', 'borderRadius': '6px',
             'padding': '8px 14px', 'textAlign': 'center',
         }),
+    ]
+    return fig, chips
+
+
+# ─── CB 12b: OI per Strike & Max Pain ─────────────────────────────────────────
+@app.callback(
+    Output('opt-oi-store', 'data'),
+    Output('opt-oi-load-status', 'children'),
+    Input('opt-oi-load-btn', 'n_clicks'),
+    State('opt-stock-store', 'data'),
+    prevent_initial_call=True,
+)
+def load_oi_multi(_, stock_data):
+    """Scarica fino a 8 scadenze per l'OI aggregato (indipendente dal tab Superficie)."""
+    if not stock_data:
+        raise PreventUpdate
+    ticker = stock_data['ticker']
+    t_obj  = yf.Ticker(ticker)
+    exps   = t_obj.options[:8] if t_obj.options else []
+    chains = {}
+    for exp in exps:
+        try:
+            ch = t_obj.option_chain(exp)
+            chains[exp] = {'calls': ch.calls.to_dict(orient='records'),
+                           'puts':  ch.puts.to_dict(orient='records')}
+        except Exception:
+            continue
+    if not chains:
+        return None, html.Span('Nessuna catena disponibile',
+                               style={'color': '#c0392b', 'fontSize': '11px'})
+    return chains, html.Span(
+        f'{len(chains)} scadenze caricate',
+        style={'color': '#1b5e20', 'fontSize': '11px', 'fontWeight': '600'})
+
+
+@app.callback(
+    Output('opt-oi-chart', 'figure'),
+    Output('opt-oi-summary', 'children'),
+    Input('opt-oi-scope', 'value'),
+    Input('opt-chain-store', 'data'),
+    Input('opt-oi-store', 'data'),
+    State('opt-stock-store', 'data'),
+    State('opt-expiry-store', 'data'),
+    prevent_initial_call=True,
+)
+def update_oi_maxpain(scope, chain, multi, stock_data, expiry):
+    empty = go.Figure().update_layout(
+        paper_bgcolor='#f8fafd', plot_bgcolor='#f8fafd',
+        annotations=[dict(text='Seleziona ticker e scadenza per calcolare OI & Max Pain',
+                          showarrow=False, font=dict(size=12, color='#888'))],
+        margin=dict(l=0, r=0, t=0, b=0))
+    if not stock_data:
+        return empty, []
+
+    spot = float(stock_data.get('spot', 100))
+
+    # Costruisce calls/puts secondo lo scope selezionato
+    if scope == 'all':
+        if not multi:
+            msg = empty.update_layout(annotations=[dict(
+                text="Premi «Carica tutte le scadenze» per l'aggregato",
+                showarrow=False, font=dict(size=12, color='#888'))])
+            return msg, []
+        cdf = pd.concat([pd.DataFrame(c['calls']) for c in multi.values()
+                         if c.get('calls')], ignore_index=True)
+        pdf = pd.concat([pd.DataFrame(c['puts']) for c in multi.values()
+                         if c.get('puts')], ignore_index=True)
+        scope_lbl = f'{len(multi)} scadenze aggregate'
+    else:
+        if not chain:
+            return empty, []
+        cdf = pd.DataFrame(chain['calls'])
+        pdf = pd.DataFrame(chain['puts'])
+        scope_lbl = f'Scadenza {expiry}' if expiry else 'Scadenza selezionata'
+
+    oi = compute_oi_maxpain(cdf, pdf, spot)
+    if not oi:
+        return empty.update_layout(annotations=[dict(
+            text='Open interest insufficiente', showarrow=False,
+            font=dict(size=12, color='#888'))]), []
+
+    # Finestra di visualizzazione: strike ±30% attorno allo spot (l'OI lontano è rumore),
+    # ma ampliata per includere sempre spot e Max Pain.
+    lo, hi = spot * 0.70, spot * 1.30
+    lo = min(lo, spot, oi['max_pain'])
+    hi = max(hi, spot, oi['max_pain'])
+    mask = [(lo <= K <= hi) for K in oi['strikes']]
+    strikes = [K for K, m in zip(oi['strikes'], mask) if m]
+    call_v  = [v for v, m in zip(oi['call_oi'], mask) if m]
+    put_v   = [v for v, m in zip(oi['put_oi'],  mask) if m]
+    pain_v  = [v for v, m in zip(oi['pain_curve'], mask) if m]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=strikes, y=call_v, name='Call OI', marker_color='rgba(27,94,32,0.75)',
+        hovertemplate='Strike $%{x:.0f}<br>Call OI: %{y:,.0f}<extra></extra>'))
+    fig.add_trace(go.Bar(
+        x=strikes, y=put_v, name='Put OI', marker_color='rgba(183,28,28,0.75)',
+        hovertemplate='Strike $%{x:.0f}<br>Put OI: %{y:,.0f}<extra></extra>'))
+    # Curva del "dolore" (valore pagato dai writer) su asse secondario
+    fig.add_trace(go.Scatter(
+        x=strikes, y=pain_v, name='Valore pagato (Max Pain)', yaxis='y2',
+        mode='lines', line=dict(color='rgba(120,120,120,0.55)', width=1.5, dash='dot'),
+        hovertemplate='Strike $%{x:.0f}<br>Pagato writer: %{y:,.0f}<extra></extra>'))
+
+    def _vline(x, color, text, dash='dash', width=1.6):
+        if x is None:
+            return
+        fig.add_vline(x=x, line_color=color, line_width=width, line_dash=dash,
+                      annotation_text=text, annotation_position='top',
+                      annotation_font=dict(size=9, color=color))
+
+    _vline(spot,             '#1a3a6b', f'Spot {spot:.0f}',        dash='dash', width=1.8)
+    _vline(oi['max_pain'],   '#8e24aa', f'Max Pain {oi["max_pain"]:.0f}', dash='solid', width=2.2)
+    _vline(oi['resistance'], '#b71c1c', f'Resist. {oi["resistance"]:.0f}', dash='dot')
+    _vline(oi['support'],    '#1b5e20', f'Supporto {oi["support"]:.0f}',   dash='dot')
+
+    fig.update_layout(
+        barmode='group', bargap=0.15,
+        title=dict(text=f'Open Interest per Strike & Max Pain — {scope_lbl}',
+                   font_size=12, x=0.5),
+        xaxis=dict(title='Strike', tickprefix='$'),
+        yaxis=dict(title='Open Interest'),
+        yaxis2=dict(title='Valore pagato', overlaying='y', side='right',
+                    showgrid=False),
+        paper_bgcolor='#ffffff', plot_bgcolor='#f8fafd',
+        legend=dict(orientation='h', y=1.10, font_size=9),
+        margin=dict(l=55, r=55, t=55, b=45),
+        font=dict(family='Inter, sans-serif', size=10),
+        hovermode='x unified',
+    )
+
+    # Chip di riepilogo
+    def chip(label, value, color, bg):
+        return html.Div([
+            html.Span(label, style={'fontSize': '9px', 'fontWeight': '700',
+                                     'color': color, 'display': 'block'}),
+            html.Span(value, style={'fontSize': '16px', 'fontWeight': '700',
+                                     'color': color}),
+        ], style={'background': bg, 'border': f'1px solid {color}44',
+                  'borderRadius': '6px', 'padding': '8px 14px', 'textAlign': 'center'})
+
+    mp = oi['max_pain']
+    mp_dir = '↑' if mp > spot else ('↓' if mp < spot else '→')
+    pcr = oi['pcr']
+    pcr_txt = f'{pcr:.2f}' if pcr is not None else 'n/d'
+    pcr_col = '#b71c1c' if (pcr is not None and pcr > 1) else '#1b5e20'
+    chips = [
+        chip('Max Pain', f'${mp:.0f} {mp_dir}', '#8e24aa', '#f3e5f5'),
+        chip('Supporto (put OI)', f'${oi["support"]:.0f}' if oi['support'] else 'n/d',
+             '#1b5e20', '#e8f5e9'),
+        chip('Resistenza (call OI)', f'${oi["resistance"]:.0f}' if oi['resistance'] else 'n/d',
+             '#b71c1c', '#ffebee'),
+        chip('Put/Call OI', pcr_txt, pcr_col, '#f8fafd'),
+        chip('Spot', f'${spot:.0f}', '#1a3a6b', '#e8eef7'),
     ]
     return fig, chips
 
