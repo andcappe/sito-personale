@@ -718,6 +718,35 @@ def _cot_fig_and_summary(key, year_range):
                 fig.update_yaxes(range=[float(allv.min()) - 10, float(allv.max()) + 10],
                                  row=row, col=1)
 
+    def _add_wow_bg(base_yaxis, xaxis_id, series_full, hexcol, ax_idx, name):
+        """Eco tenue della variazione settimanale (media 4 sett.) DIETRO la linea
+        della media di posizionamento, su un asse Y dedicato nascosto e autoscalato:
+        stesso colore ma poco saturo (bassa opacità), così dà il senso del momentum
+        settimanale senza confondere la lettura del posizionamento.
+
+        Va chiamata PRIMA di aggiungere la linea della media: l'ordine di disegno
+        segue l'ordine delle tracce, quindi così lo sfondo resta dietro. L'asse
+        dedicato (`yaxis<ax_idx>`) sovrappone l'asse primario del pannello
+        (`base_yaxis`) ed è invisibile: serve solo a dare alla variazione una scala
+        propria, diversa da quella dei contratti netti.
+
+        Passandoci sopra col mouse mostra la sua descrizione (Δ settimanale a 4 sett.
+        della serie), così la linea di sfondo resta identificabile.
+        """
+        h = hexcol.lstrip('#')
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        var = series_full.diff().rolling(4, min_periods=1).mean().reindex(disp)
+        fig.add_trace(go.Scatter(
+            x=disp, y=var, xaxis=xaxis_id, yaxis=f'y{ax_idx}',
+            name=f'Variazione sett. {name} (media 4 sett.)', showlegend=False,
+            mode='lines', line=dict(color=f'rgba({r},{g},{b},0.35)', width=1.1),
+            fill='tozeroy', fillcolor=f'rgba({r},{g},{b},0.08)',
+            hovertemplate='%{x|%d %b %Y}<br>Variazione sett. ' + name
+                          + ' (media 4 sett.): %{y:,.0f}<extra></extra>'))
+        fig.update_layout(**{f'yaxis{ax_idx}': dict(
+            overlaying=base_yaxis, anchor=xaxis_id,
+            showgrid=False, zeroline=False, visible=False)})
+
     def _add_sum(row):
         """Somma AM + LM (contratti netti totali) con media a 4 settimane.
 
@@ -806,6 +835,10 @@ def _cot_fig_and_summary(key, year_range):
             rows=len(specs), cols=1, shared_xaxes=True, vertical_spacing=0.045,
             row_heights=[h / _tot for h in heights], specs=specs,
             subplot_titles=tuple(titles))
+        # sfondo tenue della variazione settimanale, dietro le medie di posizionamento
+        # (riga 1 = asse y/x, riga 2 = asse y3/x2)
+        _add_wow_bg('y', 'x', full['am_net'], '#1a3a5c', 90, 'Asset Manager')
+        _add_wow_bg('y3', 'x2', full['lm_net'], '#c0392b', 91, 'Leveraged Money')
         # posizionamento AM/LM lisciato con media a 4 settimane (calcolata su full,
         # ritagliata alla finestra per continuità al bordo sinistro)
         am_disp = full['am_net'].rolling(4, min_periods=1).mean().reindex(disp)
@@ -885,6 +918,10 @@ def _cot_fig_and_summary(key, year_range):
             rows=len(specs), cols=1, shared_xaxes=True, vertical_spacing=0.045,
             row_heights=[h / _tot for h in heights], specs=specs,
             subplot_titles=tuple(titles))
+        # sfondo tenue della variazione settimanale, dietro le medie di posizionamento
+        _add_wow_bg('y', 'x', full['mm_net'], '#1b7a34', 90, 'Managed Money')
+        if has_comm:
+            _add_wow_bg('y3', 'x2', full['comm_net'], '#1a3a5c', 91, 'Commercial')
         # posizionamento Managed Money, lisciato a 4 settimane
         fig.add_trace(go.Scatter(
             x=disp, y=mm_disp, name='Managed Money (hedge fund)',
