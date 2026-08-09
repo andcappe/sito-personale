@@ -17,6 +17,15 @@ if os.path.exists(_dotenv_path):
                 _k, _, _v = _line.partition('=')
                 os.environ.setdefault(_k.strip(), _v.strip())
 
+# ─── Compressione gzip/brotli per TUTTE le app Dash (montate sotto) ───────────
+#     Va impostata PRIMA che _safe_load costruisca le app: ogni Dash() legge
+#     DASH_COMPRESS alla costruzione. In Dash 3.0.0 compress è False di default;
+#     senza questa riga plotly.min.js (~4.6 MB) e le figure grandi (fino a ~7 MB)
+#     viaggiano non compressi e su DO superano i 30s → "plotly.js did not load"
+#     → grafici vuoti + ERR_HTTP2_PROTOCOL_ERROR. Richiede flask-compress in
+#     requirements (con brotli). setdefault: un eventuale valore in .env vince.
+os.environ.setdefault("DASH_COMPRESS", "true")
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)

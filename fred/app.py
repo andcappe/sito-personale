@@ -9647,6 +9647,15 @@ def register_new_tab_callbacks(app):
         if y_col not in df.columns:
             return err8(f"Serie '{y_col}' non trovata")
 
+        # ── Tronca all'ultima osservazione REALE della Y (es. CPI) ────────────
+        # Le serie giornaliere/più aggiornate (S&P 500, VIX, WTI…) estendono
+        # l'indice oltre l'ultimo dato del CPI: senza questo taglio il ffill
+        # della pipeline inventerebbe mesi "fantasma" ripetendo l'ultimo valore
+        # dell'indice, falsando lo YoY osservato (es. luglio 2026 = giu2026/lug2025).
+        _y_last_real = df[y_col].last_valid_index()
+        if _y_last_real is not None:
+            df = df.loc[:_y_last_real]
+
         if slider_val and (slider_val[1] - slider_val[0]) > 86400:
             start = pd.to_datetime(slider_val[0], unit="s").normalize()
             end   = pd.to_datetime(slider_val[1], unit="s").normalize()
