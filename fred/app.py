@@ -1032,8 +1032,6 @@ import pickle as _pk_cache
 _MACRO_CACHE_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sessions')
 _MACRO_CACHE_F    = os.path.join(_MACRO_CACHE_DIR, 'macro_cache.pkl')
 _MACRO_MAX_AGE    = 7 * 24 * 3600          # 7 giorni → oltre = "vecchia": ricostruisci al boot
-_MACRO_MIN_GAP    = 6 * 3600               # se la cache è incompleta ricostruisci, ma non
-                                            # più di una volta ogni 6h (restart ravvicinati)
 _MACRO_CACHE      = {}                      # {chiave: DataFrame}  (in memoria)
 _MACRO_CACHE_TS   = 0.0                     # epoch dell'ultima build
 _MACRO_BUILD_LOCK = _thr_cache.Lock()       # evita build concorrenti (boot + scheduler)
@@ -1059,6 +1057,22 @@ def _macro_get(key):
     if df is not None and not df.empty:
         return df.copy()
     return None
+
+
+def _macro_cache_ha(*keys):
+    """True se TUTTE le chiavi sono in cache con dati. Serve ai tab che si
+    caricano da soli all'apertura: senza cache non devono scaricare nulla."""
+    return all(_MACRO_CACHE.get(k) is not None and not _MACRO_CACHE[k].empty
+               for k in keys)
+
+
+def _macro_chiavi_eur(geo):
+    """Tutto ciò che serve a un tab Eurozona (Shock/ADL/ARIMA) per costruirsi
+    senza toccare la rete: Eurostat del paese + Brent + indice azionario."""
+    keys = [f'eurostat_{geo}', 'brent']
+    if geo in EUROSTAT_EQUITY:
+        keys.append(f'equity_{geo}')
+    return tuple(keys)
 
 
 # ── Riferimenti alle primitive REALI, catturati PRIMA del wrapping ───────────
@@ -1119,9 +1133,36 @@ def bce_get_yields_df():                              # noqa: F811
     return _live_bce_get_yields_df()
 
 
-def _build_macro_cache(reason='schedulato'):
-    """Scarica UNA volta tutti i dataset standard e riscrive la cache condivisa
-    (pickle atomico + push su R2). Usa SEMPRE le primitive live (_live_*)."""
+# ── Serie accessorie dei tab Eurozona (Brent + indice azionario del paese) ───
+#    Stanno in cache anche loro, altrimenti il caricamento automatico dei tab
+#    Shock/ADL/ARIMA continuerebbe a fare due download live a ogni apertura.
+
+def _macro_brent(api_key=None):
+    """Brent mensile (Series) dalla cache; fallback FRED live. None se assente."""
+    df = _macro_get('brent')
+    if df is not None:
+        return df.iloc[:, 0]
+    s = fred_get("MCOILBRENTEU", (api_key or FRED_API_KEY).strip())
+    return to_monthly(s, "M") if s is not None else None
+
+
+def _macro_equity(geo):
+    """Indice azionario mensile del paese (Series) dalla cache; fallback yfinance.
+    None se il geo non ha un indice associato o il download fallisce."""
+    eq_info = EUROSTAT_EQUITY.get(geo)
+    if not eq_info:
+        return None
+    df = _macro_get(f'equity_{geo}')
+    if df is not None:
+        return df.iloc[:, 0]
+    return yfinance_monthly(*eq_info)
+
+
+def _build_macro_cache(reason='schedulato', solo=None):
+    """Scarica i dataset standard e aggiorna la cache condivisa (pickle atomico
+    + push su R2). Usa SEMPRE le primitive live (_live_*).
+    `solo` = insieme di chiavi da rifare: serve al boot per completare una cache
+    a cui mancano pochi dataset senza riscaricare tutto."""
     global _MACRO_CACHE, _MACRO_CACHE_TS
     import time as _t
     if not _MACRO_BUILD_LOCK.acquire(blocking=False):
@@ -1133,6 +1174,8 @@ def _build_macro_cache(reason='schedulato'):
         data = {}
 
         def _try(name, fn):
+            if solo is not None and name not in solo:
+                return
             try:
                 df = fn()
                 if df is not None and not df.empty:
@@ -1156,6 +1199,23 @@ def _build_macro_cache(reason='schedulato'):
             _try(f'monetario_eur_{_g}', lambda g=_g: _live_build_monetary_eur_df(g, key))
             _try(f'eurostat_{_g}',      lambda g=_g: _live_build_eurostat_df(g))
 
+        # ── Accessorie dei tab Shock/ADL/ARIMA ────────────────────────────────
+        def _brent_live():
+            s = fred_get("MCOILBRENTEU", key)
+            return to_monthly(s, "M").to_frame() if s is not None else None
+
+        def _equity_live(g):
+            info = EUROSTAT_EQUITY.get(g)
+            if not info:
+                return None
+            s = yfinance_monthly(*info)
+            return s.to_frame() if s is not None else None
+
+        _try('brent', _brent_live)
+        for _g in EUROSTAT_GEO:
+            if _g in EUROSTAT_EQUITY:
+                _try(f'equity_{_g}', lambda g=_g: _equity_live(g))
+
         if not data:
             print("⚠ [macro-cache] nessun dato scaricato — cache NON aggiornata", flush=True)
             return
@@ -1165,8 +1225,9 @@ def _build_macro_cache(reason='schedulato'):
         merged = dict(_MACRO_CACHE)
         merged.update(data)
         if len(merged) > len(data):
+            _motivo = "non richiesti" if solo is not None else "download fallito"
             print(f"  ℹ {len(merged) - len(data)} dataset conservati dalla cache "
-                  f"precedente (download fallito questo giro)", flush=True)
+                  f"precedente ({_motivo})", flush=True)
         data = merged
 
         blob = {'data': data, 'ts': _t.time()}
@@ -1198,9 +1259,11 @@ def _macro_expected_keys():
     se fredapi è installato (in locale spesso non c'è → niente rebuild inutili)."""
     keys = {'yields_eur'}
     if FRED_AVAILABLE:
-        keys |= {'monetario_usa', 'pil_usa', 'adl_usa', 'yields_usa', 'shock'}
+        keys |= {'monetario_usa', 'pil_usa', 'adl_usa', 'yields_usa', 'shock', 'brent'}
     for g in EUROSTAT_GEO:
         keys |= {f'monetario_eur_{g}', f'eurostat_{g}'}
+        if g in EUROSTAT_EQUITY:
+            keys.add(f'equity_{g}')
     return keys
 
 
@@ -1216,12 +1279,14 @@ def _macro_prewarm():
         print(f"✓ [macro-cache] presente e completa ({len(_MACRO_CACHE)} dataset, "
               f"~{age/3600:.0f}h fa) — nessun rebuild", flush=True)
         return
-    if _MACRO_CACHE and age < _MACRO_MAX_AGE:            # solo incompleta
-        if age < _MACRO_MIN_GAP:
-            print(f"… [macro-cache] incompleta ({len(mancanti)} dataset mancanti) ma "
-                  f"ricostruita {age/3600:.1f}h fa — riprovo al prossimo restart", flush=True)
-            return
-        _build_macro_cache(reason=f'boot: cache incompleta ({len(mancanti)} mancanti)')
+    if _MACRO_CACHE and age < _MACRO_MAX_AGE:            # recente ma incompleta
+        # Scarica SOLO i dataset mancanti: costa poco e si può quindi fare a
+        # ogni boot, senza rifare l'intera settimana di download.
+        print(f"… [macro-cache] incompleta: mancano {len(mancanti)} dataset "
+              f"({', '.join(sorted(mancanti)[:5])}{'…' if len(mancanti) > 5 else ''})",
+              flush=True)
+        _build_macro_cache(reason=f'boot: completo {len(mancanti)} dataset mancanti',
+                           solo=mancanti)
         return
     _build_macro_cache(reason='boot: cache assente o vecchia')
 
@@ -6357,7 +6422,7 @@ def register_shock_callbacks(app):
         Input("btn-shock-eur-load",        "n_clicks"),
         State("shock-eur-geo",             "value"),
         State("api-key",                   "value"),
-        prevent_initial_call=True,
+        prevent_initial_call="initial_duplicate",
     )
     def load_shock_eur(n_clicks, geo, api_key):
         _done = {"active": False}
@@ -6368,28 +6433,29 @@ def register_shock_callbacks(app):
                                           "font-style": "italic"})
             return None, msg, no_data_msg, _done
 
-        if not _has_internet():
+        geo = geo or "EA20"
+        # All'apertura della pagina si carica DA SOLO, ma solo se il dato è già
+        # in cache: mai un download live automatico (bloccherebbe il boot).
+        if not n_clicks and not _macro_cache_ha(*_macro_chiavi_eur(geo)):
+            raise PreventUpdate
+
+        if n_clicks and not _has_internet():
             return _err("⚠️  Nessuna connessione internet")
 
-        geo = geo or "EA20"
-        print(f"\n▶ Shock — Download Eurostat [{geo}]...")
+        print(f"\n▶ Shock — Eurostat [{geo}]...")
         df = build_eurostat_dataframe(geo)
 
-        # Aggiungi Brent da FRED (comune a entrambe le analisi)
-        _ak = (api_key or FRED_API_KEY).strip()
-        brent = fred_get("MCOILBRENTEU", _ak)
+        # Aggiungi Brent (comune a entrambe le analisi)
+        brent = _macro_brent(api_key)
         if brent is not None:
             idx = pd.date_range(df.index.min(), df.index.max(), freq="MS")
-            df["Brent Petrolio ($/barile)"] = to_monthly(brent, "M").reindex(idx).ffill()
+            df["Brent Petrolio ($/barile)"] = brent.reindex(idx).ffill()
 
         # Indice azionario del paese
-        eq_info = EUROSTAT_EQUITY.get(geo)
-        if eq_info:
-            eq_ticker, eq_name = eq_info
-            eq_s = yfinance_monthly(eq_ticker, eq_name)
-            if eq_s is not None:
-                idx = pd.date_range(df.index.min(), df.index.max(), freq="MS")
-                df[eq_name] = eq_s.reindex(idx).ffill()
+        eq_s = _macro_equity(geo)
+        if eq_s is not None:
+            idx = pd.date_range(df.index.min(), df.index.max(), freq="MS")
+            df[eq_s.name] = eq_s.reindex(idx).ffill()
 
         if df.empty:
             return _err("❌ Download Eurostat fallito")
@@ -8425,19 +8491,26 @@ def register_new_tab_callbacks(app):
         State("arima-source-type",          "value"),
         State("arima-eur-geo",              "value"),
         State("api-key",                    "value"),
-        prevent_initial_call=True,
+        prevent_initial_call="initial_duplicate",
     )
     def load_arima_source(n_clicks, source_type, geo, api_key):
         _done = {"active": False}
         def _err(msg):
             return None, msg, _done
 
-        if not _has_internet():
+        # Caricamento automatico all'apertura solo se il dato è già in cache.
+        if not n_clicks:
+            _attesa = (_macro_chiavi_eur(geo or "EA20") if source_type == "eur"
+                       else ('adl_usa',))
+            if not _macro_cache_ha(*_attesa):
+                raise PreventUpdate
+
+        if n_clicks and not _has_internet():
             return _err("⚠️  Nessuna connessione internet")
 
         if source_type == "eur":
             geo = geo or "EA20"
-            print(f"\n▶ ARIMA — Download Eurostat [{geo}]...")
+            print(f"\n▶ ARIMA — Eurostat [{geo}]...")
             df = build_eurostat_dataframe(geo)
             if df.empty:
                 return _err("❌ Download Eurostat fallito — server non raggiungibile")
@@ -8451,21 +8524,17 @@ def register_new_tab_callbacks(app):
             if exp_r and imp_r:
                 df[NET_EXP_EUR_R_LABEL] = df[exp_r] - df[imp_r]
             # Brent
-            _ak = (api_key or FRED_API_KEY).strip()
-            brent = fred_get("MCOILBRENTEU", _ak)
+            brent = _macro_brent(api_key)
             if brent is not None:
-                df["Brent Petrolio ($/barile)"] = to_monthly(brent, "M").reindex(
+                df["Brent Petrolio ($/barile)"] = brent.reindex(
                     pd.date_range(df.index.min(), df.index.max(), freq="MS")
                 ).ffill()
             # Indice azionario
-            eq_info = EUROSTAT_EQUITY.get(geo)
-            if eq_info:
-                eq_ticker, eq_name = eq_info
-                eq_s = yfinance_monthly(eq_ticker, eq_name)
-                if eq_s is not None:
-                    df[eq_name] = eq_s.reindex(
-                        pd.date_range(df.index.min(), df.index.max(), freq="MS")
-                    ).ffill()
+            eq_s = _macro_equity(geo)
+            if eq_s is not None:
+                df[eq_s.name] = eq_s.reindex(
+                    pd.date_range(df.index.min(), df.index.max(), freq="MS")
+                ).ffill()
             label = EUROSTAT_GEO.get(geo, geo)
         else:
             api_key = (api_key or FRED_API_KEY).strip()
@@ -9727,7 +9796,7 @@ def register_new_tab_callbacks(app):
         State("adl-source-type",          "value"),
         State("adl-eur-geo",              "value"),
         State("api-key",                  "value"),
-        prevent_initial_call=True,
+        prevent_initial_call="initial_duplicate",
     )
     def load_adl_source(n_clicks, source_type, geo, api_key):
         _done  = {"active": False}
@@ -9735,12 +9804,19 @@ def register_new_tab_callbacks(app):
         def _err(msg):
             return None, msg, _done
 
-        if not _has_internet():
+        # Caricamento automatico all'apertura solo se il dato è già in cache.
+        if not n_clicks:
+            _attesa = (_macro_chiavi_eur(geo or "EA20") if source_type == "eur"
+                       else ('adl_usa',))
+            if not _macro_cache_ha(*_attesa):
+                raise PreventUpdate
+
+        if n_clicks and not _has_internet():
             return _err("⚠️  Nessuna connessione internet — verifica la rete e riprova")
 
         if source_type == "eur":
             geo = geo or "EA20"
-            print(f"\n▶ ADL — Download Eurostat [{geo}]...")
+            print(f"\n▶ ADL — Eurostat [{geo}]...")
             df = build_eurostat_dataframe(geo)
             if df.empty:
                 return _err("❌ Download Eurostat fallito — server non raggiungibile")
@@ -9753,23 +9829,19 @@ def register_new_tab_callbacks(app):
             imp_r = next((c for c in df.columns if "Importazioni EUR Reali" in c), None)
             if exp_r and imp_r:
                 df[NET_EXP_EUR_R_LABEL] = df[exp_r] - df[imp_r]
-            # ── Brent crude (FRED — mensile) ──────────────────────────────────
-            _ak = (api_key or FRED_API_KEY).strip()
-            brent = fred_get("MCOILBRENTEU", _ak)
+            # ── Brent crude (mensile) ─────────────────────────────────────────
+            brent = _macro_brent(api_key)
             if brent is not None:
-                df["Brent Petrolio ($/barile)"] = to_monthly(brent, "M").reindex(
+                df["Brent Petrolio ($/barile)"] = brent.reindex(
                     pd.date_range(df.index.min(), df.index.max(), freq="MS")
                 ).ffill()
                 print("  ✓ Brent aggiunto")
-            # ── Indice azionario paese (Yahoo Finance) ────────────────────────
-            eq_info = EUROSTAT_EQUITY.get(geo)
-            if eq_info:
-                eq_ticker, eq_name = eq_info
-                eq_s = yfinance_monthly(eq_ticker, eq_name)
-                if eq_s is not None:
-                    df[eq_name] = eq_s.reindex(
-                        pd.date_range(df.index.min(), df.index.max(), freq="MS")
-                    ).ffill()
+            # ── Indice azionario paese ────────────────────────────────────────
+            eq_s = _macro_equity(geo)
+            if eq_s is not None:
+                df[eq_s.name] = eq_s.reindex(
+                    pd.date_range(df.index.min(), df.index.max(), freq="MS")
+                ).ffill()
             label = EUROSTAT_GEO.get(geo, geo)
         else:
             api_key = (api_key or FRED_API_KEY).strip()
