@@ -27,6 +27,7 @@ from dash.exceptions import PreventUpdate
 _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from settings.browser_css import SITE_CSS            # noqa: E402  (CSS unico del sito)
 from navbar import make_navbar                       # noqa: E402
+import valutazione                                   # noqa: E402  (sotto-tab Valutazione)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # App
@@ -1178,6 +1179,8 @@ def serve_layout():
                                  style=_TAB_STYLE, selected_style=_TAB_SEL),
                          dcc.Tab(label='📊 Posizionamento COT', value='tab-cot',
                                  style=_TAB_STYLE, selected_style=_TAB_SEL),
+                         dcc.Tab(label='💹 Valutazione', value='tab-valutazione',
+                                 style=_TAB_STYLE, selected_style=_TAB_SEL),
                      ]),
             # Contenuto delle tab: tutte restano nel DOM e si mostrano/nascondono
             # via callback (Input at-tabs), così le callback ARIMA che dipendono
@@ -1185,6 +1188,8 @@ def serve_layout():
             html.Div(id='tab-arima-content', children=get_arima_analysis_tab(opts),
                      style={'display': 'block'}),
             html.Div(id='tab-cot-content', children=get_cot_tab(),
+                     style={'display': 'none'}),
+            html.Div(id='tab-valutazione-content', children=valutazione.layout(),
                      style={'display': 'none'}),
         ], className='page-wrap'),
         # Pannello File montato ALLA RADICE → galleggia sopra a tutto
@@ -1693,14 +1698,17 @@ def at_fp_del(all_n):
 @app.callback(
     Output('tab-arima-content', 'style'),
     Output('tab-cot-content', 'style'),
+    Output('tab-valutazione-content', 'style'),
     Input('at-tabs', 'value'),
 )
 def _at_switch_tab(tab):
     show = {'display': 'block'}
     hide = {'display': 'none'}
     if tab == 'tab-cot':
-        return hide, show
-    return show, hide
+        return hide, show, hide
+    if tab == 'tab-valutazione':
+        return hide, hide, show
+    return show, hide, hide
 
 
 @app.callback(
@@ -1721,6 +1729,12 @@ def _update_cot(key, year_range, n):
     h = int(getattr(fig.layout, 'height', None) or 1400)
     style = {'width': '100%', 'height': f'{h}px'}
     return fig, summary, style
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 3 — Valutazione titolo azionario (modulo condiviso valutazione.py)
+# ─────────────────────────────────────────────────────────────────────────────
+valutazione.register_callbacks(app)
 
 
 if __name__ == '__main__':
