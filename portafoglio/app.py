@@ -667,6 +667,21 @@ def _set_tipo(tipo, username=None):
         _atomic_json_write(path, raw)
 
 
+def _file_di_lavoro(username=None):
+    """Valore da mostrare nel selettore file, dedotto da '_tipo' di current.json:
+    '__personale__' se il file di lavoro è personale, altrimenti il dataset di
+    default effettivamente caricato. Fallback 'ETF.xlsx' se il tipo manca o punta
+    a un .xlsx non più presente in Files/."""
+    tipo = _read_tipo(username)
+    if tipo == 'personale':
+        return '__personale__'
+    if tipo.startswith('default:'):
+        fn = tipo.split(':', 1)[1].strip()
+        if fn in {o['value'] for o in _list_files()}:
+            return fn
+    return 'ETF.xlsx'
+
+
 def _get_username() -> str:
     """Username dalla sessione Flask; 'anon' come fallback."""
     try:
@@ -3438,8 +3453,13 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
         except Exception:
             cr = None
         if cr is not None and not cr.empty:
-            _is_pers = (_read_tipo(_u) == 'personale')
-            _active_file_store['filename'] = '__personale__' if _is_pers else 'ETF.xlsx'
+            # Il file di lavoro può essere un default QUALSIASI (COMMODITIES, CRIPTO…):
+            # va letto da '_tipo', non dato per scontato ETF, altrimenti il selettore
+            # resta su ETF mentre a schermo ci sono altri dati (e riselezionare ETF,
+            # valore già mostrato, non farebbe scattare nessun callback).
+            _fdl = _file_di_lavoro(_u)
+            _is_pers = (_fdl == '__personale__')
+            _active_file_store['filename'] = _fdl
             _active_file_store['is_personale'] = _is_pers
             with _DL_LOCK:
                 _DL_BUFFER.clear()
@@ -3989,6 +4009,13 @@ def on_file_selected(filename, cur_clicks):
     # current.json È GIÀ il file personale, non c'è nulla da ricaricare.
     # (Per questo l'accodo che porta il selettore a Personale non cambia i dati.)
     if filename == '__personale__':
+        raise PreventUpdate
+
+    # Riallineamento del selettore (restore_file_selector al caricamento pagina):
+    # il file richiesto è GIÀ quello di lavoro → non c'è nulla da caricare, e
+    # ricaricarlo sovrascriverebbe current.json col default fresco perdendo pesi
+    # P1/P2/P3 e selezioni.
+    if _read_tipo(_u) == f'default:{filename}':
         raise PreventUpdate
 
     # Selezione di un DEFAULT (ETF/CRIPTO/Commodities): sovrascrive il file di
@@ -6848,6 +6875,223 @@ def _scheduled_arima():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Aggiornamento notturno dei dati PERSONALI (current.json + pkl utente)
+#
+# _scheduled_update() copre solo i dataset condivisi di Files/. Chi lavora con i
+# propri ticker restava fermo all'ultimo download fatto a mano: current.json —
+# che è la fonte unica di Portafoglio, Analisi Tattica, Rendimenti e Frontiera —
+# non lo riscriveva nessuno. Regola di questi job: si aggiorna solo ciò che si
+# riesce a riscaricare, il resto resta com'era. Un ticker che oggi fallisce non
+# deve mai sparire dal portafoglio dell'utente.
+# ─────────────────────────────────────────────────────────────────────────────
+def _utenti_con_dati():
+    """Utenti che hanno un current.json da tenere aggiornato."""
+    base = _ROOT_DIR / 'sessions'
+    if not base.is_dir():
+        return []
+    return sorted(d.name for d in base.iterdir()
+                  if d.is_dir() and (d / 'current.json').exists())
+
+
+def _pkl_prezzi_utente(username):
+    """I pkl che contengono prezzi di questo utente: le cache personali del
+    Portafoglio e la sessione di lavoro."""
+    paths = list(SESSIONS_DIR.glob(f'market_data_*_user_{username}.pkl'))
+    working = _ROOT_DIR / 'sessions' / username / 'working.pkl'
+    if working.exists():
+        paths.append(working)
+    return paths
+
+
+def _aggiorna_current_json(username, op, cr, tm):
+    """Riscrive prezzi e rendimenti dentro current.json conservando tutto il
+    resto (pesi P1/P2/P3, checked, _tipo) e gli asset non riscaricati."""
+    path = _user_json_path(username)
+    try:
+        raw = json.load(open(path))
+    except Exception as e:
+        print(f"  ⚠ current.json illeggibile: {e}")
+        return 0
+    dates = [d.strftime('%Y-%m-%d') for d in op.index]
+    n = 0
+    for desc, v in raw.items():
+        # Chiavi meta (_tipo) e asset non riscaricati: lasciati intatti.
+        if not isinstance(v, dict) or desc not in op.columns:
+            continue
+        v['ticker']  = tm.get(desc, v.get('ticker', desc))
+        v['dates']   = dates
+        v['prices']  = [round(float(x), 4) if pd.notna(x) else None for x in op[desc]]
+        v['returns'] = [round(float(x), 6) if pd.notna(x) else None for x in cr[desc]]
+        n += 1
+    if n and not _atomic_json_write(path, raw):
+        return 0
+    return n
+
+
+def _aggiorna_pkl_prezzi(path, op, cr, tm):
+    """Sostituisce nel pkl SOLO le colonne per cui abbiamo dati freschi. Le altre
+    chiavi (stato della sessione, mappe valuta, salvataggi nominati) non si
+    toccano: questi file sono il lavoro dell'utente, non una cache di sistema."""
+    try:
+        with open(path, 'rb') as f:
+            d = pickle.load(f)
+    except Exception as e:
+        print(f"  ⚠ {path.name} illeggibile: {e}")
+        return 0
+    ex_op, ex_cr = d.get('original_prices'), d.get('close_returns')
+    if ex_op is None or ex_cr is None:
+        return 0
+    comuni = [c for c in ex_op.columns if c in op.columns and c in cr.columns]
+    if not comuni:
+        return 0
+    # L'indice passa a quello nuovo (più lungo). Le colonne che non abbiamo
+    # riscaricato restano ai loro valori e sulle date nuove sono NaN: nessun
+    # prezzo inventato.
+    new_op, new_cr = ex_op.reindex(op.index), ex_cr.reindex(cr.index)
+    for c in comuni:
+        new_op[c] = op[c]
+        new_cr[c] = cr[c]
+    d['original_prices'] = new_op
+    d['close_returns']   = new_cr
+    d['ticker_map']      = {**d.get('ticker_map', {}),
+                            **{k: v for k, v in tm.items() if k in comuni}}
+    if 'saved_at' in d and d.get('saved_at'):
+        d['saved_at'] = datetime.now().strftime('%d/%m/%Y %H:%M')
+    if 'date' in d:
+        d['date'] = datetime.now().strftime('%Y-%m-%d')
+    _atomic_pkl_write(Path(path), d)
+    return len(comuni)
+
+
+def _refresh_dati_utente(username, start_date):
+    """Riscarica i ticker di un utente (ticker e valuta li dà current.json) e
+    propaga i prezzi nuovi a current.json, alle cache personali e alla sessione."""
+    import tempfile
+    try:
+        raw = json.load(open(_user_json_path(username)))
+    except Exception:
+        return
+    asset = {d: v for d, v in raw.items()
+             if isinstance(v, dict) and str(v.get('ticker', '')).strip()}
+    if not asset:
+        print(f"  · {username}: nessun asset — skip")
+        return
+
+    descr   = list(asset)
+    tickers = [asset[d]['ticker'] for d in descr]
+    valute  = [asset[d].get('currency') or 'EUR' for d in descr]
+
+    # File d'appoggio FUORI dalle cartelle sincronizzate, altrimenti finisce su R2.
+    safe = _re_isin.sub(r'[^A-Za-z0-9_.@-]', '_', username)
+    tmp  = Path(tempfile.gettempdir()) / f'refresh_{safe}.pkl'
+    try:
+        _do_download(tickers, descr, valute, start_date,
+                     cache_file=tmp, update_buffer=False)
+        if not tmp.exists():
+            print(f"  ⚠ {username}: download fallito, dati invariati")
+            return
+        with open(tmp, 'rb') as f:
+            fresh = pickle.load(f)
+    finally:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+    op, cr = fresh.get('original_prices'), fresh.get('close_returns')
+    tm     = fresh.get('ticker_map', {})
+    if op is None or cr is None or op.empty:
+        print(f"  ⚠ {username}: nessun prezzo scaricato, dati invariati")
+        return
+
+    n_json = _aggiorna_current_json(username, op, cr, tm)
+    ultima = op.index.max().strftime('%d/%m/%Y')
+    print(f"  ✓ {username}: {n_json}/{len(descr)} asset aggiornati al {ultima}")
+    for p in _pkl_prezzi_utente(username):
+        n = _aggiorna_pkl_prezzi(p, op, cr, tm)
+        if n:
+            print(f"    ✓ {p.name}: {n} serie")
+
+
+def _ultima_data_utente(username):
+    """Data dell'ultimo prezzo presente in current.json (None se non calcolabile)."""
+    try:
+        raw = json.load(open(_user_json_path(username)))
+    except Exception:
+        return None
+    date = [v['dates'][-1] for v in raw.values()
+            if isinstance(v, dict) and v.get('dates')]
+    if not date:
+        return None
+    try:
+        return pd.Timestamp(max(date))
+    except Exception:
+        return None
+
+
+def _prewarm_dati_utenti(giorni=5):
+    """Al boot aggiorna i dati personali solo se sono davvero indietro. Serve dopo
+    un deploy o un fermo prolungato: senza questo si aspetterebbe l'01:00. La
+    soglia di 5 giorni assorbe weekend e festivi, quindi in condizioni normali
+    (ultimo prezzo = venerdì) non parte nessun download."""
+    def _lavora():
+        try:
+            vecchi = []
+            for u in _utenti_con_dati():
+                ultima = _ultima_data_utente(u)
+                if ultima is None or (pd.Timestamp.today().normalize() - ultima).days > giorni:
+                    vecchi.append((u, ultima))
+            if not vecchi:
+                print("✓ [dati utenti] tutti aggiornati — nessun download al boot")
+                return
+            print(f"⏳ [dati utenti] {len(vecchi)} utenti indietro: " +
+                  ", ".join(f"{u} ({ultima:%d/%m/%Y})" if ultima is not None else f"{u} (?)"
+                            for u, ultima in vecchi))
+            start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+            global _DL_STATE
+            with _DL_LOCK:
+                stato_prima = dict(_DL_STATE)
+            try:
+                for u, _ in vecchi:
+                    try:
+                        _refresh_dati_utente(u, start)
+                    except Exception as e:
+                        print(f"⚠ [dati utenti] {u} fallito: {e}")
+            finally:
+                with _DL_LOCK:
+                    _DL_STATE = stato_prima
+        except Exception as e:
+            print(f"⚠ [dati utenti] prewarm fallito: {e}")
+
+    # In un thread: il boot non deve mai aspettare la rete (health check di DO).
+    threading.Thread(target=_lavora, daemon=True, name='prewarm-dati-utenti').start()
+
+
+def _scheduled_update_utenti():
+    """Aggiornamento notturno dei dati personali di ogni utente."""
+    global _DL_STATE
+    start  = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+    utenti = _utenti_con_dati()
+    if not utenti:
+        print("⏰ Nessun utente con dati personali — skip")
+        return
+    print(f"⏰ Aggiornamento dati personali — {len(utenti)} utenti")
+    with _DL_LOCK:
+        stato_prima = dict(_DL_STATE)
+    try:
+        for u in utenti:
+            try:
+                _refresh_dati_utente(u, start)
+            except Exception as e:
+                print(f"⚠ Aggiornamento {u} fallito: {e}")
+    finally:
+        # _do_download muove _DL_STATE: chi è collegato non deve vedere la barra
+        # di avanzamento di un download che non ha chiesto lui.
+        with _DL_LOCK:
+            _DL_STATE = stato_prima
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Callback: reset asset ai default
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
@@ -6916,16 +7160,17 @@ def reset_to_default(n, cur_clicks):
     prevent_initial_call=True,
 )
 def restore_file_selector(nav_reload):
-    # La selezione rispecchia il tipo del file di lavoro (un solo file: current.json).
-    # Se è "personale" → 👤 Personale; altrimenti default ETF.
+    # La selezione rispecchia il tipo del file di lavoro (un solo file: current.json):
+    # 👤 Personale, oppure il dataset di default davvero caricato (ETF, COMMODITIES…).
+    # Il layout è statico e nasce su 'ETF.xlsx': senza questo riallineamento il menu
+    # mostrerebbe ETF con a schermo i dati di un altro dataset, e riselezionare ETF
+    # (valore invariato) non farebbe scattare alcun callback → sembra bloccato.
+    # Il cambio di valore riscatena on_file_selected, che però esce subito con
+    # PreventUpdate quando il file è già quello di lavoro: nessun doppio caricamento.
     _u = _get_username()
-    is_pers = (_read_tipo(_u) == 'personale')
-    opts = _list_files_with_personale() if is_pers else _list_files()
-    # Nel caso DEFAULT il selettore è già su 'ETF.xlsx' (valore del layout): non lo
-    # ri-tocchiamo, altrimenti il cambio riscatena on_file_selected e gli asset che
-    # update_output ha appena caricato verrebbero ricaricati una seconda volta.
-    # Solo il caso "personale" richiede di cambiare l'etichetta (→ PreventUpdate lì).
-    return opts, ('__personale__' if is_pers else no_update)
+    val = _file_di_lavoro(_u)
+    opts = _list_files_with_personale() if val == '__personale__' else _list_files()
+    return opts, val
 
 
 try:
@@ -6935,11 +7180,18 @@ try:
                        day_of_week='mon-sat', misfire_grace_time=3600)
     _scheduler.add_job(_scheduled_arima,  'cron', hour=0, minute=30,
                        day_of_week='mon-sat', misfire_grace_time=3600)
+    # Dopo l'ARIMA: i dati personali di ogni utente (current.json + pkl utente).
+    _scheduler.add_job(_scheduled_update_utenti, 'cron', hour=1, minute=0,
+                       day_of_week='mon-sat', misfire_grace_time=3600,
+                       coalesce=True, max_instances=1)
     _scheduler.start()
-    print("✓ Scheduler avviato — dati mezzanotte, ARIMA 00:30 (lun-sab)")
+    print("✓ Scheduler avviato — dati mezzanotte, ARIMA 00:30, dati utenti 01:00 (lun-sab)")
 except ImportError:
     print("⚠ apscheduler non installato — aggiornamento automatico disabilitato")
     print("  pip install apscheduler")
+
+# Fuori dal try: il recupero al boot non dipende da apscheduler.
+_prewarm_dati_utenti()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Callbacks: Converti ISIN
