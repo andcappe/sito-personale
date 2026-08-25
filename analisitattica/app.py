@@ -1170,7 +1170,11 @@ def serve_layout():
                 ]),
             ], className='page-head'),
             _data_toolbar(),
+            # `serve_layout` è una funzione: a ogni ricarica della pagina il
+            # valore tornerebbe a 'tab-arima' e l'utente si ritroverebbe su
+            # Calcola ARIMA. Con persistence il tab aperto sopravvive.
             dcc.Tabs(id='at-tabs', value='tab-arima',
+                     persistence=True, persistence_type='session',
                      colors={'border': '#dee2e6', 'primary': '#1a3a5c',
                              'background': '#f0f4fa'},
                      style={'margin-bottom': '10px'},

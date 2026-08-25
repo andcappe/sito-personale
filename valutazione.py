@@ -46,6 +46,10 @@ _AV_ERR   = {}                      # (ticker, prospetto) → (messaggio, quando
 _AV_ERR_TTL = 15 * 60               # 15 minuti
 _AV_PAUSA  = 1.2                    # secondi fra due chiamate: il limite è 1/s
 _AV_ULTIMA = [0.0]                  # istante dell'ultima chiamata di rete
+# Un titolo nuovo scarica i tre prospetti dentro un solo callback: con un
+# timeout generoso la richiesta HTTP supererebbe il limite del router di
+# Digital Ocean e il browser si troverebbe senza risposta.
+_AV_TIMEOUT = 15
 
 # prospetto → (funzione Alpha Vantage, suffisso del file di cache, nome esteso).
 # Il conto economico resta senza suffisso: i file già scaricati (e già su R2) si
@@ -118,24 +122,38 @@ def av_prospetto(ticker, prospetto="ce", forza=False):
         except Exception:
             pass
 
-    # I tre prospetti si scaricano in fila: senza questa pausa la seconda
-    # richiesta torna indietro con il messaggio "1 request per second".
-    attesa = _AV_PAUSA - (time.time() - _AV_ULTIMA[0])
-    if attesa > 0:
-        time.sleep(attesa)
-    _AV_ULTIMA[0] = time.time()
-
     url = f"{_AV_URL}?function={funzione}&symbol={ticker}&apikey={_AV_KEY}"
+
+    def _scarica():
+        # I tre prospetti si scaricano in fila: senza questa pausa la seconda
+        # richiesta torna indietro con il messaggio "1 request per second".
+        attesa = _AV_PAUSA - (time.time() - _AV_ULTIMA[0])
+        if attesa > 0:
+            time.sleep(attesa)
+        _AV_ULTIMA[0] = time.time()
+        grezzo = urllib.request.urlopen(url, timeout=_AV_TIMEOUT).read().decode()
+        return grezzo, json.loads(grezzo)
+
     try:
-        raw = urllib.request.urlopen(url, timeout=30).read().decode()
-        payload = json.loads(raw)
+        raw, payload = _scarica()
     except Exception as e:
         return _fallito(f"scaricamento fallito: {e}")
 
     # Alpha Vantage risponde 200 anche quando non ha il dato: l'errore sta nel
     # corpo, come 'Note' (limite di 25 richieste al giorno) o 'Information'.
-    if payload.get("Note") or payload.get("Information"):
-        return _fallito(str(payload.get("Note") or payload.get("Information")))
+    avviso = str(payload.get("Note") or payload.get("Information") or "")
+    # Lo sbarramento al secondo è momentaneo, quello al giorno no: ritenta una
+    # volta sola, altrimenti un prospetto che esiste resterebbe "non
+    # disponibile" per un quarto d'ora per colpa della cache negativa.
+    if avviso and "per second" in avviso.lower():
+        time.sleep(_AV_PAUSA * 2)
+        try:
+            raw, payload = _scarica()
+            avviso = str(payload.get("Note") or payload.get("Information") or "")
+        except Exception as e:
+            return _fallito(f"scaricamento fallito: {e}")
+    if avviso:
+        return _fallito(avviso)
     if not payload.get("quarterlyReports") and not payload.get("annualReports"):
         return _fallito(f"Alpha Vantage non ha il {nome} di {ticker} "
                         "(copre soprattutto i titoli USA, senza suffisso di borsa)")
@@ -163,13 +181,21 @@ def av_conto_economico(ticker, forza=False):
 
 
 def av_serie(payload, modo="ttm"):
-    """Serie di fatturato, utile netto, utile lordo e margine netto.
+    """Le quattro righe della cascata del conto economico, più i margini.
+
+    Fatturato → utile lordo → reddito operativo → utile netto: sono lo stesso
+    numero di partenza al netto di tre strati di costo diversi, ed è il
+    confronto fra loro a dire dove finiscono i soldi. Il reddito operativo è
+    quello che misura il mestiere dell'azienda: sotto di lui restano solo
+    interessi e imposte, che dipendono da come è finanziata e da dove ha sede,
+    non da come lavora.
 
     `modo='ttm'` somma i 4 trimestri scorrevoli (trailing twelve months),
     `modo='annuale'` usa gli esercizi come li pubblica l'azienda.
     """
     vuoto = {"date": [], "fatturato": [], "utile": [], "lordo": [],
-             "margine": [], "valuta": "USD"}
+             "operativo": [], "margine": [], "margine_lordo": [],
+             "margine_op": [], "valuta": "USD"}
     if not payload:
         return vuoto
 
@@ -192,6 +218,22 @@ def av_serie(payload, modo="ttm"):
                   and _av_num(r.get("costOfRevenue")) is not None)
               else _av_num(r.get("grossProfit"))
               for r in reports]
+    # Il reddito operativo è il risultato della gestione caratteristica: ricavi
+    # meno costo del venduto meno le spese di struttura (ricerca, vendite,
+    # amministrazione, ammortamenti). Dove Alpha Vantage non lo pubblica si
+    # ricostruisce come utile lordo − costi operativi, che è la sua definizione.
+    def _op(r):
+        v = _av_num(r.get("operatingIncome"))
+        if v is not None:
+            return v
+        lo = (_av_num(r.get("totalRevenue")) - _av_num(r.get("costOfRevenue"))
+              if (_av_num(r.get("totalRevenue")) is not None
+                  and _av_num(r.get("costOfRevenue")) is not None)
+              else _av_num(r.get("grossProfit")))
+        oc = _av_num(r.get("operatingExpenses"))
+        return (lo - oc) if (lo is not None and oc is not None) else None
+
+    operativi = [_op(r) for r in reports]
     valuta = next((r.get("reportedCurrency") for r in reports
                    if r.get("reportedCurrency")), "USD")
 
@@ -206,13 +248,18 @@ def av_serie(payload, modo="ttm"):
                 out.append(sum(fin) if len(fin) == 4 and None not in fin else None)
             return out
 
-        date, ricavi, utili, lordi = (date[3:], _ttm(ricavi)[3:],
-                                      _ttm(utili)[3:], _ttm(lordi)[3:])
+        date, ricavi, utili, lordi, operativi = (
+            date[3:], _ttm(ricavi)[3:], _ttm(utili)[3:], _ttm(lordi)[3:],
+            _ttm(operativi)[3:])
 
-    margine = [(u / r * 100) if (u is not None and r) else None
-               for u, r in zip(utili, ricavi)]
+    def _marg(serie):
+        return [(x / r * 100) if (x is not None and r) else None
+                for x, r in zip(serie, ricavi)]
+
     return {"date": date, "fatturato": ricavi, "utile": utili, "lordo": lordi,
-            "margine": margine, "valuta": valuta}
+            "operativo": operativi, "margine": _marg(utili),
+            "margine_lordo": _marg(lordi), "margine_op": _marg(operativi),
+            "valuta": valuta}
 
 
 # ── Prospetti riclassificati ─────────────────────────────────────────────────
@@ -525,12 +572,818 @@ def _ricl_rendiconto(periodi):
     ]
 
 
+# ── Valori consigliati per gli slider ────────────────────────────────────────
+# Ogni slider parte da un numero ricavato dai conti del titolo, non da un
+# default buono per tutti: con parametri arbitrari la stessa schermata dice
+# tutto e il contrario di tutto: bastano due punti di WACC. Le formule stanno
+# qui, il tab "🎯 Parametri" le mostra con i numeri con cui sono state
+# calcolate, così un consiglio si può rifiutare sapendo cosa si rifiuta.
+_ERP          = 5.0      # premio per il rischio azionario di un mercato maturo (%)
+_RF_RISERVA   = 4.25     # usati solo se FRED non risponde
+_AAA_RISERVA  = 5.50
+_G_TERM_DEF   = 2.5      # crescita perpetua: inflazione + crescita reale di lungo periodo
+_GRAHAM_G_MAX = 15.0     # oltre, la formula di Graham regala multipli irreali
+
+_FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
+_FRED_KEY = os.environ.get("FRED_API_KEY", "65061ed1fa4c47d53b1d644e1cd858d3")
+_FRED_TTL = 12 * 3600
+_FRED_MEM = {}           # serie → (valore, data, quando)
+
+# Multipli mediani di settore: rete di sicurezza per i titoli la cui storia non
+# basta (meno di due esercizi con utile o EBITDA positivi). La mediana del
+# titolo stesso, quando c'è, è un ancoraggio migliore di una media di settore.
+_PE_SETTORE = {
+    "Technology": 26.0, "Communication Services": 18.0, "Consumer Cyclical": 20.0,
+    "Consumer Defensive": 20.0, "Healthcare": 20.0, "Financial Services": 13.0,
+    "Industrials": 20.0, "Energy": 12.0, "Basic Materials": 15.0,
+    "Utilities": 17.0, "Real Estate": 20.0,
+}
+_EV_SETTORE = {
+    "Technology": 17.0, "Communication Services": 9.0, "Consumer Cyclical": 12.0,
+    "Consumer Defensive": 13.0, "Healthcare": 13.0, "Financial Services": 10.0,
+    "Industrials": 13.0, "Energy": 6.0, "Basic Materials": 8.0,
+    "Utilities": 10.0, "Real Estate": 17.0,
+}
+_PE_DEF, _EV_DEF = 18.0, 11.0
+
+# Slider → (passo, minimo, massimo): il consiglio deve poter essere scritto
+# nello slider, quindi nasce già sul suo passo e dentro i suoi estremi.
+_SLIDER_LIMITI = {
+    "val-wacc":       (0.5,  4.0, 20.0),
+    "val-g1":         (0.5,  0.0, 60.0),
+    "val-g2":         (0.5,  0.0, 45.0),
+    "val-gterm":      (0.25, 0.0,  8.75),
+    "val-fcf-margin": (0.5,  1.0, 50.0),
+    "val-ke":         (0.5,  4.0, 20.0),
+    "val-ddm-g":      (0.25, 0.0, 10.0),
+    "val-graham-g":   (0.5,  0.0, 25.0),
+    "val-bond-yield": (0.25, 1.0, 10.0),
+    "val-pe-sector":  (1.0,  5.0, 60.0),
+    "val-ev-ebitda":  (0.5,  3.0, 30.0),
+}
+
+# Etichetta e unità di misura di ogni consiglio, per il tab Parametri.
+_SLIDER_ORDINE = ["val-wacc", "val-g1", "val-g2", "val-gterm", "val-fcf-margin",
+                  "val-ke", "val-ddm-g", "val-graham-g", "val-bond-yield",
+                  "val-pe-sector", "val-ev-ebitda"]
+
+_SLIDER_ETICHETTE = [
+    ("val-wacc",       "WACC — tasso di sconto",            "%",  "📉 DCF"),
+    ("val-g1",         f"Crescita ricavi anni 1-{ANNI_FASE1}", "%", "📉 DCF"),
+    ("val-g2",         f"Crescita ricavi anni {ANNI_FASE1+1}-{ANNI_DCF}", "%", "📉 DCF"),
+    ("val-gterm",      "Tasso finale (perpetuità)",         "%",  "📉 DCF"),
+    ("val-fcf-margin", "Margine FCF unlevered / ricavi",    "%",  "📉 DCF"),
+    ("val-ke",         "Ke — costo del capitale proprio",   "%",  "💰 DDM"),
+    ("val-ddm-g",      "Crescita del dividendo",            "%",  "💰 DDM"),
+    ("val-graham-g",   "Crescita EPS attesa",               "%",  "📐 Graham"),
+    ("val-bond-yield", "Rendimento AAA bond",               "%",  "📐 Graham"),
+    ("val-pe-sector",  "P/E di confronto",                  "x",  "📈 Multipli"),
+    ("val-ev-ebitda",  "EV/EBITDA di confronto",            "x",  "📈 Multipli"),
+]
+
+
+def _ssl_ctx():
+    """Contesto SSL con i certificati di `certifi` quando ci sono.
+
+    Sul server i certificati di sistema bastano; su macOS il Python del
+    framework non ne ha e senza questo la chiamata a FRED fallirebbe solo in
+    locale, facendo sembrare rotto un consiglio che in produzione funziona.
+    """
+    try:
+        import ssl, certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return None
+
+
+def _num(x):
+    """float, oppure None per NaN e valori non numerici."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return None if v != v else v
+
+
+def _mediana(valori):
+    v = sorted(x for x in valori if x is not None)
+    if not v:
+        return None
+    n = len(v)
+    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+
+
+def _anni_fra(col0, col1, riserva):
+    """Anni fra due colonne di bilancio; `riserva` se le date non si leggono."""
+    try:
+        n = abs(int(col1.year) - int(col0.year))
+        return n if n > 0 else riserva
+    except Exception:
+        return riserva
+
+
+def _cagr(v0, v1, anni):
+    """Crescita annua composta. None quando i segni non la rendono definita."""
+    if not v0 or not v1 or v0 <= 0 or v1 <= 0 or anni <= 0:
+        return None
+    return (v1 / v0) ** (1.0 / anni) - 1.0
+
+
+def _riga_bilancio(df, *chiavi):
+    """Riga di un prospetto yfinance, per nome esatto (maiuscole indifferenti).
+
+    Prima chiave trovata, in ordine: i nomi delle voci cambiano da titolo a
+    titolo (`Interest Expense` / `Interest Expense Non Operating`, `EBITDA` /
+    `Normalized EBITDA`) e un `in` sulla sottostringa pescherebbe la voce
+    sbagliata.
+    """
+    if df is None or getattr(df, "empty", True):
+        return None
+    mappa = {str(i).strip().lower(): i for i in df.index}
+    for k in chiavi:
+        i = mappa.get(k.lower())
+        if i is not None:
+            return df.loc[i]
+    return None
+
+
+def _cella(riga, col):
+    """Valore di una colonna (esercizio) di una riga di bilancio."""
+    if riga is None:
+        return None
+    try:
+        return _num(riga.get(col))
+    except Exception:
+        return None
+
+
+def _su_slider(slider, valore):
+    """Porta un valore sul passo dello slider e dentro i suoi estremi.
+
+    Torna anche il valore grezzo quando il taglio l'ha spostato davvero: un
+    consiglio limitato dal massimo dello slider deve dirlo, altrimenti si legge
+    come un dato del titolo (NVDA cresce dell'83%, lo slider si ferma a 60).
+    """
+    if valore is None:
+        return None, None
+    passo, mn, mx = _SLIDER_LIMITI[slider]
+    v = min(mx, max(mn, valore))
+    v = round(round(v / passo) * passo, 4)
+    return v, (valore if abs(valore - v) > passo / 2 else None)
+
+
+def _fred_ultimo(serie):
+    """Ultima osservazione valida di una serie FRED, in cache per 12 ore.
+
+    Senza cache ogni caricamento di un titolo sarebbe una chiamata di rete in
+    più su un dato che si muove una volta al giorno.
+    """
+    ora = time.time()
+    c = _FRED_MEM.get(serie)
+    if c and ora - c[2] < _FRED_TTL:
+        return c[0], c[1]
+    url = (f"{_FRED_URL}?series_id={serie}&api_key={_FRED_KEY}"
+           f"&file_type=json&sort_order=desc&limit=24")
+    ctx = _ssl_ctx()
+    req = (urllib.request.urlopen(url, timeout=8, context=ctx) if ctx
+           else urllib.request.urlopen(url, timeout=8))
+    with req as r:
+        oss = json.loads(r.read().decode()).get("observations", [])
+    for o in oss:
+        v = _num(o.get("value"))
+        if v is not None:
+            _FRED_MEM[serie] = (v, o.get("date", ""), ora)
+            return v, o.get("date", "")
+    return None, None
+
+
+def _tassi_mercato():
+    """Risk-free (Treasury 10 anni) e rendimento AAA correnti, da FRED.
+
+    Sono i due soli input dei modelli che non stanno nei conti del titolo — la
+    base del CAPM e la Y della formula di Graham — e sono anche i due che si
+    muovono di più: lasciarli a un default rende finto tutto il resto.
+    """
+    rf = aaa = None
+    fonti = []
+    try:
+        rf, d = _fred_ultimo("DGS10")
+        if rf is not None:
+            fonti.append(f"risk-free {rf:.2f}% (FRED DGS10 {d})")
+    except Exception:
+        pass
+    try:
+        aaa, d = _fred_ultimo("AAA")
+        if aaa is not None:
+            fonti.append(f"AAA {aaa:.2f}% (FRED {d})")
+    except Exception:
+        pass
+    if rf is None:
+        rf = _RF_RISERVA
+        fonti.append(f"risk-free {rf:.2f}% (valore di riserva: FRED non raggiungibile)")
+    if aaa is None:
+        aaa = _AAA_RISERVA
+        fonti.append(f"AAA {aaa:.2f}% (valore di riserva: FRED non raggiungibile)")
+    return rf, aaa, " · ".join(fonti)
+
+
+def stima_crescita_flussi(righe):
+    """Crescita del flusso di cassa stimata partendo dal reddito netto.
+
+    `righe` = [(data, utile_netto, fcf)], dal più vecchio al più recente.
+
+    Perché passare dal reddito netto invece di misurare il FCF e basta: il
+    flusso di cassa è molto più ballerino dell'utile, perché il capex è
+    grumoso — un anno di fabbriche nuove lo taglia a metà senza che il
+    mestiere sia cambiato. L'utile netto, che gli investimenti li spalma in
+    ammortamenti, è la parte stabile; il resto è il **tasso di conversione**
+    FCF/utile netto, che si guarda a parte.
+
+    I due pezzi si ricompongono esattamente, non per approssimazione:
+
+        FCF = utile × conversione   ⟹   (1+g_fcf) = (1+g_utile) × (1+g_conv)
+
+    Da qui la stima prospettica: si tiene la crescita dell'utile e si assume
+    che la conversione smetta di scivolare (g_conv = 0). Dire quanto è
+    scivolata finora resta compito di chi guarda, e infatti si stampa.
+
+    Le medie sono due perché rispondono a domande diverse: la media
+    aritmetica delle variazioni è "quanto è cambiato in un anno tipico" ed è
+    sempre **più alta** della crescita davvero realizzata (da 100 a 50 a 100
+    fa −50% e +100%, media +25%, crescita vera zero). Per far crescere i
+    flussi nel DCF serve il CAGR, che parte e arriva dove è arrivata l'azienda.
+    """
+    righe = [(d_, u_, f_) for d_, u_, f_ in righe
+             if u_ is not None and f_ is not None]
+    if len(righe) < 2:
+        return None
+
+    anni = []
+    for i, (data, utile, fcf) in enumerate(righe):
+        prec_u = righe[i - 1][1] if i else None
+        prec_f = righe[i - 1][2] if i else None
+        anni.append({
+            "data": data,
+            "utile": utile,
+            "fcf": fcf,
+            # Da una base negativa la variazione percentuale non significa
+            # niente: resta un buco, non un numero che sembra un'informazione.
+            "var_utile": ((utile / prec_u - 1) * 100
+                          if (prec_u is not None and prec_u > 0) else None),
+            "var_fcf": ((fcf / prec_f - 1) * 100
+                        if (prec_f is not None and prec_f > 0) else None),
+            "conversione": (fcf / utile * 100) if utile > 0 else None,
+        })
+
+    var_u = [a["var_utile"] for a in anni if a["var_utile"] is not None]
+    var_f = [a["var_fcf"] for a in anni if a["var_fcf"] is not None]
+    conv  = [a["conversione"] for a in anni if a["conversione"] is not None]
+
+    def _pct(x):
+        return None if x is None else x * 100
+
+    # Il composto vuole due estremi positivi. Con esercizi in perdita in testa
+    # alla serie (AT&T 2022, −6,9 mld) non si butta via tutto: si parte dal
+    # primo anno in utile e si dice su quanti anni si è misurato. Una mediana
+    # delle variazioni al posto del composto sarebbe peggio del silenzio — su
+    # AT&T dava +34,6% l'anno per un'azienda che cresce a una cifra.
+    i0 = next((i for i, (_, u_, _) in enumerate(righe) if u_ > 0), None)
+    if i0 is not None and i0 >= len(righe) - 1:
+        i0 = None                                  # solo l'ultimo anno è in utile
+    n_anni = (len(righe) - 1 - i0) if i0 is not None else 0
+    parziale = bool(i0)                            # i0 > 0: serie accorciata
+
+    cagr_u = cagr_f = None
+    if i0 is not None:
+        cagr_u = _pct(_cagr(righe[i0][1], righe[-1][1], n_anni))
+        cagr_f = _pct(_cagr(righe[i0][2], righe[-1][2], n_anni))
+    # La conversione è il ponte fra i due: cresce come il rapporto fra i due
+    # CAGR, e per costruzione (1+g_u)(1+g_c) = (1+g_f).
+    cagr_c = None
+    if cagr_u is not None and cagr_f is not None:
+        cagr_c = ((1 + cagr_f / 100) / (1 + cagr_u / 100) - 1) * 100
+
+    # Su banche e assicurazioni il free cash flow non vuole dire niente:
+    # prestiti e depositi passano dal rendiconto come se fossero investimenti,
+    # e il rapporto con l'utile salta da +2281% a −483% (Intesa Sanpaolo).
+    # Quando il segno cambia o l'escursione è enorme il ponte va dichiarato rotto.
+    conv_rotta = bool(conv) and (min(conv) <= 0 or max(conv) > 4 * max(min(conv), 1e-9))
+
+    stima, come, avviso = None, "", ""
+    if cagr_u is not None:
+        stima = cagr_u
+        come = (f"crescita composta del reddito netto su {n_anni} "
+                f"{'anno' if n_anni == 1 else 'anni'}"
+                + (" (la serie parte dal primo esercizio in utile)"
+                   if parziale else "")
+                + ", con il tasso di conversione in cassa tenuto fermo dov'è oggi")
+        if conv_rotta:
+            avviso = ("il rapporto fra flusso di cassa e utile è troppo "
+                      "ballerino perché questa stima si trasferisca ai flussi: "
+                      "succede sulle banche e sulle società che stanno "
+                      "cambiando pelle. Qui vale come crescita degli utili, "
+                      "non come crescita della cassa")
+        elif cagr_c is not None and abs(cagr_c) >= 3.0:
+            verso = "scivolata" if cagr_c < 0 else "salita"
+            avviso = (
+                f"la conversione FCF/utile è {verso} del {cagr_c:+.1f}% "
+                f"l'anno: è questo, non l'utile, a spiegare perché il flusso "
+                f"di cassa è cresciuto del {cagr_f:+.1f}% invece del "
+                f"{cagr_u:+.1f}%. Se il movimento continua la crescita dei "
+                f"flussi resta più "
+                f"{'bassa' if cagr_c < 0 else 'alta'} di questa stima")
+    else:
+        come = ("il reddito netto è in perdita nell'ultimo esercizio: non c'è "
+                "una crescita da comporre")
+        avviso = "imposta la crescita a mano, è un'ipotesi tua, non un dato"
+
+    return {
+        "anni": anni,
+        "n_var": len(var_u),
+        "media_utile": (sum(var_u) / len(var_u)) if var_u else None,
+        "mediana_utile": _mediana(var_u),
+        "cagr_utile": cagr_u,
+        "media_fcf": (sum(var_f) / len(var_f)) if var_f else None,
+        "mediana_fcf": _mediana(var_f),
+        "cagr_fcf": cagr_f,
+        "cagr_conv": cagr_c,
+        "conv_mediana": _mediana(conv),
+        "conv_rotta": conv_rotta,
+        "n_anni": n_anni,
+        "parziale": parziale,
+        "conv_min": min(conv) if conv else None,
+        "conv_max": max(conv) if conv else None,
+        "stima": stima,
+        "come": come,
+        "avviso": avviso,
+    }
+
+
+def parametri_consigliati(info, fin, cf, bs, storia=None, dividendi=None):
+    """Valore di partenza di ogni slider, ricavato dai conti del titolo.
+
+    Torna `{id_slider: {"v": valore, "come": spiegazione, "avviso": ...}}` più
+    la chiave `_det` con i passaggi intermedi (beta, aliquota, costo del debito,
+    pesi del WACC) che il tab Parametri stampa in testa.
+
+    Nessuna eccezione esce da qui: un consiglio mancante è una riga "N/D" nel
+    tab, non un titolo che non si carica.
+    """
+    out, det = {}, {}
+
+    def _g(k):
+        return _num(info.get(k))
+
+    def _put(slider, valore, come, avviso=""):
+        v, grezzo = _su_slider(slider, valore)
+        if grezzo is not None:
+            _, mn, mx = _SLIDER_LIMITI[slider]
+            taglio = (f"calcolato {grezzo:.1f}, riportato dentro la corsa dello "
+                      f"slider ({mn:g}–{mx:g})")
+            avviso = f"{avviso} · {taglio}" if avviso else taglio
+        out[slider] = {"v": v, "come": come, "avviso": avviso}
+        return v
+
+    # ── tassi di mercato e struttura del capitale ────────────────────────────
+    rf, aaa, fonte_tassi = _tassi_mercato()
+    beta = _g("beta") or 1.0
+    mc   = _g("marketCap") or 0.0
+    debt = _g("totalDebt") or 0.0
+    det["tassi"] = fonte_tassi
+    det["beta"], det["mc"], det["debito"] = beta, mc, debt
+
+    # Aliquota effettiva: mediana degli esercizi in utile. Un solo anno con una
+    # posta straordinaria darebbe un'aliquota che non descrive l'azienda.
+    r_tax = _riga_bilancio(fin, "Tax Provision")
+    r_pre = _riga_bilancio(fin, "Pretax Income")
+    aliquote = []
+    if r_pre is not None:
+        for col in r_pre.index:
+            t_, p_ = _cella(r_tax, col), _cella(r_pre, col)
+            if t_ is not None and p_ and p_ > 0 and 0 <= t_ / p_ <= 0.6:
+                aliquote.append(t_ / p_)
+    aliq = _mediana(aliquote)
+    if aliq is None:
+        aliq, det["aliquota_fonte"] = 0.25, "nessun esercizio in utile: 25% convenzionale"
+    else:
+        aliq = min(0.35, max(0.05, aliq))
+        det["aliquota_fonte"] = (f"mediana di {len(aliquote)} eserciz"
+                                 f"{'io' if len(aliquote) == 1 else 'i'} in utile")
+    det["aliquota"] = aliq
+
+    # Costo del debito: quanto paga davvero, non quanto pagherebbe in teoria.
+    r_int = _riga_bilancio(fin, "Interest Expense", "Interest Expense Non Operating")
+    kd = None
+    if debt > 0 and r_int is not None:
+        for col in r_int.index:
+            i_ = _cella(r_int, col)
+            if i_:
+                kd = abs(i_) / debt * 100
+                break
+    if kd is None:
+        kd = aaa + 0.5
+        det["kd_fonte"] = f"AAA {aaa:.2f}% + 0,50 (oneri finanziari non esposti)"
+    elif not 0.5 <= kd <= 15.0:
+        kd = aaa + 0.5
+        det["kd_fonte"] = (f"AAA {aaa:.2f}% + 0,50 (oneri ÷ debito fuori scala, "
+                           f"dato di bilancio non confrontabile)")
+    else:
+        det["kd_fonte"] = "oneri finanziari dell'ultimo esercizio ÷ debito totale"
+    # Gli oneri di bilancio sono la cedola media del debito già emesso, spesso
+    # acceso quando i tassi erano altri: come costo del capitale conta quanto
+    # costerebbe rifinanziarsi oggi, e nessuno si rifinanzia sotto il rendimento
+    # delle emittenti migliori.
+    if kd < aaa:
+        det["kd_fonte"] = (f"{det['kd_fonte']}, {kd:.2f}%, portato al rendimento "
+                           f"AAA corrente: il debito in bilancio è più vecchio "
+                           f"dei tassi di oggi")
+        kd = aaa
+    det["kd"] = kd
+
+    ke_capm = rf + beta * _ERP
+    # L'azionista viene dopo i creditori in ogni scenario: pretendere dalle
+    # azioni meno di quanto la stessa azienda paga sui suoi bond è una
+    # contraddizione, e su un titolo a beta basso il CAPM ci arriva davvero
+    # (ENI: 5,9% di CAPM contro un debito che costa di più).
+    ke = max(ke_capm, kd + 2.0)
+    det["ke_capm"], det["ke"] = ke_capm, ke
+    if ke > ke_capm:
+        det["ke_nota"] = (f"CAPM {ke_capm:.2f}% alzato a costo del debito + 2 punti: "
+                          f"il capitale proprio è subordinato, non può costare "
+                          f"meno del debito della stessa azienda")
+    if mc > 0 and debt > 0:
+        we, wd = mc / (mc + debt), debt / (mc + debt)
+        wacc = we * ke + wd * kd * (1 - aliq)
+    else:
+        we, wd = 1.0, 0.0
+        wacc = ke
+    det["we"], det["wd"], det["wacc"] = we, wd, wacc
+
+    _put("val-wacc", wacc,
+         f"CAPM sul capitale proprio e costo effettivo del debito, pesati a valori "
+         f"di mercato: Ke = {rf:.2f}% + {beta:.2f} × {_ERP:.1f}% = {ke_capm:.2f}%"
+         + (f" → {ke:.2f}% (minimo: costo del debito + 2 punti)" if ke > ke_capm else "")
+         + f"; Kd = {kd:.2f}% × (1 − {aliq*100:.0f}%) = {kd*(1-aliq):.2f}%; "
+           f"pesi E {we*100:.0f}% / D {wd*100:.0f}% → WACC {wacc:.2f}%")
+    _put("val-ke", ke,
+         f"CAPM: risk-free {rf:.2f}% + beta {beta:.2f} × premio per il rischio "
+         f"{_ERP:.1f}% = {ke_capm:.2f}%"
+         + (f", alzato a {ke:.2f}% (costo del debito + 2 punti)" if ke > ke_capm else "")
+         + ". È il tasso del DDM, che sconta un flusso già al netto degli "
+           "interessi e quindi non usa il WACC",
+         det.get("ke_nota", ""))
+
+    # ── crescita dei ricavi ──────────────────────────────────────────────────
+    r_rev = _riga_bilancio(fin, "Total Revenue", "Operating Revenue")
+    ricavi = []
+    if r_rev is not None:
+        for col in r_rev.index:            # colonne dalla più recente
+            v = _cella(r_rev, col)
+            if v and v > 0:
+                ricavi.append((col, v))
+    cagr_rev = (_cagr(ricavi[-1][1], ricavi[0][1],
+                      _anni_fra(ricavi[-1][0], ricavi[0][0], len(ricavi) - 1))
+                if len(ricavi) >= 2 else None)
+    yoy_bil  = (ricavi[0][1] / ricavi[1][1] - 1) if len(ricavi) >= 2 else None
+    yoy_info = _g("revenueGrowth")
+    voci = []
+    if cagr_rev is not None: voci.append(f"CAGR {len(ricavi)-1} anni {cagr_rev*100:+.1f}%")
+    if yoy_bil  is not None: voci.append(f"ultimo esercizio {yoy_bil*100:+.1f}%")
+    if yoy_info is not None: voci.append(f"ultimo trimestre {yoy_info*100:+.1f}%")
+    g1_raw = _mediana([x * 100 for x in (cagr_rev, yoy_bil, yoy_info) if x is not None])
+    avviso_g1 = ""
+    if g1_raw is not None and g1_raw < 0:
+        avviso_g1 = ("i ricavi stanno calando: decidi tu se è un passaggio "
+                     "temporaneo — allora alza la fase 1 — o la nuova normalità")
+    _put("val-g1", 8.0 if g1_raw is None else g1_raw,
+         ("mediana delle misure di crescita dei ricavi disponibili ("
+          + " · ".join(voci) + ")" if voci else
+          "storico dei ricavi troppo corto per misurare una crescita (serve più "
+          "di un esercizio): 8% convenzionale, da correggere a mano"),
+         avviso_g1)
+
+    gterm_raw = min(_G_TERM_DEF, max(0.0, wacc - 0.25))
+    _put("val-gterm", gterm_raw,
+         f"{_G_TERM_DEF:.1f}% (inflazione più crescita reale di lungo periodo): "
+         f"nessuna azienda cresce più dell'economia per sempre"
+         + ("" if gterm_raw >= _G_TERM_DEF else
+            f" — qui abbassato a {gterm_raw:.2f}% perché deve restare sotto il "
+            f"WACC {wacc:.2f}%, altrimenti Gordon non converge"))
+
+    g1_eff = out["val-g1"]["v"] if out["val-g1"]["v"] is not None else 8.0
+    g2_raw = (g1_eff + gterm_raw) / 2
+    _put("val-g2", g2_raw,
+         f"punto di mezzo fra la crescita di fase 1 ({g1_eff:.1f}%) e il tasso "
+         f"finale ({gterm_raw:.2f}%): la crescita non si spegne di colpo, sfuma")
+
+    # ── margine FCF unlevered ────────────────────────────────────────────────
+    # Il DCF sconta al WACC e sottrae il debito netto, quindi il flusso deve
+    # essere quello che spetta a tutti i finanziatori: il "Free Cash Flow" del
+    # rendiconto è già al netto degli interessi pagati, e gli interessi netti
+    # d'imposta vanno rimessi dentro. Senza questo passaggio il debito verrebbe
+    # contato due volte, nel flusso e nel ponte finale.
+    r_fcf   = _riga_bilancio(cf, "Free Cash Flow")
+    r_ocf   = _riga_bilancio(cf, "Operating Cash Flow",
+                             "Cash Flow From Continuing Operating Activities")
+    r_capex = _riga_bilancio(cf, "Capital Expenditure", "Purchase Of PPE")
+    margini, dettaglio_marg = [], []
+    for col, rev_v in ricavi:
+        f_ = _cella(r_fcf, col)
+        if f_ is None:
+            a, b = _cella(r_ocf, col), _cella(r_capex, col)
+            f_ = (a - abs(b)) if (a is not None and b is not None) else None
+        if f_ is None:
+            continue
+        i_ = _cella(r_int, col) or 0.0
+        m = (f_ + abs(i_) * (1 - aliq)) / rev_v * 100
+        margini.append(m)
+        try:
+            dettaglio_marg.append(f"{col.year}: {m:.1f}%")
+        except Exception:
+            dettaglio_marg.append(f"{m:.1f}%")
+    marg = _mediana(margini)
+    det["margini_fcf"] = dettaglio_marg
+    # Un'azienda che brucia cassa non ha un margine da consigliare: portarlo
+    # all'1% del minimo dello slider inventerebbe un flusso positivo e il DCF
+    # stamperebbe un prezzo obiettivo per una società che non ne ha uno.
+    if marg is not None and marg <= 0:
+        out["val-fcf-margin"] = {
+            "v": None,
+            "come": (f"il flusso di cassa unlevered è negativo negli esercizi "
+                     f"disponibili ({' · '.join(dettaglio_marg)}): non c'è un "
+                     f"margine da consigliare"),
+            "avviso": ("il DCF non si applica a un'azienda che brucia cassa. "
+                       "Se vuoi comunque usarlo, imposta a mano il margine che "
+                       "ti aspetti a regime — è un'ipotesi tua, non un dato"),
+        }
+        marg = None
+    else:
+        _put("val-fcf-margin", marg,
+             (f"mediana del margine FCF unlevered degli esercizi disponibili "
+              f"({' · '.join(dettaglio_marg)}). Unlevered = FCF di rendiconto + "
+              f"oneri finanziari × (1 − {aliq*100:.0f}%): è il flusso che spetta "
+              f"a tutti i finanziatori, coerente con lo sconto al WACC"
+              if marg is not None else
+              "rendiconto finanziario non disponibile: imposta il margine a mano"))
+
+    # ── multipli: la mediana del titolo stesso, non una media di settore ─────
+    r_eps = _riga_bilancio(fin, "Diluted EPS", "Basic EPS")
+    r_sh  = _riga_bilancio(fin, "Diluted Average Shares", "Basic Average Shares")
+    r_eb  = _riga_bilancio(fin, "EBITDA", "Normalized EBITDA")
+    r_nd  = _riga_bilancio(bs, "Net Debt")
+    chiusure = None
+    try:
+        if storia is not None and not storia.empty:
+            chiusure = storia["Close"]
+            if getattr(chiusure.index, "tz", None) is not None:
+                chiusure.index = chiusure.index.tz_localize(None)
+    except Exception:
+        chiusure = None
+    pe_st, ev_st = [], []
+    if chiusure is not None:
+        for col, _rev in ricavi:
+            try:
+                p = _num(chiusure.asof(col))     # ultima chiusura entro la data di bilancio
+            except Exception:
+                p = None
+            if not p:
+                continue
+            e_ = _cella(r_eps, col)
+            if e_ and e_ > 0:
+                pe_st.append(p / e_)
+            s_, b_ = _cella(r_sh, col), _cella(r_eb, col)
+            n_ = _cella(r_nd, col) or 0.0
+            if s_ and s_ > 0 and b_ and b_ > 0:
+                ev_st.append((p * s_ + n_) / b_)
+    settore = (info.get("sector") or "").strip()
+    pe_med, ev_med = _mediana(pe_st), _mediana(ev_st)
+    if pe_med is not None and len(pe_st) >= 2:
+        _put("val-pe-sector", pe_med,
+             f"mediana del P/E del titolo negli ultimi {len(pe_st)} esercizi "
+             f"({' · '.join(f'{x:.1f}x' for x in pe_st)}): il multiplo che il "
+             f"mercato gli riconosce di solito, più significativo di una media "
+             f"di settore")
+    else:
+        _put("val-pe-sector", _PE_SETTORE.get(settore, _PE_DEF),
+             f"mediana di settore ({settore or 'non classificato'}): la storia "
+             f"del titolo non basta (servono due esercizi con utile positivo)")
+    if ev_med is not None and len(ev_st) >= 2:
+        _put("val-ev-ebitda", ev_med,
+             f"mediana dell'EV/EBITDA del titolo negli ultimi {len(ev_st)} "
+             f"esercizi ({' · '.join(f'{x:.1f}x' for x in ev_st)}), con il debito "
+             f"netto di ciascun esercizio")
+    else:
+        _put("val-ev-ebitda", _EV_SETTORE.get(settore, _EV_DEF),
+             f"mediana di settore ({settore or 'non classificato'}): la storia "
+             f"del titolo non basta (servono due esercizi con EBITDA positivo)")
+
+    # ── dividendo ────────────────────────────────────────────────────────────
+    div_g, anni_div = None, 0
+    try:
+        if dividendi is not None and len(dividendi) > 0:
+            per_anno = dividendi.groupby(dividendi.index.year).sum()
+            # l'anno in corso è incompleto e falserebbe il CAGR: si toglie solo
+            # se è davvero l'anno corrente (un titolo che ha smesso di pagare
+            # dividendi nel 2019 ha il 2019 chiuso, non da scartare)
+            if len(per_anno) >= 2 and int(per_anno.index[-1]) == time.localtime().tm_year:
+                per_anno = per_anno.iloc[:-1]
+            if len(per_anno) >= 3:
+                anni_div = min(5, len(per_anno) - 1)
+                div_g = _cagr(float(per_anno.iloc[-1 - anni_div]),
+                              float(per_anno.iloc[-1]), anni_div)
+    except Exception:
+        div_g = None
+    tetto_ddm = max(0.0, min(6.0, ke - 0.5))
+    if div_g is None:
+        _put("val-ddm-g", min(2.0, tetto_ddm),
+             "storico dei dividendi troppo corto (servono tre anni chiusi): "
+             "valore prudenziale")
+    else:
+        avviso = ""
+        if div_g * 100 > tetto_ddm:
+            avviso = (f"crescita storica {div_g*100:+.1f}%, tenuta sotto "
+                      f"{tetto_ddm:.2f}%: Gordon esige g < Ke e un dividendo non "
+                      f"cresce a quel ritmo per sempre")
+        elif div_g < 0:
+            avviso = (f"il dividendo è calato del {abs(div_g)*100:.1f}% l'anno: "
+                      f"il consiglio è 0, non una crescita negativa")
+        _put("val-ddm-g", max(0.0, min(div_g * 100, tetto_ddm)),
+             f"CAGR del dividendo per azione sugli ultimi {anni_div} anni chiusi",
+             avviso)
+
+    # ── crescita degli utili per Graham ──────────────────────────────────────
+    # gli esercizi senza EPS si saltano, ma la distanza va contata sulle date:
+    # con un anno mancante in mezzo, "numero di dati − 1" gonfierebbe il CAGR
+    eps_serie = [(c, _cella(r_eps, c)) for c, _ in ricavi]
+    eps_serie = [(c, v) for c, v in eps_serie if v]
+    cagr_eps = None
+    if len(eps_serie) >= 2:
+        cagr_eps = _cagr(eps_serie[-1][1], eps_serie[0][1],
+                         _anni_fra(eps_serie[-1][0], eps_serie[0][0], len(eps_serie) - 1))
+    g_eps_info = _g("earningsGrowth")
+    voci_eps = []
+    if cagr_eps is not None:   voci_eps.append(f"CAGR EPS {cagr_eps*100:+.1f}%")
+    if g_eps_info is not None: voci_eps.append(f"ultimo trimestre {g_eps_info*100:+.1f}%")
+    g_eps = _mediana([x * 100 for x in (cagr_eps, g_eps_info) if x is not None])
+    avviso_eps = ""
+    if g_eps is not None and g_eps > _GRAHAM_G_MAX:
+        avviso_eps = (f"crescita storica {g_eps:.1f}%, tenuta a {_GRAHAM_G_MAX:.0f}%: "
+                      f"Graham intendeva la crescita sostenibile dei prossimi 7-10 "
+                      f"anni, oltre questa soglia la formula stampa multipli irreali")
+    _put("val-graham-g", 5.0 if g_eps is None else min(max(g_eps, 0.0), _GRAHAM_G_MAX),
+         ("mediana fra " + " e ".join(voci_eps) if voci_eps
+          else "nessuno storico di utili: 5% prudenziale"), avviso_eps)
+
+    _put("val-bond-yield", aaa,
+         "rendimento corrente delle obbligazioni societarie AAA (Moody's, serie "
+         "FRED «AAA»): è la Y della formula di Graham, il rendimento "
+         "dell'alternativa senza rischio azionario")
+
+    out["_det"] = det
+    return out
+
+
+def _consigli_titolo(t, info):
+    """Scarica il resto dei prospetti e calcola i consigli. Non solleva mai."""
+    def _p(nome):
+        try:
+            v = getattr(t, nome)
+            return v if (v is not None and not v.empty) else None
+        except Exception:
+            return None
+
+    try:
+        storia = None
+        try:
+            storia = t.history(period="7y", interval="1mo")
+        except Exception:
+            storia = None
+        dividendi = None
+        try:
+            dividendi = t.dividends
+        except Exception:
+            dividendi = None
+        return parametri_consigliati(info, _p("financials"), _p("cashflow"),
+                                     _p("balance_sheet"), storia, dividendi)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def _val_dcf(revenue, fcf_margin, wacc, g1, g2, gterm, shares, net_debt=0.0):
+    """DCF a 2 fasi: anni 1-ANNI_FASE1 a g1, poi fino ad ANNI_DCF a g2,
+    infine il tasso finale in perpetuità (Gordon).
+
+    Torna `(prezzo, flussi, pv_tv, gordon_ok, ev)`.
+
+    Il flusso scontato è **unlevered** (spetta a tutti i finanziatori) e il
+    tasso di sconto è il WACC (costo medio di tutto il capitale): la somma
+    dei valori attuali è quindi il valore dell'**impresa**, non quello degli
+    azionisti. Il ponte finale è obbligatorio — enterprise value meno debito
+    netto, poi diviso per le azioni — perché chi compra l'azione eredita
+    anche i debiti. Dividere l'enterprise value per le azioni regalava
+    all'azionista tutto il capitale dei creditori: su un titolo indebitato
+    come AT&T (debito netto ≈ market cap) il fair value usciva quasi
+    raddoppiato, su una cassaforte netta come Alphabet usciva sottostimato.
+
+    Il quarto valore dice se la perpetuità è applicabile. Gordon converge
+    solo per un tasso finale **sotto** il costo del capitale: da lì in su la
+    serie diverge e il valore terminale non è zero, è indefinito. Chi chiama
+    deve dirlo, non spacciare per valutazione la somma dei soli anni
+    espliciti — sarebbe un prezzo bassissimo che sembra un giudizio sul
+    titolo mentre è solo il modello che ha smesso di valere.
+    """
+    if revenue <= 0 or shares <= 0:
+        return None, [], 0.0, True, None
+    fcf0   = revenue * fcf_margin
+    pv_sum = 0.0
+    fcf_rows = []
+    fcf_t = fcf0
+    for yr in range(1, ANNI_FASE1 + 1):
+        fcf_t *= (1 + g1)
+        pv = fcf_t / (1 + wacc) ** yr
+        pv_sum += pv
+        fcf_rows.append((yr, f"Anni 1-{ANNI_FASE1} (g={g1*100:.1f}%)", fcf_t, pv))
+    for yr in range(ANNI_FASE1 + 1, ANNI_DCF + 1):
+        fcf_t *= (1 + g2)
+        pv = fcf_t / (1 + wacc) ** yr
+        pv_sum += pv
+        fcf_rows.append((yr, f"Anni {ANNI_FASE1+1}-{ANNI_DCF} (g={g2*100:.1f}%)",
+                         fcf_t, pv))
+    # Tasso finale: Gordon sull'ultimo flusso esplicito
+    gordon_ok = gterm < wacc
+    tv = fcf_t * (1 + gterm) / (wacc - gterm) if gordon_ok else 0.0
+    pv_tv = tv / (1 + wacc) ** ANNI_DCF
+    pv_sum += pv_tv
+    # pv_sum = valore d'impresa; l'azionista prende quel che avanza dopo i
+    # creditori. Con cassa netta il debito netto è negativo e si somma.
+    equity = pv_sum - net_debt
+    fair_price = equity / shares
+    return fair_price, fcf_rows, pv_tv, gordon_ok, pv_sum
+
+
+def _dcf_implicito(prezzo, revenue, fcf_margin, wacc, g1, g2, gterm, shares,
+                   net_debt):
+    """Cosa deve credere chi compra al prezzo di mercato.
+
+    Il DCF diretto risponde «quanto vale»; questo risponde «quale tasso di
+    sconto e quale crescita rendono giusto il prezzo di oggi». È il numero che
+    serve davvero per posizionare gli slider: dice se un WACC del 9% è una
+    scelta o una distrazione, perché lo mette accanto a quello che il mercato
+    sta effettivamente usando su questo titolo.
+
+    Torna `(wacc_implicito, g1_implicita)` in percentuale, `None` dove
+    l'equazione non ha soluzione dentro limiti sensati.
+    """
+    if not prezzo or prezzo <= 0 or revenue <= 0 or shares <= 0:
+        return None, None
+
+    def _prezzo(w=None, gg=None):
+        fv, _, _, ok, _ = _val_dcf(revenue, fcf_margin,
+                                   wacc if w is None else w,
+                                   g1 if gg is None else gg,
+                                   g2 if gg is None else gg, gterm, shares,
+                                   net_debt)
+        return fv if ok else None
+
+    # Il valore scende al salire del tasso: bisezione fra poco sopra il tasso
+    # finale (dove Gordon esplode) e un tasso che nessuno userebbe.
+    w_imp = None
+    lo, hi = gterm + 0.0025, 0.60
+    p_lo, p_hi = _prezzo(w=lo), _prezzo(w=hi)
+    if p_lo is not None and p_hi is not None and p_hi <= prezzo <= p_lo:
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            if (_prezzo(w=mid) or 0) > prezzo:
+                lo = mid
+            else:
+                hi = mid
+        w_imp = (lo + hi) / 2 * 100
+
+    # Stessa cosa sulla crescita, tenendo fermo il tasso di sconto: qui il
+    # valore sale con la crescita, quindi il verso della bisezione si inverte.
+    g_imp = None
+    lo, hi = -0.50, 1.00
+    p_lo, p_hi = _prezzo(gg=lo), _prezzo(gg=hi)
+    if p_lo is not None and p_hi is not None and p_lo <= prezzo <= p_hi:
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            if (_prezzo(gg=mid) or 0) < prezzo:
+                lo = mid
+            else:
+                hi = mid
+        g_imp = (lo + hi) / 2 * 100
+    return w_imp, g_imp
+
+
 def layout():
     """Tab valutazione titolo azionario — 6 modelli + heatmap sensitività."""
 
     def _inp(id_, placeholder, value="", width="100%", type_="text"):
         return dcc.Input(id=id_, type=type_, placeholder=placeholder, value=value,
                          debounce=True,
+                         persistence=True, persistence_type="session",
                          style={"width": width, "padding": "5px 8px",
                                 "border": "1px solid #ccc", "border-radius": "4px",
                                 "font-size": "12px"})
@@ -540,10 +1393,15 @@ def layout():
                                        "margin-top": "8px", "display": "block"})
 
     def _sl(id_, mn, mx, step, val, label):
+        # Gli slider devono ricordarsi come li ha lasciati l'utente, esattamente
+        # come i tab: se la pagina si ricarica e i tab tornano dov'erano ma gli
+        # slider ripartono dai valori di partenza, la stessa schermata mostra
+        # una valutazione diversa senza che nulla lo segnali.
         return html.Div([
             html.Label(label, style={"font-size": "10px", "color": "#555"}),
             dcc.Slider(id=id_, min=mn, max=mx, step=step, value=val,
                        tooltip={"placement": "bottom", "always_visible": True},
+                       persistence=True, persistence_type="session",
                        marks={}),
             html.Div(style={"height": "6px"}),
         ])
@@ -572,16 +1430,39 @@ def layout():
                  style={"font-size": "10px", "color": "#555",
                         "margin-top": "6px", "white-space": "pre-wrap"}),
 
+        html.Button("🎯 Applica valori consigliati", id="btn-val-consigli",
+                    n_clicks=0,
+                    style={"width": "100%", "margin-top": "6px",
+                           "background": "white", "color": "#1a3a5c",
+                           "border": "1px solid #1a3a5c", "border-radius": "6px",
+                           "padding": "6px", "font-size": "11px",
+                           "cursor": "pointer"}),
+        html.Div("Li applica già ▶ al caricamento. Il tab 🎯 Parametri mostra "
+                 "da dove viene ogni numero.",
+                 style={"font-size": "9px", "color": "#888", "margin-top": "4px",
+                        "line-height": "1.45"}),
+
         html.Hr(style={"margin": "10px 0"}),
 
         _grp("📉 DCF — flussi di cassa"),
         _sl("val-wacc",    4.0, 20.0, 0.5,  9.0, "WACC — tasso di sconto (%)"),
-        _sl("val-g1", 0.0, 40.0, 0.5, 12.0,
+        _sl("val-g1", 0.0, 60.0, 0.5, 12.0,
             f"Crescita anni 1-{ANNI_FASE1} (%)"),
-        _sl("val-g2", 0.0, 20.0, 0.5, 6.0,
+        _sl("val-g2", 0.0, 45.0, 0.5, 6.0,
             f"Crescita anni {ANNI_FASE1 + 1}-{ANNI_DCF} (%)"),
-        _sl("val-gterm",   0.0,  6.0, 0.25, 2.5,
-            f"Tasso finale — da anno {ANNI_DCF + 1} in poi (%)"),
+        # Il massimo qui sotto è solo quello di partenza: `_val_limita_gterm` lo
+        # riporta sempre appena sotto il WACC, perché oltre quella soglia
+        # Gordon non converge e il DCF non sarebbe calcolabile.
+        _sl("val-gterm",   0.0, 8.75, 0.25, 2.5,
+            f"Tasso finale — da anno {ANNI_DCF + 1} in poi, per sempre (%)"),
+        html.Div("Crescita perpetua: il massimo segue il WACC (resta un quarto "
+                 "di punto sotto), perché una crescita perpetua pari o "
+                 "superiore al tasso di sconto fa divergere Gordon. Alza il "
+                 "WACC se ti serve più corsa. In pratica 2-3% (inflazione + "
+                 "crescita reale): per una crescita alta ma temporanea usa le "
+                 "due fasi qui sopra.",
+                 style={"font-size": "9px", "color": "#888",
+                        "line-height": "1.45", "margin": "-4px 0 8px"}),
         _sl("val-fcf-margin", 1.0, 50.0, 0.5, 15.0, "Margine FCF/Revenue (%)"),
         html.Div(id="val-fcf-nota",
                  style={"font-size": "9px", "color": "#888", "margin": "-2px 0 4px",
@@ -615,9 +1496,11 @@ def layout():
                      {"label": " Annuali (esercizi pubblicati)",
                       "value": "annuale"}],
             value="ttm",
+            persistence=True, persistence_type="session",
             labelStyle={"display": "block", "font-size": "11px",
                         "color": "#333", "margin-bottom": "4px"}),
-        html.Div("Vale per i 4 grafici del tab Bilanci.",
+        html.Div("Vale per i grafici e le tabelle del tab Bilanci. "
+                 "Per la variazione anno su anno scegli «Annuali».",
                  style={"font-size": "9px", "color": "#888",
                         "line-height": "1.45", "margin-top": "2px"}),
 
@@ -627,9 +1510,14 @@ def layout():
               "min-height": "520px"})
 
     results = html.Div([
+        # `persistence` sulla sessione del browser, come lo store qui sotto: se
+        # la pagina si ricarica il tab aperto resta quello, invece di riportare
+        # l'utente sul Riepilogo perdendo il punto in cui era.
         dcc.Tabs(id="val-result-tabs", value="val-tab-summary",
+                 persistence=True, persistence_type="session",
                  children=[
                      dcc.Tab(label="📊 Riepilogo",       value="val-tab-summary"),
+                     dcc.Tab(label="🎯 Parametri",        value="val-tab-parametri"),
                      dcc.Tab(label="🏢 Bilanci",          value="val-tab-bilanci"),
                      dcc.Tab(label="📉 DCF",              value="val-tab-dcf"),
                      dcc.Tab(label="💰 DDM",              value="val-tab-ddm"),
@@ -670,13 +1558,41 @@ def layout():
 
 def register_callbacks(app):
     """Registra i callback del tab Valutazione sull'app passata."""
+
+    # ── il tasso finale non può arrivare al WACC ─────────────────────────────
+    @app.callback(
+        Output("val-gterm", "max"),
+        Output("val-gterm", "value"),
+        Input("val-wacc",   "value"),
+        State("val-gterm",  "value"),
+    )
+    def _val_limita_gterm(wacc, gterm):
+        """Tiene il tasso finale sotto il costo del capitale.
+
+        Gordon converge solo per una crescita perpetua **minore** del WACC:
+        da lì in su la serie diverge e il valore terminale non esiste. Invece di
+        lasciare allo slider una corsa che finisce su "non calcolabile", il suo
+        massimo insegue il WACC: ogni posizione produce un numero e il legame
+        fra i due parametri si vede muovendoli. Chi vuole un tasso finale alto
+        alza prima il tasso di sconto, che è esattamente il vincolo economico.
+
+        Ripara anche la sessione: il valore che il browser si ricorda viene
+        riportato dentro il limite alla prima apertura, senza che la pagina
+        nasca con il DCF a N/D.
+        """
+        w = 9.0 if wacc is None else float(wacc)
+        tetto = max(0.25, round(w - 0.25, 2))
+        v = 2.5 if gterm is None else float(gterm)
+        # `no_update` quando il valore è già buono: questo callback scatta anche
+        # subito dopo che i valori consigliati hanno scritto WACC e tasso
+        # finale insieme, e riscriverlo lo riporterebbe a quello di prima.
+        return tetto, (min(v, tetto) if v > tetto else no_update)
+
     # ── scarica i fondamentali e posiziona gli slider sui dati del titolo ─────
     @app.callback(
         Output("store-valuation",  "data"),
         Output("val-fetch-status", "children"),
-        Output("val-fcf-margin",   "value"),
         Output("val-fcf-nota",     "children"),
-        Output("val-graham-g",     "value"),
         Input("btn-run-valuation", "n_clicks"),
         State("val-ticker",        "value"),
         prevent_initial_call=True,
@@ -686,8 +1602,7 @@ def register_callbacks(app):
         import yfinance as yf
 
         if not ticker:
-            return (no_update, "⚠ Inserisci un ticker.", no_update, no_update,
-                    no_update)
+            return no_update, "⚠ Inserisci un ticker.", no_update
 
         ticker = ticker.strip().upper()
         try:
@@ -727,6 +1642,7 @@ def register_callbacks(app):
             ev              = _g("enterpriseValue", 0) or 0
             # R&D: non sempre in info, proviamo financials
             rd_expense = 0
+            fin = None                 # serve anche più sotto, per i ricavi d'esercizio
             try:
                 fin = t.financials
                 if fin is not None and not fin.empty:
@@ -742,7 +1658,7 @@ def register_callbacks(app):
             # FCF dal rendiconto finanziario: 'info["freeCashflow"]' è spesso un
             # TTM sballato (MSFT: 16.5B contro i 67B del rendiconto) e siccome è
             # la base di tutto il DCF si preferisce il dato di bilancio.
-            fcf_bilancio, fcf_esercizio = 0, ""
+            fcf_bilancio, fcf_esercizio, rev_esercizio = 0, "", 0
             try:
                 cf = t.cashflow
                 if cf is not None and not cf.empty:
@@ -751,11 +1667,71 @@ def register_callbacks(app):
                         serie = cf.loc[k_fcf[0]].dropna()
                         if len(serie) > 0:
                             fcf_bilancio  = float(serie.iloc[0])
-                            fcf_esercizio = str(serie.index[0].date())
+                            col_fcf       = serie.index[0]
+                            fcf_esercizio = str(col_fcf.date())
+                            # Il margine va rapportato ai ricavi dello **stesso**
+                            # esercizio: dividere il FCF di un anno chiuso per i
+                            # ricavi TTM mescola due periodi diversi.
+                            k_rev = ([k for k in fin.index
+                                      if k.lower() == "total revenue"]
+                                     if fin is not None else [])
+                            if k_rev and col_fcf in fin.columns:
+                                v_rev = fin.loc[k_rev[0], col_fcf]
+                                if v_rev == v_rev and v_rev:
+                                    rev_esercizio = float(v_rev)
             except Exception:
                 pass
 
-            fcf_margin_actual = (fcf_yf / revenue) if (revenue > 0 and fcf_yf) else 0
+            # Reddito netto e flusso di cassa presi dallo **stesso** prospetto:
+            # il rendiconto porta entrambi (parte dall'utile e ci arriva), così
+            # le due serie hanno per forza gli stessi esercizi e il rapporto fra
+            # loro è confrontabile riga per riga.
+            flussi_storici = []
+            try:
+                cf = t.cashflow
+                if cf is not None and not cf.empty:
+                    def _riga_cf(*chiavi):
+                        for k in chiavi:
+                            for idx in cf.index:
+                                if str(idx).strip().lower() == k.lower():
+                                    return cf.loc[idx]
+                        return None
+                    r_ni = _riga_cf("Net Income From Continuing Operations",
+                                    "Net Income", "Net Income Continuous Operations")
+                    r_fc = _riga_cf("Free Cash Flow")
+                    r_oc = _riga_cf("Operating Cash Flow")
+                    r_cx = _riga_cf("Capital Expenditure")
+                    for col in sorted(cf.columns):          # dal più vecchio
+                        u_ = _num(r_ni[col]) if r_ni is not None else None
+                        f_ = _num(r_fc[col]) if r_fc is not None else None
+                        if f_ is None and r_oc is not None and r_cx is not None:
+                            a_, b_ = _num(r_oc[col]), _num(r_cx[col])
+                            f_ = (a_ - abs(b_)) if (a_ is not None
+                                                    and b_ is not None) else None
+                        if u_ is None or f_ is None:
+                            continue
+                        flussi_storici.append((str(col.date()), u_, f_))
+            except Exception:
+                flussi_storici = []
+
+            crescita = stima_crescita_flussi(flussi_storici)
+
+            # Il "dato reale" con cui si confronta lo slider dev'essere il
+            # rendiconto: `info["freeCashflow"]` è un TTM che yfinance sbaglia
+            # spesso e di molto (MSFT: 16.5 mld dichiarati contro i 67 del
+            # rendiconto, 5% invece del 20%), e un riferimento falso è peggio di
+            # nessun riferimento — ci si tara sopra lo slider.
+            if fcf_bilancio and rev_esercizio > 0:
+                fcf_margin_actual = fcf_bilancio / rev_esercizio
+                fcf_margin_fonte  = f"rendiconto {fcf_esercizio}"
+            elif fcf_bilancio and revenue > 0:
+                fcf_margin_actual = fcf_bilancio / revenue
+                fcf_margin_fonte  = f"rendiconto {fcf_esercizio} su ricavi TTM"
+            elif revenue > 0 and fcf_yf:
+                fcf_margin_actual = fcf_yf / revenue
+                fcf_margin_fonte  = "yfinance TTM (dato spesso inaffidabile)"
+            else:
+                fcf_margin_actual, fcf_margin_fonte = 0, "non disponibile"
 
             d = {
                 "ticker": ticker, "name": name, "sector": sector,
@@ -765,6 +1741,8 @@ def register_callbacks(app):
                 "revenue": revenue, "ebitda": ebitda, "fcf_yf": fcf_yf,
                 "fcf_margin_actual": fcf_margin_actual,
                 "fcf_bilancio": fcf_bilancio, "fcf_esercizio": fcf_esercizio,
+                "rev_esercizio": rev_esercizio, "fcf_margin_fonte": fcf_margin_fonte,
+                "crescita": crescita,
                 "total_debt": total_debt, "cash": cash, "net_debt": net_debt,
                 "dividend": dividend, "beta": beta,
                 "pe_trailing": pe_trailing, "pe_forward": pe_forward,
@@ -774,33 +1752,59 @@ def register_callbacks(app):
                 "ps_trailing": ps_trailing, "ev": ev, "rd_expense": rd_expense,
             }
 
-            # Gli slider si posizionano sul dato reale del titolo e da lì restano
-            # tuoi: nessun modello usa un valore diverso da quello che vedi.
-            marg = (fcf_bilancio / revenue * 100) if (revenue > 0 and fcf_bilancio) \
-                else (fcf_margin_actual * 100 if fcf_margin_actual else no_update)
-            if marg is not no_update:
-                marg = round(min(50.0, max(1.0, marg)) * 2) / 2      # step 0.5
-
-            gr_g = round(min(25.0, max(0.0, revenue_growth * 100)) * 2) / 2 \
-                if revenue_growth else no_update
+            # Gli slider si posizionano sui dati del titolo — tutti, non due —
+            # e da lì restano tuoi: nessun modello usa un valore diverso da
+            # quello che vedi. Li scrive `_val_applica_consigli` leggendo questa
+            # chiave, così caricamento e pulsante 🎯 fanno la stessa cosa.
+            d["sugg"] = _consigli_titolo(t, info)
 
             nota = []
-            if fcf_bilancio and revenue > 0:
+            if fcf_bilancio:
                 nota.append(f"rendiconto {fcf_esercizio}: {fcf_bilancio/1e9:,.1f} mld "
-                            f"({fcf_bilancio/revenue*100:.1f}%)")
+                            f"({fcf_margin_actual*100:.1f}% dei ricavi)")
             if fcf_yf and revenue > 0:
-                nota.append(f"yfinance TTM: {fcf_yf/1e9:,.1f} mld "
+                # Si mostra lo stesso, ma detto per quello che è: serve a capire
+                # da dove viene un numero diverso se lo si è visto altrove.
+                nota.append(f"yfinance TTM (inaffidabile): {fcf_yf/1e9:,.1f} mld "
                             f"({fcf_yf/revenue*100:.1f}%)")
             if not nota:
                 nota.append("nessun FCF disponibile: imposta il margine a mano")
 
             status = f"✅ {name} ({ticker}) — {sector} | {currency} | prezzo: {price:.2f}"
-            return json.dumps(d), status, marg, " · ".join(nota), gr_g
+            return json.dumps(d), status, " · ".join(nota)
 
         except Exception as e:
             tb = traceback.format_exc()
             print(f"=== VALUATION ERROR ===\n{tb}")
-            return no_update, f"❌ {e}", no_update, no_update, no_update
+            return no_update, f"❌ {e}", no_update
+
+    # ── i valori consigliati entrano negli slider ────────────────────────────
+    # Un solo posto che scrive gli slider, due modi di scatenarlo: il
+    # caricamento di un titolo e il pulsante 🎯. Prima erano due slider scritti
+    # dentro `run_valuation` e nove lasciati ai default di fabbrica, uguali per
+    # una utility e per una società che raddoppia i ricavi ogni anno.
+    @app.callback(
+        [Output(s, "value", allow_duplicate=True) for s in _SLIDER_ORDINE],
+        Input("store-valuation",  "data"),
+        Input("btn-val-consigli", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _val_applica_consigli(stored, n_clicks):
+        import json
+        fermi = [no_update] * len(_SLIDER_ORDINE)
+        if not stored:
+            return fermi
+        try:
+            d = json.loads(stored) if isinstance(stored, str) else stored
+            sugg = (d or {}).get("sugg") or {}
+        except Exception:
+            return fermi
+        if not sugg:
+            return fermi
+        # Un consiglio mancante lascia lo slider dov'è: meglio il valore di
+        # prima che un default che finge di essere un dato del titolo.
+        return [(sugg.get(s) or {}).get("v", None) if (sugg.get(s) or {}).get("v") is not None
+                else no_update for s in _SLIDER_ORDINE]
 
     # ── ricalcolo: ogni slider rifà i conti sul dato già in memoria ───────────
     @app.callback(
@@ -840,14 +1844,32 @@ def register_callbacks(app):
         def _n(v, dflt):
             return float(dflt if v is None else v)
 
-        return _val_build_content(
-            d, active_tab,
-            _n(wacc, 9.0) / 100, _n(g1, 12.0) / 100,
-            _n(g2, 6.0) / 100, _n(gterm, 2.5) / 100,
-            _n(fcf_margin, 15.0) / 100, _n(pe_sector, 22.0),
-            _n(ev_ebitda_mult, 12.0), _n(ke, 10.0) / 100,
-            _n(ddm_g, 2.5) / 100, _n(graham_g, 8.0),
-            _n(bond_yield, 4.5) / 100, bilanci_modo or "ttm")
+        # Senza questa rete di protezione un errore di calcolo lascia il
+        # pannello con il contenuto del tab precedente e il click sembra non
+        # aver fatto nulla: meglio dire cosa è andato storto.
+        try:
+            return _val_build_content(
+                d, active_tab,
+                _n(wacc, 9.0) / 100, _n(g1, 12.0) / 100,
+                _n(g2, 6.0) / 100, _n(gterm, 2.5) / 100,
+                _n(fcf_margin, 15.0) / 100, _n(pe_sector, 22.0),
+                _n(ev_ebitda_mult, 12.0), _n(ke, 10.0) / 100,
+                _n(ddm_g, 2.5) / 100, _n(graham_g, 8.0),
+                _n(bond_yield, 4.5) / 100, bilanci_modo or "ttm")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return html.Div([
+                html.Div("Questo tab non si è potuto costruire.",
+                         style={"font-weight": "700", "margin-bottom": "6px"}),
+                html.Div(f"{type(e).__name__}: {e}",
+                         style={"font-family": "monospace", "font-size": "11px"}),
+                html.Div("Gli altri tab restano disponibili; ricarica il titolo "
+                         "con ▶ se il problema resta.",
+                         style={"margin-top": "8px", "color": "#888"}),
+            ], style={"padding": "30px", "color": "#8a1f11", "font-size": "13px",
+                      "background": "#fdf2f0", "border": "1px solid #f0c8c0",
+                      "border-radius": "6px", "margin": "20px"})
 
 
     def _val_fmt_num(v, decimals=2, suffix=""):
@@ -894,8 +1916,11 @@ def register_callbacks(app):
         # EV/ARR (= EV/Revenue per proxy)
         ev_arr = ev_rev
 
-        # FCF margin
-        fcf_margin_act = (fcf_yf / revenue) if revenue > 0 else None
+        # FCF margin: il rapporto già calcolato sul rendiconto (vedi
+        # `run_valuation`), non il TTM di yfinance — su MSFT erano 5% contro 20%.
+        fcf_margin_act = d.get("fcf_margin_actual")
+        if not fcf_margin_act:
+            fcf_margin_act = (fcf_yf / revenue) if revenue > 0 else None
 
         # R&D as % of revenue
         rd_pct = (rd_expense / revenue) if revenue > 0 else None
@@ -1000,7 +2025,8 @@ def register_callbacks(app):
              _badge((fcf_margin_act or 0)*100, 15, 0, "{:.1f}%")
              if fcf_margin_act is not None else html.Span("N/D", style={"color":"#888"}),
              "Il free cash flow margin è la metrica più importante per valutare "
-             "la sostenibilità della crescita. >15% = eccellente; >0% = autofinanziante."),
+             "la sostenibilità della crescita. >15% = eccellente; >0% = autofinanziante. "
+             f"Fonte: {d.get('fcf_margin_fonte', 'n/d')}."),
 
             ("Rule of 40",
              _badge(rule40_val, 40, 20, "{:.1f}"),
@@ -1136,35 +2162,6 @@ def register_callbacks(app):
         ], style={"padding": "14px 16px 30px"})
 
 
-    def _val_dcf(revenue, fcf_margin, wacc, g1, g2, gterm, shares):
-        """DCF a 2 fasi: anni 1-ANNI_FASE1 a g1, poi fino ad ANNI_DCF a g2,
-        infine il tasso finale in perpetuità (Gordon)."""
-        if revenue <= 0 or shares <= 0:
-            return None, [], []
-        fcf0   = revenue * fcf_margin
-        pv_sum = 0.0
-        fcf_rows = []
-        fcf_t = fcf0
-        for yr in range(1, ANNI_FASE1 + 1):
-            fcf_t *= (1 + g1)
-            pv = fcf_t / (1 + wacc) ** yr
-            pv_sum += pv
-            fcf_rows.append((yr, f"Anni 1-{ANNI_FASE1} (g={g1*100:.1f}%)", fcf_t, pv))
-        for yr in range(ANNI_FASE1 + 1, ANNI_DCF + 1):
-            fcf_t *= (1 + g2)
-            pv = fcf_t / (1 + wacc) ** yr
-            pv_sum += pv
-            fcf_rows.append((yr, f"Anni {ANNI_FASE1+1}-{ANNI_DCF} (g={g2*100:.1f}%)",
-                             fcf_t, pv))
-        # Tasso finale: Gordon sull'ultimo flusso esplicito
-        if wacc <= gterm:
-            tv = 0
-        else:
-            tv = fcf_t * (1 + gterm) / (wacc - gterm)
-        pv_tv = tv / (1 + wacc) ** ANNI_DCF
-        pv_sum += pv_tv
-        fair_price = pv_sum / shares
-        return fair_price, fcf_rows, pv_tv
 
 
     def _val_ddm(dividend, ke, g):
@@ -1208,7 +2205,13 @@ def register_callbacks(app):
         fcf_m = fcf_margin
 
         # ── calcola tutti i modelli ───────────────────────────────────────────
-        dcf_price, fcf_rows, pv_tv = _val_dcf(revenue, fcf_m, wacc, g1, g2, gterm, shares)
+        dcf_price, fcf_rows, pv_tv, gordon_ok, dcf_ev = _val_dcf(
+            revenue, fcf_m, wacc, g1, g2, gterm, shares, net_debt)
+        # Sopra il WACC il DCF non è calcolabile: fuori dal confronto fra
+        # modelli, altrimenti trascinerebbe giù la media come se fosse un
+        # giudizio sul titolo.
+        if not gordon_ok:
+            dcf_price = None
         ddm_price  = _val_ddm(dividend, ke, ddm_g)
         g_est_pct  = graham_g_pct                          # slider crescita EPS
         graham_price = _val_graham(eps_ttm, g_est_pct, bond_yield)
@@ -1233,7 +2236,11 @@ def register_callbacks(app):
                 f"FCF₀ {_val_fmt_num(revenue * fcf_m)} (revenue × {fcf_m*100:.1f}%) · "
                 f"WACC {wacc*100:.1f}% · g anni 1-{ANNI_FASE1} {g1*100:.1f}% · "
                 f"g anni {ANNI_FASE1+1}-{ANNI_DCF} {g2*100:.1f}% · "
-                f"finale {gterm*100:.2f}%"),
+                f"finale {gterm*100:.2f}% · − debito netto "
+                f"{_val_fmt_num(net_debt)} ÷ {_val_fmt_num(shares, 0)} azioni"
+                + ("" if gordon_ok else
+                   f" — non calcolabile: il tasso finale è ≥ WACC "
+                   f"{wacc*100:.1f}%, la perpetuità di Gordon non converge")),
             "DDM Gordon": (
                 f"dividendo {dividend:.2f} {currency} · Ke {ke*100:.1f}% · "
                 f"crescita {ddm_g*100:.2f}%"),
@@ -1280,12 +2287,13 @@ def register_callbacks(app):
                 ("EPS Forward",        f"{eps_fwd:.2f} {currency}"),
                 ("Revenue (TTM)",      _val_fmt_num(revenue, suffix=f" {currency}")),
                 ("EBITDA",             _val_fmt_num(ebitda, suffix=f" {currency}")),
-                ("FCF (yfinance TTM)", _val_fmt_num(d.get("fcf_yf"), suffix=f" {currency}")),
+                ("FCF (yfinance TTM, inaffidabile)",
+                 _val_fmt_num(d.get("fcf_yf"), suffix=f" {currency}")),
                 ("FCF (rendiconto)",   _val_fmt_num(fcf_bilancio, suffix=f" {currency}")
                                        if fcf_bilancio else "N/D"),
-                ("Margine FCF di bilancio",
-                 f"{fcf_bilancio/revenue*100:.1f}%" if (fcf_bilancio and revenue > 0)
-                 else f"{fcf_margin_actual*100:.1f}%"),
+                ("Margine FCF reale",
+                 f"{fcf_margin_actual*100:.1f}% ({d.get('fcf_margin_fonte', 'n/d')})"
+                 if fcf_margin_actual else "N/D"),
                 ("Margine FCF usato (slider)", f"{fcf_m*100:.1f}%"),
                 ("Debito netto",       _val_fmt_num(net_debt, suffix=f" {currency}")),
                 ("Dividendo/azione",   f"{dividend:.2f} {currency}" if dividend else "N/D"),
@@ -1304,6 +2312,185 @@ def register_callbacks(app):
                     ]) for k, v in fund_rows
                 ])
             ], style=tbl_style)
+
+            # ── Crescita del flusso di cassa, stimata dal reddito netto ───────
+            # Sta nel Riepilogo perché è il numero da confrontare con lo slider
+            # della fase 1: nel DCF il margine resta fermo, quindi far crescere
+            # i ricavi di g1 vuol dire far crescere il flusso di g1. Qui si
+            # vede a che ritmo è cresciuto davvero.
+            cr = d.get("crescita") or None
+
+            def _p(x, dec=1):
+                return "—" if x is None else f"{x:+.{dec}f}%"
+
+            def _blocco_crescita():
+                if not cr:
+                    return html.Div(
+                        "Rendiconto finanziario non disponibile: la crescita "
+                        "dei flussi non si può misurare, lo slider della fase 1 "
+                        "resta un'ipotesi tua.",
+                        style={"font-size": "11px", "color": "#888",
+                               "padding": "10px 12px", "background": "#fafafa",
+                               "border": "1px solid #e5e5e5",
+                               "border-radius": "6px", "margin": "14px 0 0"})
+
+                st = cr.get("stima")
+                col = ("#2ca02c" if (st or 0) > 0 else
+                       "#d62728" if st is not None else "#888")
+                righe_tbl = [html.Tr([
+                    html.Td(a["data"], style={**td_style, "color": "#555"}),
+                    html.Td(_val_fmt_num(a["utile"], 1),
+                            style={**td_style, "text-align": "right",
+                                   "font-variant-numeric": "tabular-nums",
+                                   **({"color": "#b0413e"} if a["utile"] < 0 else {})}),
+                    html.Td(_p(a["var_utile"]),
+                            style={**td_style, "text-align": "right",
+                                   "font-variant-numeric": "tabular-nums",
+                                   "color": ("#888" if a["var_utile"] is None else
+                                             "#2e7d32" if a["var_utile"] >= 0
+                                             else "#b0413e")}),
+                    html.Td(_val_fmt_num(a["fcf"], 1),
+                            style={**td_style, "text-align": "right",
+                                   "font-variant-numeric": "tabular-nums",
+                                   **({"color": "#b0413e"} if a["fcf"] < 0 else {})}),
+                    html.Td(_p(a["var_fcf"]),
+                            style={**td_style, "text-align": "right",
+                                   "font-variant-numeric": "tabular-nums",
+                                   "color": ("#888" if a["var_fcf"] is None else
+                                             "#2e7d32" if a["var_fcf"] >= 0
+                                             else "#b0413e")}),
+                    html.Td("—" if a["conversione"] is None
+                            else f"{a['conversione']:.0f}%",
+                            style={**td_style, "text-align": "right",
+                                   "font-variant-numeric": "tabular-nums",
+                                   "color": "#555"}),
+                ]) for a in cr["anni"]]
+
+                # Le due medie rispondono a domande diverse e la differenza non
+                # è un dettaglio: quella aritmetica è sempre la più alta, ed è
+                # quella che fa sembrare più ricca un'azienda ballerina.
+                sintesi = [
+                    ("Media aritmetica delle variazioni",
+                     _p(cr["media_utile"]), _p(cr["media_fcf"]),
+                     "quanto è cambiato in un anno tipico"),
+                    ("Mediana delle variazioni",
+                     _p(cr["mediana_utile"]), _p(cr["mediana_fcf"]),
+                     "l'anno di mezzo, insensibile all'anno anomalo"),
+                    (f"Crescita composta ({cr['n_anni']} "
+                     f"{'anno' if cr['n_anni'] == 1 else 'anni'})",
+                     _p(cr["cagr_utile"]), _p(cr["cagr_fcf"]),
+                     "dove è partita e dove è arrivata: è questa che si usa "
+                     "per far crescere i flussi"),
+                ]
+
+                blocchi = [
+                    html.Div([
+                        html.Span("Stima della crescita annua del flusso di cassa: ",
+                                  style={"font-size": "12px", "color": "#555"}),
+                        html.Span(_p(st), style={"font-size": "20px",
+                                                 "font-weight": "bold", "color": col}),
+                    ], style={"margin": "0 0 4px"}),
+                    html.Div(cr["come"], style={"font-size": "11px", "color": "#666",
+                                                "line-height": "1.6",
+                                                "margin": "0 0 10px"}),
+                    html.Table([
+                        html.Thead(html.Tr([
+                            html.Th(c, style=th_style) for c in
+                            ("Esercizio", "Reddito netto", "Var.",
+                             "Free cash flow", "Var.", "FCF/utile")])),
+                        html.Tbody(righe_tbl),
+                    ], style=tbl_style),
+                    html.Table([
+                        html.Thead(html.Tr([
+                            html.Th(c, style=th_style) for c in
+                            ("", "Reddito netto", "Flusso di cassa", "")])),
+                        html.Tbody([
+                            html.Tr([
+                                html.Td(et, style={**td_style, "color": "#555"}),
+                                html.Td(u_, style={**td_style, "font-weight": "bold",
+                                                   "text-align": "right",
+                                                   "font-variant-numeric": "tabular-nums"}),
+                                html.Td(f_, style={**td_style, "font-weight": "bold",
+                                                   "text-align": "right",
+                                                   "font-variant-numeric": "tabular-nums"}),
+                                html.Td(nota, style={**td_style, "color": "#888",
+                                                     "font-size": "10px",
+                                                     "line-height": "1.5"}),
+                            ]) for et, u_, f_, nota in sintesi
+                        ]),
+                    ], style={**tbl_style, "margin-top": "10px"}),
+                ]
+
+                # L'identità che tiene insieme i due CAGR: non è
+                # un'approssimazione, è come sono definiti.
+                if cr["cagr_conv"] is not None and not cr["conv_rotta"]:
+                    blocchi.append(html.Div([
+                        html.Div("Perché i due numeri non coincidono",
+                                 style={"font-size": "11px", "font-weight": "bold",
+                                        "color": "#1a3a5c", "margin-bottom": "4px"}),
+                        html.Div([
+                            html.Div(
+                                "Il flusso di cassa è l'utile moltiplicato per "
+                                "la quota di utile che diventa cassa, quindi le "
+                                "due crescite si moltiplicano — non è "
+                                "un'approssimazione, è come sono definite:",
+                                style={"margin-bottom": "5px"}),
+                            html.Div(
+                                f"{1 + cr['cagr_utile']/100:.3f} × "
+                                f"{1 + cr['cagr_conv']/100:.3f} = "
+                                f"{1 + cr['cagr_fcf']/100:.3f}",
+                                style={"font-family": "monospace",
+                                       "font-size": "12px", "color": "#1a3a5c",
+                                       "font-weight": "bold",
+                                       "margin": "0 0 5px 6px"}),
+                            html.Div(
+                                f"utile {_p(cr['cagr_utile'])} l'anno, "
+                                f"conversione {_p(cr['cagr_conv'])} l'anno → "
+                                f"flusso di cassa {_p(cr['cagr_fcf'])} l'anno."
+                                + (f" La quota che diventa cassa è "
+                                   f"{'scesa' if cr['anni'][-1]['conversione'] < cr['anni'][0]['conversione'] else 'salita'}"
+                                   f" da {cr['anni'][0]['conversione']:.0f}% a "
+                                   f"{cr['anni'][-1]['conversione']:.0f}% "
+                                   f"dell'utile."
+                                   if (cr["anni"][0]["conversione"] is not None
+                                       and cr["anni"][-1]["conversione"] is not None)
+                                   else "")),
+                        ], style={"font-size": "11px", "color": "#555",
+                                  "line-height": "1.65"}),
+                    ], style={"background": "#f7f9fc", "border": "1px solid #dbe4f0",
+                              "border-radius": "6px", "padding": "9px 11px",
+                              "margin-top": "10px"}))
+
+                if cr["avviso"]:
+                    blocchi.append(html.Div(
+                        "⚠ " + cr["avviso"],
+                        style={"font-size": "11px", "color": "#8a5a00",
+                               "background": "#fff8e6", "border": "1px solid #f0dca8",
+                               "border-radius": "6px", "padding": "9px 11px",
+                               "line-height": "1.65", "margin-top": "10px"}))
+
+                # Il collegamento allo slider: senza questo il numero resta
+                # una curiosità invece che una decisione.
+                if st is not None:
+                    scarto = st - g1 * 100
+                    blocchi.append(html.Div([
+                        html.Span("Nel DCF il margine FCF resta fermo, quindi la "
+                                  "crescita dei ricavi è anche quella dei flussi. "
+                                  "Slider «Crescita fase 1»: ",
+                                  style={"color": "#555"}),
+                        html.Span(f"{g1*100:.1f}%",
+                                  style={"font-weight": "bold", "color": "#1a3a5c"}),
+                        html.Span(f" — {abs(scarto):.1f} punti "
+                                  f"{'sotto' if scarto > 0 else 'sopra'} questa stima."
+                                  if abs(scarto) >= 0.5 else " — in linea con questa stima.",
+                                  style={"color": "#555"}),
+                    ], style={"font-size": "11px", "line-height": "1.65",
+                              "margin-top": "10px", "padding": "9px 11px",
+                              "background": "#fafafa", "border": "1px solid #e5e5e5",
+                              "border-radius": "6px"}))
+                return html.Div(blocchi)
+
+            blocco_crescita = _blocco_crescita()
 
             # Summary valuation table
             sum_rows = []
@@ -1365,6 +2552,10 @@ def register_callbacks(app):
                                 style={"font-size": "13px", "margin": "0 0 10px",
                                        "color": "#1a3a5c"}),
                         fund_table,
+                        html.H4("Crescita dei flussi, misurata dal reddito netto",
+                                style={"font-size": "13px", "margin": "18px 0 8px",
+                                       "color": "#1a3a5c"}),
+                        blocco_crescita,
                     ], style={"flex": "1", "min-width": "260px",
                                "padding-right": "20px"}),
 
@@ -1437,8 +2628,17 @@ def register_callbacks(app):
             base    = ("dati annuali pubblicati dall'azienda" if annuale else
                        "somma scorrevole degli ultimi 4 trimestri")
 
+            # Unità scelta una volta sola sul valore più grande dei quattro
+            # aggregati: i colossi in miliardi, tutti gli altri in milioni.
+            # Con il /1e9 fisso una società da 300 mln di ricavi disegnava una
+            # riga schiacciata sullo zero.
+            _tutti = [abs(x) for k in ("fatturato", "lordo", "operativo", "utile")
+                      for x in s[k] if x is not None]
+            _div, _um = ((1e9, "mld") if max(_tutti, default=0) >= 1e10
+                         else (1e6, "mln"))
+
             def _mld(v):
-                return None if v is None else v / 1e9
+                return None if v is None else v / _div
 
             # Variazione rispetto a un anno prima: sugli esercizi è il periodo
             # precedente, sui TTM sono 4 trimestri indietro (stesso trimestre
@@ -1456,6 +2656,12 @@ def register_callbacks(app):
                                if (v is not None and prec is not None and prec > 0)
                                else None)
                 return out
+
+            def _var_testo(y):
+                """L'ultima variazione su un anno prima, per la riga di sintesi."""
+                v = _var_anno(y)
+                ult = next((x for x in reversed(v) if x is not None), None)
+                return "—" if ult is None else f"{ult:+.1f}%"
 
             def _grafico(y, titolo, colore, unita, percentuale=False,
                          y2=None, y2_titolo="", y2_unita=""):
@@ -1499,19 +2705,53 @@ def register_callbacks(app):
                 return dcc.Graph(figure=fig, style={"height": "290px"},
                                  config={"displayModeBar": False})
 
+            def _grafico_margini():
+                """I tre margini sullo stesso asse: è il confronto fra loro a
+                dire dove se ne va il fatturato. La distanza fra lordo e
+                operativo è la struttura (ricerca, vendite, amministrazione),
+                quella fra operativo e netto sono interessi e imposte."""
+                fig = go.Figure()
+                for chiave, nome, colore in (
+                        ("margine_lordo", "Margine lordo",     "#9467bd"),
+                        ("margine_op",    "Margine operativo", "#ff7f0e"),
+                        ("margine",       "Margine netto",     "#2ca02c")):
+                    fig.add_trace(go.Scatter(
+                        x=s["date"], y=s[chiave], mode="lines+markers",
+                        line=dict(color=colore, width=2), marker=dict(size=4),
+                        name=nome, hovertemplate="%{y:.1f}%<extra></extra>"))
+                fig.add_hline(y=0, line_color="#999", line_width=1)
+                fig.update_layout(
+                    title=dict(text="I tre margini a confronto", font=dict(size=11)),
+                    yaxis=dict(title="% dei ricavi", ticksuffix="%"),
+                    margin=dict(t=40, b=30, l=55, r=18),
+                    paper_bgcolor="white", plot_bgcolor="#f8f8f8",
+                    hovermode="x unified",
+                    legend=dict(orientation="h", y=1.02, x=0, font=dict(size=9)))
+                return dcc.Graph(figure=fig, style={"height": "290px"},
+                                 config={"displayModeBar": False})
+
+            # Ordine della cascata: ogni riga è la precedente meno uno strato di
+            # costo, e ognuna porta accanto la propria variazione su un anno
+            # prima — è lì che si vede se un margine si allarga perché cresce il
+            # numeratore o perché si è fermato il denominatore.
             grafici = [
                 _grafico([_mld(v) for v in s["fatturato"]],
-                         "Fatturato", "#1f77b4", f"mld {val}",
+                         "Fatturato", "#1f77b4", f"{_um} {val}",
                          y2=_var_anno(s["fatturato"]),
                          y2_titolo="Variazione su un anno prima", y2_unita="var. %"),
+                _grafico([_mld(v) for v in s["lordo"]],
+                         "Utile lordo (ricavi − costo del venduto)", "#9467bd",
+                         f"{_um} {val}", y2=_var_anno(s["lordo"]),
+                         y2_titolo="Variazione su un anno prima", y2_unita="var. %"),
+                _grafico([_mld(v) for v in s["operativo"]],
+                         "Reddito operativo", "#ff7f0e", f"{_um} {val}",
+                         y2=_var_anno(s["operativo"]),
+                         y2_titolo="Variazione su un anno prima", y2_unita="var. %"),
                 _grafico([_mld(v) for v in s["utile"]],
-                         "Utile netto", "#2ca02c", f"mld {val}",
+                         "Utile netto", "#2ca02c", f"{_um} {val}",
                          y2=_var_anno(s["utile"]),
                          y2_titolo="Variazione su un anno prima", y2_unita="var. %"),
-                _grafico(s["margine"], "Margine netto", "#ff7f0e", "%",
-                         percentuale=True),
-                _grafico([_mld(v) for v in s["lordo"]],
-                         "Utile lordo", "#9467bd", f"mld {val}"),
+                _grafico_margini(),
             ]
 
             # Statistiche e ultimi periodi: le stesse quattro serie dei grafici.
@@ -1527,10 +2767,14 @@ def register_callbacks(app):
                         f"{ultimo:,.{dec}f}" if ultimo is not None else "—"]
 
             serie_tab = [
-                (f"Fatturato (mld {val})", [_mld(v) for v in s["fatturato"]], 2),
-                (f"Utile netto (mld {val})", [_mld(v) for v in s["utile"]], 2),
+                (f"Fatturato ({_um} {val})", [_mld(v) for v in s["fatturato"]], 2),
+                (f"Utile lordo ({_um} {val})", [_mld(v) for v in s["lordo"]], 2),
+                (f"Reddito operativo ({_um} {val})",
+                 [_mld(v) for v in s["operativo"]], 2),
+                (f"Utile netto ({_um} {val})", [_mld(v) for v in s["utile"]], 2),
+                ("Margine lordo (%)", s["margine_lordo"], 2),
+                ("Margine operativo (%)", s["margine_op"], 2),
                 ("Margine netto (%)", s["margine"], 2),
-                (f"Utile lordo (mld {val})", [_mld(v) for v in s["lordo"]], 2),
             ]
             stat_tbl = html.Table([
                 html.Thead(html.Tr([html.Th("", style=th_style)] +
@@ -1557,6 +2801,109 @@ def register_callbacks(app):
                     for i in range(len(s["date"]) - n_ult, len(s["date"]))
                 ]),
             ], style=tbl_style)
+
+            # ── Reddito operativo periodo per periodo ─────────────────────────
+            # Il grafico dice la forma, questa dice i numeri: quanto ha fatto la
+            # gestione caratteristica, di quanto è cambiata rispetto a un anno
+            # prima e quanta parte del fatturato è rimasta a valle dei costi.
+            op_var  = _var_anno(s["operativo"])
+            ric_var = _var_anno(s["fatturato"])
+            n_op    = min(10, len(s["date"]))
+            op_tbl = html.Table([
+                html.Thead(html.Tr([
+                    html.Th(c, style=th_style) for c in
+                    ("Periodo", f"Reddito operativo ({_um} {val})",
+                     "Var. su un anno prima", "Margine operativo",
+                     "Var. fatturato")])),
+                html.Tbody([
+                    html.Tr([
+                        html.Td(s["date"][i], style=td_style),
+                        html.Td("—" if s["operativo"][i] is None
+                                else f"{s['operativo'][i]/_div:,.2f}",
+                                style={**td_style, "text-align": "right",
+                                       "font-weight": "bold",
+                                       "font-variant-numeric": "tabular-nums",
+                                       **({"color": "#b0413e"}
+                                          if (s["operativo"][i] or 0) < 0 else {})}),
+                        html.Td("—" if op_var[i] is None else f"{op_var[i]:+.1f}%",
+                                style={**td_style, "text-align": "right",
+                                       "font-variant-numeric": "tabular-nums",
+                                       "color": ("#888" if op_var[i] is None else
+                                                 "#2e7d32" if op_var[i] >= 0
+                                                 else "#b0413e")}),
+                        html.Td("—" if s["margine_op"][i] is None
+                                else f"{s['margine_op'][i]:.1f}%",
+                                style={**td_style, "text-align": "right",
+                                       "font-variant-numeric": "tabular-nums",
+                                       "color": "#555"}),
+                        html.Td("—" if ric_var[i] is None else f"{ric_var[i]:+.1f}%",
+                                style={**td_style, "text-align": "right",
+                                       "font-variant-numeric": "tabular-nums",
+                                       "color": "#888"}),
+                    ]) for i in range(len(s["date"]) - n_op, len(s["date"]))
+                ]),
+            ], style=tbl_style)
+
+            # Il confronto fra le due ultime colonne è il punto: il reddito
+            # operativo che corre più del fatturato vuol dire margini che si
+            # allargano, il contrario vuol dire costi che scappano.
+            op_nota = html.P(
+                f"Ultimo periodo: reddito operativo {_var_testo(s['operativo'])} "
+                f"su un anno prima, fatturato {_var_testo(s['fatturato'])}. "
+                "Quando il reddito operativo cresce più del fatturato l'azienda "
+                "sta guadagnando margine (i costi crescono meno dei ricavi); "
+                "quando cresce meno lo sta perdendo, anche se i ricavi salgono.",
+                style={"font-size": "11px", "color": "#666", "line-height": "1.6",
+                       "margin": "8px 0 0"})
+
+            # Cosa sono le quattro righe della cascata, in italiano e una volta
+            # sola: senza questo i grafici sono quattro barre che si assomigliano.
+            legenda_ce = html.Div([
+                html.Div("Come si legge la cascata",
+                         style={"font-size": "11px", "font-weight": "bold",
+                                "color": "#1a3a5c", "margin-bottom": "6px"}),
+                html.Table([html.Tbody([
+                    html.Tr([
+                        html.Td(t_, style={**td_style, "font-weight": "bold",
+                                           "white-space": "nowrap",
+                                           "color": c_, "width": "150px"}),
+                        html.Td(x_, style={**td_style, "color": "#555",
+                                           "line-height": "1.6"}),
+                    ]) for t_, c_, x_ in (
+                        ("Fatturato", "#1f77b4",
+                         "quanto ha venduto, prima di qualsiasi costo."),
+                        ("− costo del venduto", "#888",
+                         "quello che è servito a produrre proprio ciò che è "
+                         "stato venduto: materie prime, manodopera diretta, "
+                         "server e banda per un servizio online. Non ci sono "
+                         "dentro stipendi di struttura, ricerca o pubblicità."),
+                        ("= Utile lordo", "#9467bd",
+                         "quanto resta su ogni euro venduto per pagare tutto il "
+                         "resto. È la misura di quanto è scalabile il "
+                         "business: un software ha un margine lordo altissimo "
+                         "perché la copia in più non costa quasi nulla, un "
+                         "supermercato bassissimo perché la merce va ricomprata "
+                         "ogni volta. Da solo non dice se l'azienda guadagna."),
+                        ("− costi operativi", "#888",
+                         "la struttura: ricerca e sviluppo, vendite e "
+                         "marketing, amministrazione, ammortamenti."),
+                        ("= Reddito operativo", "#ff7f0e",
+                         "il risultato del mestiere dell'azienda, prima di "
+                         "interessi e imposte. È il più comparabile fra due "
+                         "società, perché non dipende da quanto debito hanno "
+                         "né da dove pagano le tasse."),
+                        ("− interessi e imposte", "#888",
+                         "il costo del debito e il fisco."),
+                        ("= Utile netto", "#2ca02c",
+                         "quello che resta agli azionisti ed entra nell'EPS. "
+                         "È il più esposto a poste straordinarie: una "
+                         "svalutazione o una plusvalenza una tantum lo muovono "
+                         "senza che il mestiere sia cambiato."),
+                    )
+                ])], style={**tbl_style, "margin": "0"}),
+            ], style={"background": "#f7f9fc", "border": "1px solid #dbe4f0",
+                      "border-radius": "6px", "padding": "10px 12px",
+                      "margin": "10px 0"})
 
             # ── I tre prospetti riclassificati ────────────────────────────────
             # Stato patrimoniale e rendiconto sono altre due richieste ad Alpha
@@ -1699,10 +3046,23 @@ def register_callbacks(app):
                 html.H5("Andamento storico",
                         style={"font-size": "12px", "margin": "10px 0 0",
                                "color": "#1a3a5c"}),
+                html.Div(f"Valori in {_um} {val} · {len(s['date'])} {periodo} · "
+                         f"la linea rossa a destra è la variazione rispetto allo "
+                         f"stesso periodo dell'anno prima",
+                         style={"font-size": "11px", "color": "#666",
+                                "margin": "2px 0 0"}),
+                legenda_ce,
                 html.Div([html.Div(g, style={"flex": "1 1 46%", "min-width": "320px"})
                           for g in grafici],
                          style={"display": "flex", "flex-wrap": "wrap", "gap": "10px",
                                 "margin": "10px 0"}),
+
+                html.Hr(),
+                html.H5(f"Reddito operativo — ultimi {n_op} {periodo}",
+                        style={"font-size": "12px", "margin": "10px 0 8px",
+                               "color": "#1a3a5c"}),
+                op_tbl,
+                op_nota,
 
                 html.Hr(),
                 html.Div([
@@ -1719,8 +3079,254 @@ def register_callbacks(app):
                 ], style={"display": "flex", "flex-wrap": "wrap", "gap": "16px"}),
             ], style={"padding": "14px 16px 30px"})
 
+        # ── TAB PARAMETRI ─────────────────────────────────────────────────────
+        # Da dove viene ogni slider. Serve a poter dire di no al consiglio
+        # sapendo cosa si sta rifiutando: un WACC è un'opinione finché non si
+        # vede il beta, l'aliquota e i pesi che l'hanno prodotto.
+        elif active_tab == "val-tab-parametri":
+            sugg = d.get("sugg") or {}
+            if not sugg:
+                return html.Div(
+                    "I valori consigliati si calcolano quando carichi il titolo: "
+                    "premi ▶ Carica & Valuta.",
+                    style={"padding": "40px", "color": "#888",
+                           "text-align": "center", "font-size": "13px"})
+            det = sugg.get("_det") or {}
+
+            correnti = {
+                "val-wacc": wacc * 100, "val-g1": g1 * 100, "val-g2": g2 * 100,
+                "val-gterm": gterm * 100, "val-fcf-margin": fcf_m * 100,
+                "val-ke": ke * 100, "val-ddm-g": ddm_g * 100,
+                "val-graham-g": graham_g_pct, "val-bond-yield": bond_yield * 100,
+                "val-pe-sector": pe_sector, "val-ev-ebitda": ev_mult,
+            }
+
+            def _fmt_par(val, unita, passo):
+                if val is None:
+                    return "N/D"
+                dec = 2 if passo < 0.5 else (1 if passo < 1 else 0)
+                return f"{val:.{dec}f}{unita}"
+
+            righe_par = []
+            gruppo_prec = None
+            for slider, etichetta, unita, gruppo in _SLIDER_ETICHETTE:
+                voce   = sugg.get(slider) or {}
+                cons   = voce.get("v")
+                attuale = correnti.get(slider)
+                passo  = _SLIDER_LIMITI[slider][0]
+                diverso = (cons is not None and attuale is not None
+                           and abs(cons - attuale) > passo / 2)
+                if gruppo != gruppo_prec:
+                    righe_par.append(html.Tr([
+                        html.Td(gruppo, colSpan=4,
+                                style={**td_style, "background": "#eaf4fb",
+                                       "font-weight": "bold", "color": "#1a5276",
+                                       "font-size": "11px"}),
+                    ]))
+                    gruppo_prec = gruppo
+                righe_par.append(html.Tr([
+                    html.Td(etichetta, style={**td_style, "width": "22%"}),
+                    html.Td(_fmt_par(cons, unita, passo),
+                            style={**td_style, "font-weight": "bold",
+                                   "text-align": "right", "width": "11%",
+                                   "color": "#1a3a5c"}),
+                    html.Td(_fmt_par(attuale, unita, passo),
+                            style={**td_style, "text-align": "right", "width": "11%",
+                                   "font-weight": "bold" if diverso else "normal",
+                                   "color": "#e67e22" if diverso else "#555"}),
+                    html.Td([
+                        html.Div(voce.get("come", "") or "—",
+                                 style={"line-height": "1.5"}),
+                    ] + ([html.Div("⚠ " + voce["avviso"],
+                                   style={"color": "#8a6d3b", "margin-top": "3px",
+                                          "line-height": "1.5"})]
+                         if voce.get("avviso") else []),
+                        style={**td_style, "font-size": "10px", "color": "#666"}),
+                ]))
+
+            def _riga_det(k, v_):
+                return html.Tr([
+                    html.Td(k, style={**td_style, "color": "#555", "width": "45%"}),
+                    html.Td(v_, style={**td_style, "font-weight": "bold"}),
+                ])
+
+            def _blocco_implicito():
+                """Il DCF al contrario: cosa deve credere chi compra oggi.
+
+                È il confronto che dice se un parametro è una scelta o una
+                distrazione — il consiglio da solo non basta, perché il DCF
+                risponde sempre qualcosa anche a un'ipotesi assurda.
+                """
+                w_imp, g_imp = _dcf_implicito(price, revenue, fcf_m, wacc, g1, g2,
+                                              gterm, shares, net_debt)
+                if w_imp is None and g_imp is None:
+                    return html.Div()
+                w_cons = (sugg.get("val-wacc") or {}).get("v")
+                voci = []
+                if w_imp is not None:
+                    conf = ""
+                    if w_cons:
+                        diff = w_imp - w_cons
+                        conf = (f" — {abs(diff):.1f} punti "
+                                f"{'sopra' if diff > 0 else 'sotto'} il WACC "
+                                f"consigliato ({w_cons:.1f}%)")
+                    voci.append(html.Li([
+                        html.B(f"Tasso di sconto implicito: {w_imp:.1f}%"), conf,
+                        html.Div("Il rendimento annuo che il prezzo di oggi "
+                                 "promette se i flussi vanno come dicono gli "
+                                 "altri slider. Più alto del WACC che il titolo "
+                                 "merita = il mercato chiede un premio, cioè "
+                                 "prezza un rischio che le tue ipotesi non "
+                                 "contengono.",
+                                 style={"color": "#777", "margin": "2px 0 6px"}),
+                    ]))
+                if g_imp is not None:
+                    voci.append(html.Li([
+                        html.B(f"Crescita implicita dei flussi: {g_imp:+.1f}% "
+                               f"l'anno per {ANNI_DCF} anni"),
+                        html.Div("La crescita che giustifica il prezzo tenendo "
+                                 "fermo il tuo tasso di sconto. Confrontala con "
+                                 "la crescita storica dei ricavi qui sotto: se "
+                                 "il mercato ne chiede il doppio, il titolo è "
+                                 "caro anche quando il DCF dice di no.",
+                                 style={"color": "#777", "margin": "2px 0 0"}),
+                    ]))
+                return html.Div([
+                    html.H5(f"Cosa sconta il prezzo di mercato "
+                            f"({price:.2f} {currency})",
+                            style={"font-size": "12px", "margin": "0 0 6px",
+                                   "color": "#1a3a5c"}),
+                    html.Ul(voci, style={"margin": "0", "padding-left": "18px",
+                                          "font-size": "11px", "line-height": "1.5"}),
+                ], style={"background": "#f0f4fa", "border": "1px solid #d6e0ee",
+                          "border-radius": "6px", "padding": "10px 12px",
+                          "margin-bottom": "14px", "max-width": "900px"})
+
+            det_rows = [
+                _riga_det("Beta (yfinance)", f"{det.get('beta', 1.0):.2f}"),
+                _riga_det("Premio per il rischio azionario", f"{_ERP:.1f}% (mercato maturo)"),
+                _riga_det("Costo del capitale proprio (Ke)",
+                          f"{det.get('ke', 0):.2f}%"),
+                _riga_det("Costo del debito (Kd)",
+                          f"{det.get('kd', 0):.2f}% — {det.get('kd_fonte', '')}"),
+                _riga_det("Aliquota fiscale effettiva",
+                          f"{det.get('aliquota', 0)*100:.1f}% — {det.get('aliquota_fonte', '')}"),
+                _riga_det("Pesi a valori di mercato",
+                          f"capitale proprio {det.get('we', 1)*100:.0f}% "
+                          f"({_val_fmt_num(det.get('mc'))}) · debito "
+                          f"{det.get('wd', 0)*100:.0f}% ({_val_fmt_num(det.get('debito'))})"),
+                _riga_det("WACC risultante", f"{det.get('wacc', 0):.2f}%"),
+            ]
+
+            return html.Div([
+                html.H4(f"Valori consigliati — {name}",
+                        style={"font-size": "14px", "margin": "0 0 6px",
+                               "color": "#1a3a5c", "border-bottom": "2px solid #1a3a5c",
+                               "padding-bottom": "6px"}),
+                html.P([
+                    "Ogni slider parte da un numero preso dai conti di questo titolo, "
+                    "non da un default uguale per tutti. Sono ", html.B("punti di "
+                    "partenza documentati"), ", non prezzi obiettivi: la colonna "
+                    "«come si ottiene» dice con quali dati è stato calcolato, così "
+                    "un consiglio si può cambiare sapendo cosa si sta cambiando. "
+                    "Il pulsante ", html.B("🎯 Applica valori consigliati"),
+                    " nella barra laterale li riscrive tutti."],
+                    style={"font-size": "11px", "color": "#666",
+                           "line-height": "1.6", "max-width": "900px"}),
+                html.Div(f"Dati di mercato: {det.get('tassi', 'n.d.')}",
+                         style={"font-size": "10px", "color": "#888",
+                                "margin-bottom": "10px"}),
+
+                _blocco_implicito(),
+
+                # Il DCF unlevered su una banca non vuol dire niente: il debito
+                # è la sua materia prima, non una fonte di finanziamento, e
+                # "debito netto" e "FCF" perdono significato. Meglio dirlo qui
+                # che lasciar leggere come giudizio un numero senza senso.
+            ] + ([html.Div([
+                    html.B("Banche e assicurazioni: "),
+                    "per questo settore il DCF sui flussi unlevered non è "
+                    "applicabile — la raccolta è la materia prima dell'attività, "
+                    "non un modo di finanziarla, e sia il debito netto sia il "
+                    "flusso di cassa libero perdono significato. Restano validi "
+                    "il DDM (il modello nato per le banche), il P/E e il "
+                    "confronto con il patrimonio netto.",
+                 ], style={"font-size": "11px", "color": "#8a6d3b",
+                           "background": "#fdf7e6", "border": "1px solid #e6d9a8",
+                           "border-radius": "6px", "padding": "10px 12px",
+                           "margin-bottom": "14px", "max-width": "900px",
+                           "line-height": "1.6"})]
+                 if d.get("sector") == "Financial Services" else []) + [
+
+                html.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Parametro", style=th_style),
+                        html.Th("Consigliato", style={**th_style, "text-align": "right"}),
+                        html.Th("Nello slider", style={**th_style, "text-align": "right"}),
+                        html.Th("Come si ottiene", style=th_style),
+                    ])),
+                    html.Tbody(righe_par),
+                ], style={**tbl_style, "margin-bottom": "16px"}),
+
+                html.H5("Come nasce il costo del capitale",
+                        style={"font-size": "12px", "margin": "0 0 8px",
+                               "color": "#1a3a5c"}),
+                html.Table([html.Tbody(det_rows)],
+                           style={**tbl_style, "max-width": "620px"}),
+                html.Div([
+                    html.B("WACC = "),
+                    "peso del capitale proprio × Ke + peso del debito × Kd × (1 − aliquota). ",
+                    "Il Ke viene dal CAPM (risk-free + beta × premio per il rischio); il Kd "
+                    "è quanto il titolo paga davvero sul suo debito, non un tasso teorico, "
+                    "ed è deducibile, per questo entra al netto d'imposta.",
+                ], style={"font-size": "10px", "color": "#888", "line-height": "1.6",
+                          "margin-top": "8px", "max-width": "620px"}),
+
+                html.Div([
+                    html.B("Perché due tassi diversi. "),
+                    "Il DCF sconta al WACC un flusso che spetta a tutti i finanziatori "
+                    "e poi toglie il debito netto; il DDM sconta al Ke un dividendo che "
+                    "è già quello che resta all'azionista, e quindi non toglie niente. "
+                    "Usare lo stesso tasso per entrambi è l'errore che fa sembrare i due "
+                    "modelli d'accordo quando non lo sono.",
+                ], style={"font-size": "10px", "color": "#666", "line-height": "1.6",
+                          "margin-top": "12px", "max-width": "900px",
+                          "background": "#f8f9fa", "padding": "10px 12px",
+                          "border-radius": "4px", "border-left": "3px solid #1a3a5c"}),
+            ], style={"padding": "14px 16px 30px"})
+
         # ── TAB DCF ───────────────────────────────────────────────────────────
         elif active_tab == "val-tab-dcf":
+            if not gordon_ok:
+                return html.Div([
+                    html.Div(f"Tasso finale {gterm*100:.2f}% ≥ WACC {wacc*100:.1f}%: "
+                             "il DCF non è calcolabile.",
+                             style={"font-weight": "700", "font-size": "14px",
+                                    "margin-bottom": "10px"}),
+                    html.Div([
+                        "Il tasso finale è la crescita che il flusso di cassa "
+                        "mantiene ", html.B("per sempre"), ", e la formula di "
+                        "Gordon somma una serie infinita: converge solo se quella "
+                        "crescita resta sotto il costo del capitale. Da lì in su "
+                        "ogni flusso futuro cresce più in fretta di quanto lo si "
+                        "sconti, la somma diverge e il valore terminale non "
+                        "esiste — non è zero, è indefinito."],
+                        style={"line-height": "1.6", "margin-bottom": "10px"}),
+                    html.Div([
+                        "Un'azienda non può crescere più dell'economia in eterno: "
+                        "in pratica questo tasso sta fra ", html.B("2% e 3%"),
+                        " (inflazione più crescita reale di lungo periodo). "
+                        "Per una crescita alta ma temporanea usa gli slider "
+                        f"delle fasi 1 e 2, che valgono {ANNI_DCF} anni e non "
+                        "l'eternità."],
+                        style={"line-height": "1.6", "margin-bottom": "10px"}),
+                    html.Div(f"Abbassa il tasso finale sotto {wacc*100:.1f}% "
+                             "per tornare a vedere la valutazione.",
+                             style={"color": "#555"}),
+                ], style={"padding": "26px 30px", "color": "#8a6d3b",
+                          "background": "#fdf7e6", "border": "1px solid #e6d9a8",
+                          "border-radius": "6px", "margin": "20px",
+                          "font-size": "13px", "max-width": "760px"})
             if dcf_price is None:
                 return html.Div("Dati insufficienti per il DCF (revenue o shares = 0).",
                                 style={"padding": "30px", "color": "#888",
@@ -1787,6 +3393,75 @@ def register_callbacks(app):
                            "padding": "10px", "border-radius": "6px",
                            "border-left": f"4px solid {vcol}"}),
 
+                # Dal valore d'impresa al valore per azione: il passaggio che
+                # decide il risultato su ogni titolo indebitato, quindi si vede.
+                html.Div([
+                    html.H5("Dal valore d'impresa al prezzo per azione",
+                            style={"font-size": "12px", "margin": "0 0 8px"}),
+                    html.Table([
+                        html.Tbody([
+                            html.Tr([
+                                html.Td("Valore d'impresa (somma dei valori attuali)",
+                                        style={**td_style, "color": "#555"}),
+                                html.Td(_val_fmt_num(dcf_ev, suffix=f" {currency}"),
+                                        style={**td_style, "font-weight": "bold",
+                                               "text-align": "right"}),
+                            ]),
+                            html.Tr([
+                                html.Td(("− Debito netto" if net_debt >= 0
+                                         else "+ Cassa netta (debito netto negativo)"),
+                                        style={**td_style, "color": "#555"}),
+                                html.Td(_val_fmt_num(-net_debt, suffix=f" {currency}"),
+                                        style={**td_style, "font-weight": "bold",
+                                               "text-align": "right",
+                                               "color": "#d62728" if net_debt > 0
+                                                        else "#2ca02c"}),
+                            ]),
+                            html.Tr([
+                                html.Td("= Valore per gli azionisti",
+                                        style={**td_style, "color": "#555"}),
+                                html.Td(_val_fmt_num((dcf_ev or 0) - net_debt,
+                                                     suffix=f" {currency}"),
+                                        style={**td_style, "font-weight": "bold",
+                                               "text-align": "right"}),
+                            ]),
+                            html.Tr([
+                                html.Td("÷ Azioni in circolazione",
+                                        style={**td_style, "color": "#555"}),
+                                html.Td(_val_fmt_num(shares, 0),
+                                        style={**td_style, "text-align": "right"}),
+                            ]),
+                            html.Tr([
+                                html.Td("= Fair value per azione",
+                                        style={**td_style, "color": "#555"}),
+                                html.Td(f"{dcf_price:.2f} {currency}",
+                                        style={**td_style, "font-weight": "bold",
+                                               "text-align": "right", "color": vcol}),
+                            ], style={"background": "#f3f7fc"}),
+                        ])
+                    ], style={**tbl_style, "max-width": "520px"}),
+                    html.Div("Il flusso scontato spetta a tutti i finanziatori e il "
+                             "WACC è il costo di tutto il capitale: la somma dei "
+                             "valori attuali è il valore dell'impresa. Chi compra "
+                             "l'azione eredita anche i debiti, quindi il debito netto "
+                             "va tolto prima di dividere per le azioni — e il margine "
+                             "FCF dello slider va inteso unlevered (prima degli "
+                             "interessi), altrimenti il debito peserebbe due volte.",
+                             style={"font-size": "10px", "color": "#888",
+                                    "line-height": "1.5", "margin-top": "6px",
+                                    "max-width": "520px"}),
+                ] + ([html.Div(
+                        f"Il debito netto ({_val_fmt_num(net_debt)} {currency}) supera "
+                        f"il valore d'impresa stimato: con queste ipotesi il modello "
+                        f"dice che agli azionisti non resta nulla. Non è un prezzo "
+                        f"obiettivo, è un avviso sulla struttura finanziaria.",
+                        style={"font-size": "11px", "color": "#8a6d3b",
+                               "background": "#fdf7e6", "border": "1px solid #e6d9a8",
+                               "border-radius": "4px", "padding": "8px 10px",
+                               "margin-top": "8px", "max-width": "520px"})]
+                     if ((dcf_ev or 0) - net_debt) <= 0 else []),
+                   style={"margin": "12px 0"}),
+
                 html.Div([
                     html.Div([
                         html.H5("Flussi di cassa attualizzati",
@@ -1827,6 +3502,7 @@ def register_callbacks(app):
                                      f"{gterm*100:.2f}%"),
                                     ("Margine FCF",     f"{fcf_m*100:.1f}%"),
                                     ("Revenue base",    _val_fmt_num(revenue, suffix=f" {currency}")),
+                                    ("Debito netto",    _val_fmt_num(net_debt, suffix=f" {currency}")),
                                     ("Azioni (shares)", _val_fmt_num(shares, 0)),
                                 ]
                             ])
@@ -2163,13 +3839,17 @@ def register_callbacks(app):
             for wc in wacc_range:
                 row = []
                 for gt in g_range:
-                    fv, _, _ = _val_dcf(revenue, fcf_m, wc, g1, g2, gt, shares)
-                    row.append(round(fv, 2) if fv else 0)
+                    fv, _, _, ok, _ = _val_dcf(revenue, fcf_m, wc, g1, g2, gt,
+                                               shares, net_debt)
+                    # La cella sulla diagonale g ≥ WACC resta vuota: lì Gordon
+                    # non vale e un numero qualunque si leggerebbe come crollo.
+                    row.append(round(fv, 2) if (ok and fv) else None)
                 z_vals.append(row)
 
             # Calcola % rispetto al prezzo corrente
-            z_pct = [[(v - price) / price * 100 if price > 0 else 0
-                       for v in row] for row in z_vals]
+            z_pct = [[None if v is None else
+                      ((v - price) / price * 100 if price > 0 else 0)
+                      for v in row] for row in z_vals]
 
             fig_heat = go.Figure(go.Heatmap(
                 z=z_pct,
@@ -2177,7 +3857,8 @@ def register_callbacks(app):
                 y=[f"{w*100:.0f}%" for w in wacc_range],
                 colorscale="RdYlGn",
                 zmid=0,
-                text=[[f"{v:+.0f}%" for v in row] for row in z_pct],
+                text=[["n.d." if v is None else f"{v:+.0f}%" for v in row]
+                      for row in z_pct],
                 texttemplate="%{text}",
                 colorbar=dict(title="Upside/Downside %",
                               tickfont=dict(size=9))))
@@ -2198,7 +3879,8 @@ def register_callbacks(app):
                 x=[f"{g*100:.0f}%" for g in g_range],
                 y=[f"{w*100:.0f}%" for w in wacc_range],
                 colorscale="Blues",
-                text=[[f"{v:.1f}" for v in row] for row in z_vals],
+                text=[["n.d." if v is None else f"{v:.1f}" for v in row]
+                      for row in z_vals],
                 texttemplate="%{text}",
                 colorbar=dict(title=f"Fair Value ({currency})",
                               tickfont=dict(size=9))))
