@@ -38,6 +38,16 @@ _SYNC_PREFIXES = ('sessions/', 'portafoglio/sessions/', 'fred/sessions/')
 _client = None
 _client_lock = threading.Lock()
 
+# None finché pull_all() non è stato eseguito; False se è fallito.
+_pull_ok = None
+
+
+def pull_ok() -> bool:
+    """False solo se l'ultimo pull_all() è fallito. In quel caso il disco locale
+    non rispecchia il bucket (è un problema di rete, non un'assenza di dati) e chi
+    sta per riscrivere un registro deve fermarsi, altrimenti cancella la copia buona."""
+    return _pull_ok is not False
+
 
 def _cfg():
     return {
@@ -157,6 +167,7 @@ def pull_all() -> int:
     le app. Best-effort: in caso di errore l'app parte comunque coi default in git.
     Ritorna il numero di file scaricati.
     """
+    global _pull_ok
     if not enabled():
         return 0
     n = 0
@@ -178,8 +189,10 @@ def pull_all() -> int:
                     except Exception as e:
                         print(f"⚠ [cloud] download fallito {key}: {e}", flush=True)
         print(f"✓ [cloud] sincronizzati {n} file dal bucket '{bkt}'", flush=True)
+        _pull_ok = True
     except Exception as e:
         print(f"⚠ [cloud] pull_all fallito (uso disco locale): {e}", flush=True)
+        _pull_ok = False
     return n
 
 

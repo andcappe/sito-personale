@@ -4,8 +4,18 @@ import os
 import secrets
 from datetime import datetime, timedelta
 
-ROOT       = os.path.dirname(os.path.abspath(__file__))
-USERS_FILE = os.path.join(ROOT, 'users.json')
+ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Il registro utenti sta dentro `sessions/`, non nella root del sito: su Digital
+# Ocean il filesystem è effimero e sopravvivono a un deploy solo le cartelle
+# sincronizzate su R2 (`_SYNC_PREFIXES` di cloud_storage). Nella root
+# `users.json` spariva a ogni pubblicazione, portandosi via le password di tutti
+# gli iscritti. Il nome con l'underscore non viene scambiato per un utente dai
+# job notturni, che cercano un `current.json` (vedi `_utenti_con_dati`).
+USERS_DIR         = os.path.join(ROOT, 'sessions', '_auth')
+USERS_FILE        = os.path.join(USERS_DIR, 'users.json')
+# Posizione storica: letta una volta sola, per migrare il file dov'era prima.
+USERS_FILE_LEGACY = os.path.join(ROOT, 'users.json')
 
 # Token in memoria (scadono in 1h; persi al riavvio, ma va bene)
 _reset_tokens:  dict = {}
@@ -16,14 +26,26 @@ def _hash(key: str, password: str) -> str:
     return hashlib.sha256(f"{key}:{password}".encode()).hexdigest()
 
 
-def _load_users() -> dict:
+def _leggi(path) -> dict | None:
+    """Il contenuto del file, o None se manca o non è leggibile."""
     try:
-        with open(USERS_FILE) as f:
+        with open(path) as f:
             data = json.load(f)
-    except (FileNotFoundError, Exception):
-        return {}
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
+
+def _load_users() -> dict:
+    data = _leggi(USERS_FILE)
     migrated = False
+    if data is None:
+        # Primo avvio dopo lo spostamento: recupera il file dalla vecchia
+        # posizione e riscrivilo, così finisce anche sul bucket.
+        data = _leggi(USERS_FILE_LEGACY)
+        if data is None:
+            return {}
+        migrated = True
     for key, val in list(data.items()):
         if isinstance(val, str):
             data[key] = {
@@ -39,9 +61,30 @@ def _load_users() -> dict:
     return data
 
 
+def _cloud_push(path) -> None:
+    """Replica il file su R2 (thread daemon, best-effort). No-op senza le S3_*."""
+    try:
+        import cloud_storage
+        if not cloud_storage.pull_ok():
+            # Il pull all'avvio è fallito: il disco è vuoto per un problema di
+            # rete, non perché non ci sono iscritti. Caricarlo adesso
+            # cancellerebbe il registro vero che sta sul bucket.
+            print('⚠ [auth] pull iniziale fallito: users.json non caricato su R2',
+                  flush=True)
+            return
+        cloud_storage.push(path)
+    except Exception:
+        pass
+
+
 def _save_users(data: dict) -> None:
-    with open(USERS_FILE, 'w') as f:
+    os.makedirs(USERS_DIR, exist_ok=True)
+    # Scrittura atomica: un'interruzione a metà file lascerebbe fuori tutti.
+    tmp = USERS_FILE + '.tmp'
+    with open(tmp, 'w') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, USERS_FILE)
+    _cloud_push(USERS_FILE)
 
 
 # ─── Autenticazione base ───────────────────────────────────────────────────────
