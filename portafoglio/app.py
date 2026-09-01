@@ -415,9 +415,68 @@ def _df_key(json_str):
 # (stock_data) — NON usarlo per i prezzi (li clipperebbe).
 _MAX_DAILY_RET = 0.5
 
+# ─── Gettone al posto del payload ────────────────────────────────────────────
+# 'stock-data' e 'original-prices-data' contenevano l'intero storico
+# serializzato: ~2 MB spediti al browser a ogni apertura di pagina, e rispediti
+# indietro al server a ogni callback che li prende come State. Ora, quando i
+# dati vengono da `current.json`, gli store portano solo un gettone corto e i
+# DataFrame restano di qua. Chi legge non se ne accorge: `_get_df` e
+# `_get_prices` accettano sia il gettone sia il vecchio JSON, perché gli altri
+# rami (upload di un file, buffer in memoria) continuano a passare il payload.
+_REF_PREFIX = 'ref:'
+_REF_DATA: dict = {}          # gettone -> (close_returns, original_prices)
+_REF_SEQ = 0
+# Quanti tenerne in memoria. I DataFrame sono gli stessi oggetti già in
+# `_DL_BUFFER`, quindi il costo è di riferimenti, non di copie; su un gettone
+# sfrattato si ricostruisce da current.json (vedi `_ref_get`).
+_REF_MAX = 16
+
+
+def _ref_new(username, cr, op):
+    """Tiene i dati sul server e torna il gettone da mettere negli store."""
+    global _REF_SEQ
+    _REF_SEQ += 1
+    tok = f"{_REF_PREFIX}{username}|{_REF_SEQ}"
+    _REF_DATA[tok] = (cr, op)
+    while len(_REF_DATA) > _REF_MAX:
+        _REF_DATA.pop(next(iter(_REF_DATA)))
+    return tok
+
+
+def _e_gettone(v):
+    """True se il valore dello store è un gettone e non lo storico serializzato."""
+    return isinstance(v, str) and v.startswith(_REF_PREFIX)
+
+
+def _ref_get(tok):
+    """(close_returns, original_prices) da un gettone, None se non si risolve.
+
+    Su miss ricostruisce da `current.json`: dopo un riavvio del processo una
+    pagina rimasta aperta nel browser continua a funzionare invece di svuotarsi.
+    Per questo il gettone porta dentro il nome utente.
+    """
+    dati = _REF_DATA.get(tok)
+    if dati is None:
+        try:
+            u = tok[len(_REF_PREFIX):].split('|')[0]
+            cr, op, _tm = dc.build_dataset(u)
+        except Exception:
+            return None
+        if cr is None or cr.empty:
+            return None
+        dati = (cr, op)
+        _REF_DATA[tok] = dati
+    return dati
+
+
 def _get_df(json_str):
     if not json_str:
         return None
+    if _e_gettone(json_str):
+        # Gettone: o si risolve, o non ci sono dati. Non è JSON, quindi non deve
+        # mai finire in read_json — solleverebbe invece di comportarsi da "vuoto".
+        dati = _ref_get(json_str)
+        return None if dati is None else dati[0].clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)
     key = _df_key(json_str)
     if key not in _DF_CACHE:
         df = pd.read_json(io.StringIO(json_str), orient='split')
@@ -428,6 +487,21 @@ def _get_df(json_str):
             oldest = next(iter(_DF_CACHE))
             del _DF_CACHE[oldest]
     return _DF_CACHE[key].copy()
+
+
+def _get_prices(json_str):
+    """Come `_get_df` ma per i prezzi: **non** clippa, il tetto vale sui rendimenti."""
+    if not json_str:
+        return None
+    if _e_gettone(json_str):
+        dati = _ref_get(json_str)
+        return None if (dati is None or dati[1] is None) else dati[1].copy()
+    try:
+        df = pd.read_json(io.StringIO(json_str), orient='split')
+        df.index = pd.to_datetime(df.index)
+        return df
+    except Exception:
+        return None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Cache giornaliera su disco
@@ -3466,12 +3540,15 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
                 _DL_BUFFER.update({'close_returns': cr, 'original_prices': op, 'ticker_map': tm})
             options = [{'label': c, 'value': c} for c in cr.columns]
             _lbl = 'File personale' if _is_pers else 'File di lavoro'
+            # Gettone invece dello storico serializzato: i dati vengono da
+            # current.json, quindi il server li sa ricostruire da solo.
+            _tok = _ref_new(_u, cr, op)
             return (
                 html.Div(f'✓ {len(options)} asset — {_lbl}',
                          style={'color': '#007755', 'font-size': '11px'}),
                 options,
-                cr.to_json(date_format='iso', orient='split'),
-                op.to_json(date_format='iso', orient='split'),
+                _tok,
+                _tok,
                 [], tm, _lbl, None,
                 *_noup, no_update,
             )
@@ -3498,12 +3575,15 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
                                    'ticker_map': tm, 'saved_at': saved_at})
             _write_user_json(cr, op, tm, reset_state=True, tipo='default:ETF.xlsx')
             options  = [{'label': col, 'value': col} for col in cr.columns]
+            # `_write_user_json` ha appena scritto current.json: il gettone è
+            # ricostruibile anche qui.
+            _tok = _ref_new(_u, cr, op)
             return (
                 html.Div(f'✓ {len(options)} asset — ETF (default)',
                          style={'color': '#007755', 'font-size': '11px'}),
                 options,
-                cr.to_json(date_format='iso', orient='split'),
-                op.to_json(date_format='iso', orient='split'),
+                _tok,
+                _tok,
                 [], tm, f"Aggiornati: {saved_at}" if saved_at else '', None,
                 *_noup, no_update,
             )
@@ -4043,9 +4123,11 @@ def on_file_selected(filename, cur_clicks):
                     _DL_BUFFER.update(data)
                 _write_user_json(cr, op, tm, vm, reset_state=True, tipo=_tipo_def)
                 options = [{'label': c, 'value': c} for c in cr.columns]
+                # Gettone: current.json è appena stato allineato a questi dati.
+                _tok = _ref_new(_u, cr, op)
                 return (filename,
-                        cr.to_json(date_format='iso', orient='split'),
-                        op.to_json(date_format='iso', orient='split'),
+                        _tok,
+                        _tok,
                         options, tm,
                         f'Aggiornati: {saved_at}',
                         html.Div(f'✓ {len(options)} asset — {Path(filename).stem}',
@@ -4482,7 +4564,8 @@ def poll_refresh_progress(n, n_btn):
     # FONTE UNICA: leggi il dataset da current.json (così non dipende da quale
     # buffer ha scritto il download). Fallback al buffer se current.json è vuoto.
     close_returns, original_prices, ticker_map = dc.build_dataset(_u)
-    if close_returns is None or close_returns.empty:
+    _da_current = close_returns is not None and not close_returns.empty
+    if not _da_current:
         close_returns   = buffer.get('close_returns')
         original_prices = buffer.get('original_prices')
         ticker_map      = buffer.get('ticker_map', {})
@@ -4496,8 +4579,15 @@ def poll_refresh_progress(n, n_btn):
 
     options      = [{'label': col, 'value': col} for col in close_returns.columns]
     saved_at     = buffer.get('saved_at', '')
-    returns_json = close_returns.to_json(date_format='iso', orient='split')
-    prices_json  = original_prices.to_json(date_format='iso', orient='split')
+    if _da_current:
+        # I dati vengono da current.json: basta il gettone, il server li
+        # ricostruisce da lì anche dopo un riavvio.
+        returns_json = prices_json = _ref_new(_u, close_returns, original_prices)
+    else:
+        # Buffer in memoria (file caricato dall'utente, mai scritto su disco):
+        # non c'è nulla da cui ricostruire, il payload deve viaggiare per intero.
+        returns_json = close_returns.to_json(date_format='iso', orient='split')
+        prices_json  = original_prices.to_json(date_format='iso', orient='split')
     ok_fill      = {**_FILL_LOADING, 'width': '100%'}
 
     errors      = state.get('errors', [])
@@ -4612,7 +4702,8 @@ def delete_asset_inline(clicks, options, current_clicks, filename):
     # Modifica del file (rimozione titolo) → diventa Personale e si persiste.
     _mark_personale(_u)
     new_options = [o for o in (options or []) if o['value'] != asset]
-    new_stock = new_cr.to_json(date_format='iso', orient='split') if new_cr is not None else no_update
+    # Gettone: current.json è appena stato riscritto senza l'asset eliminato.
+    new_stock = _ref_new(_u, new_cr, new_op) if new_cr is not None else no_update
     return new_stock, new_options, (current_clicks or 0) + 1, _list_files_with_personale(), '__personale__'
 
 
@@ -4653,10 +4744,11 @@ def add_asset_inline(n, ticker, desc, valuta, filename, sd_json, op_json, tm_sto
     # qui, l'accodo parte sempre dallo stesso identico set visualizzato.
     # reset_state=False → preserva pesi P1/P2/P3 e selezioni già impostati.
     try:
-        from io import StringIO as _SIO
-        if sd_json and op_json:
-            _disp_cr = pd.read_json(_SIO(sd_json), orient='split')
-            _disp_op = pd.read_json(_SIO(op_json), orient='split')
+        # Dai resolver, non da read_json: gli store possono portare un gettone
+        # al posto dello storico serializzato.
+        _disp_cr = _get_df(sd_json)
+        _disp_op = _get_prices(op_json)
+        if _disp_cr is not None and _disp_op is not None:
             if not _disp_cr.empty and not _disp_op.empty:
                 _write_user_json(_disp_cr, _disp_op, dict(tm_store or {}), username=_u)
     except Exception as _e:
@@ -6391,10 +6483,7 @@ def fp_save_named(n, name, *store_values):
         saved_at = _DL_BUFFER.get('saved_at', '')
     # Fallback: ricostruisci cr dai 9 store se il buffer è vuoto
     if cr is None and stores.get('stock-data'):
-        try:
-            cr = pd.read_json(io.StringIO(stores['stock-data']), orient='split')
-        except Exception:
-            cr = None
+        cr = _get_df(stores['stock-data'])   # accetta anche il gettone
     if cr is None:
         return '⚠ Nessun dato da salvare. Carica prima un file.', _err
 
@@ -6514,15 +6603,9 @@ def execute_file_load(pending, submit_n, cur_clicks):
 
     # Ricostruisci cr/op dai 9 store se mancano i DataFrame
     if cr is None and stores.get('stock-data'):
-        try:
-            cr = pd.read_json(io.StringIO(stores['stock-data']), orient='split')
-        except Exception:
-            cr = None
+        cr = _get_df(stores['stock-data'])                    # gettone o JSON
     if op is None and stores.get('original-prices-data'):
-        try:
-            op = pd.read_json(io.StringIO(stores['original-prices-data']), orient='split')
-        except Exception:
-            op = None
+        op = _get_prices(stores['original-prices-data'])
     if cr is None:
         raise PreventUpdate
 
@@ -6532,10 +6615,13 @@ def execute_file_load(pending, submit_n, cur_clicks):
         _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
                            'ticker_map': tm, 'valuta_map': vm, 'saved_at': sa})
 
-    # Output store
-    stock_json = stores.get('stock-data') or cr.to_json(date_format='iso', orient='split')
-    op_json    = (stores.get('original-prices-data')
-                  or (op.to_json(date_format='iso', orient='split') if op is not None else None))
+    # Output store: gettone, non lo storico serializzato. Non si riusa quello
+    # eventualmente salvato dentro `_stores` (punterebbe ai dati di allora): se ne
+    # conia uno nuovo sui DataFrame appena caricati, e il `_write_user_json` qui
+    # sotto allinea current.json, così restano ricostruibili dopo un riavvio.
+    _tok       = _ref_new(_u, cr, op)
+    stock_json = _tok
+    op_json    = _tok if op is not None else None
     options    = stores.get('asset-checklist') or [{'label': c, 'value': c} for c in cr.columns]
     tmap_out   = stores.get('ticker-map-store') or tm
 
@@ -7136,12 +7222,14 @@ def reset_to_default(n, cur_clicks):
     _active_file_store['is_personale'] = False
     options  = [{'label': col, 'value': col} for col in cr.columns]
     last_upd = f'Aggiornati: {saved_at}' if saved_at else ''
+    # Gettone: current.json è appena stato allineato a questi dati.
+    _tok = _ref_new(_get_username(), cr, op)
     return (
         html.Div(f'✓ {len(options)} asset — file di default',
                  style={'color': '#007755', 'font-size': '11px'}),
         options,
-        cr.to_json(date_format='iso', orient='split'),
-        op.to_json(date_format='iso', orient='split'),
+        _tok,
+        _tok,
         tm,
         last_upd,
         {}, {}, {},
