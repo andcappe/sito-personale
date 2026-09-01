@@ -426,10 +426,12 @@ _MAX_DAILY_RET = 0.5
 _REF_PREFIX = 'ref:'
 _REF_DATA: dict = {}          # gettone -> (close_returns, original_prices)
 _REF_SEQ = 0
-# Quanti tenerne in memoria. I DataFrame sono gli stessi oggetti già in
-# `_DL_BUFFER`, quindi il costo è di riferimenti, non di copie; su un gettone
-# sfrattato si ricostruisce da current.json (vedi `_ref_get`).
-_REF_MAX = 16
+# Quanti tenerne in memoria. Su un gettone sfrattato si ricostruisce da
+# current.json (vedi `_ref_get`): tenerne pochi costa una rilettura del JSON,
+# non un dato perso. Il numero è basso apposta — ogni coppia trattenuta è
+# memoria che prima veniva liberata subito, e l'istanza su Digital Ocean è
+# piccola: là un pugno di MB di troppo si paga con un riavvio del container.
+_REF_MAX = 2
 
 
 def _ref_new(username, cr, op):
@@ -1108,6 +1110,31 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
 
 
 def _do_download_client(tickers, descrizione, valuta, start_date, username='anon', pesi_p1=None):
+    """Come `_do_download_client_impl`, ma non lascia mai lo stato su 'running'.
+
+    Il polling mostra la barra di avanzamento finché legge `'running'`, e nessuno
+    lo tira fuori da lì: se il thread moriva a metà (eccezione durante la
+    scrittura di current.json, rete che non risponde) l'utente restava davanti a
+    una barra che girava per sempre. Qui lo stato finisce sempre da qualche
+    parte — 'done' se il lavoro è arrivato in fondo, 'error' altrimenti.
+    """
+    try:
+        _do_download_client_impl(tickers, descrizione, valuta, start_date,
+                                 username, pesi_p1)
+    except Exception as e:
+        import traceback
+        print(f"❌ Download cliente [{username}] interrotto: {e}")
+        traceback.print_exc()
+    finally:
+        with _CL_LOCK:
+            st = _CL_STATES.setdefault(username, {})
+            if st.get('status') == 'running':
+                st['status'] = 'error'
+                st.setdefault('errors', []).append(
+                    "Il download si è interrotto prima di finire.")
+
+
+def _do_download_client_impl(tickers, descrizione, valuta, start_date, username='anon', pesi_p1=None):
     """Download per file cliente: dati isolati in _CL_BUFFERS[username]."""
     total = len(tickers)
     with _CL_LOCK:
@@ -1135,12 +1162,23 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
     except Exception:
         pass
 
-    fx = None
-    try:
-        fx = yf.download(['EURUSD=X', 'EURGBP=X', 'EURCHF=X'], start=start_date,
-                         group_by='ticker', **_dl_kwargs)
-    except Exception as e:
-        print(f"⚠ FX download cliente fallito: {e}")
+    # Stessa rete di sicurezza del ciclo dei titoli qui sotto e di
+    # `_do_gestisci_download`: era l'unica chiamata di rete senza timeout, e se
+    # Yahoo non rispondeva bloccava il thread PRIMA del primo titolo — barra
+    # ferma a 0 all'infinito, nessun errore, niente.
+    _fx_res = [None]
+    def _dl_fx():
+        try:
+            _fx_res[0] = yf.download(['EURUSD=X', 'EURGBP=X', 'EURCHF=X'],
+                                     start=start_date, group_by='ticker', **_dl_kwargs)
+        except Exception as e:
+            print(f"⚠ FX download cliente fallito: {e}")
+    _fx_t = threading.Thread(target=_dl_fx, daemon=True)
+    _fx_t.start()
+    _fx_t.join(timeout=30)
+    if _fx_t.is_alive():
+        print(f"⚠ FX cliente [{username}]: timeout 30s — proseguo senza cambi")
+    fx = _fx_res[0]
 
     def _fx(name):
         if fx is None or fx.empty:
@@ -4522,10 +4560,25 @@ def poll_refresh_progress(n, n_btn):
     pct     = int(current / total * 100)
     modal_fill = {**_FILL_LOADING, 'width': f'{pct}%'}
 
-    if status == 'idle':
-        raise PreventUpdate
-
     _NU3 = (no_update, no_update, no_update)
+
+    if status == 'idle':
+        # `n_intervals` viene azzerato quando un download parte, quindi qui `n` è
+        # da quanti secondi la barra è aperta. Nessuno stato dopo qualche secondo
+        # vuol dire che il download di cui la barra parla non esiste più: o il
+        # container è stato riavviato (lo stato vive solo in memoria), o non è
+        # mai partito. Prima si faceva PreventUpdate e la barra girava per
+        # sempre; meglio dirlo.
+        if (n or 0) < 5:
+            raise PreventUpdate
+        orf_fill = {**_FILL_LOADING, 'width': '100%', 'background': '#c0392b'}
+        return (no_update, no_update, no_update, no_update, no_update,
+                True, False,
+                orf_fill, '❌ Download interrotto',
+                'Il download si è fermato prima di finire (il server è stato '
+                'riavviato). Riprova a caricare il file.', _STATUS_RED,
+                no_update, _EDITOR_HIDDEN,
+                no_update, no_update, no_update, '❌ Download interrotto', *_NU3)
     if status == 'running':
         return (no_update, no_update, no_update, no_update, no_update,
                 False, True,
@@ -6487,6 +6540,16 @@ def fp_save_named(n, name, *store_values):
     if cr is None:
         return '⚠ Nessun dato da salvare. Carica prima un file.', _err
 
+    # Nel pkl ci va lo storico vero, mai il gettone: quello vale solo per il
+    # processo che l'ha coniato, su disco è carta straccia. Al ripristino
+    # `_ref_get` non lo troverebbe e ricostruirebbe da `current.json`, cioè dal
+    # file di lavoro di ALLORA — restituendo dati che non sono quelli salvati qui.
+    if _e_gettone(stores.get('stock-data')):
+        stores['stock-data'] = cr.to_json(date_format='iso', orient='split')
+    if _e_gettone(stores.get('original-prices-data')):
+        stores['original-prices-data'] = (
+            op.to_json(date_format='iso', orient='split') if op is not None else None)
+
     data = {
         'close_returns':   cr,
         'original_prices': op,
@@ -6739,7 +6802,12 @@ def _startup_load():
                 data = pickle.load(f)
             with _DL_LOCK:
                 _DL_BUFFER.update(data)
-                _DL_STATE['status']  = 'done'
+                # Lo stato resta 'idle': qui non è stato scaricato niente, si è
+                # solo riletto il pkl. Segnarlo 'done' faceva sì che una barra di
+                # avanzamento rimasta aperta nel browser di qualcuno — perché il
+                # container era morto durante il SUO download — al primo polling
+                # dopo il riavvio leggesse questo 'done', pescasse i dati globali
+                # e gli annunciasse "✓ dati pronti" per un download mai avvenuto.
                 _DL_STATE['current'] = 1
                 _DL_STATE['total']   = 1
             print(f"✓ Dati ETF caricati da disco — {data.get('saved_at', '?')}")
