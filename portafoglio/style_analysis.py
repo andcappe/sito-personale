@@ -4,7 +4,6 @@ import json as _json
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import statsmodels.api as sm
 from scipy.optimize import minimize
 
 from dash import html, dcc, callback_context, no_update, ALL
@@ -12,6 +11,26 @@ from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
 import sessions_manager as _sm
+
+
+# `statsmodels.api` costa da solo ~73 MB di memoria, piu' di tutti e sette i
+# cruscotti messi insieme, e qui serve solo dentro le funzioni di analisi.
+# Importarlo in cima significava pagarlo a ogni avvio anche per chi apre un
+# grafico e basta - su un'istanza da 512 MB e' la differenza fra un download
+# che finisce e un container ammazzato a meta'. Questo segnaposto si comporta
+# come il modulo ma lo carica alla prima `sm.qualcosa` davvero eseguita.
+class _StatsmodelsPigro:
+    _mod = None
+
+    def __getattr__(self, nome):
+        if _StatsmodelsPigro._mod is None:
+            import statsmodels.api as _m
+            _StatsmodelsPigro._mod = _m
+        return getattr(_StatsmodelsPigro._mod, nome)
+
+
+sm = _StatsmodelsPigro()
+
 
 _SA_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Sito personale
 

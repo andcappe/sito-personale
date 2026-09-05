@@ -14,7 +14,7 @@ import uuid
 import pickle
 import requests
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Assicura che la cartella superiore sia disponibile per l'import di navbar.py
 PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -521,6 +521,96 @@ _CL_BUFFERS: dict = {}   # {username: {dati cliente}} — per-utente, solo in me
 _CL_STATES:  dict = {}   # {username: stato download cliente}
 _CL_LOCK   = threading.Lock()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Memoria dei ticker che Yahoo non trova
+# ─────────────────────────────────────────────────────────────────────────────
+# Un ticker sbagliato o delistato non costa "un titolo in meno": costa il giro
+# lungo (`_find_working_ticker` prova varie borse, poi `_suggest_ticker` cerca
+# il nome) a OGNI download. Su un'istanza piccola sono i minuti in piu' sotto
+# carico che fanno finire la memoria. Qui li ricordiamo e li saltiamo, con una
+# scadenza: se dopo un po' il titolo torna disponibile lo si riprova da solo.
+# Il file sta in portafoglio/sessions/ perche' e' un prefisso sincronizzato su
+# R2 — altrimenti la memoria si perderebbe a ogni riavvio del container.
+_INTROVABILI_FILE   = Path(os.path.dirname(os.path.abspath(__file__))) / 'sessions' / 'ticker_introvabili.json'
+_INTROVABILI_GIORNI = 14
+_INTROVABILI_LOCK   = threading.Lock()
+
+
+def _introvabili_leggi() -> dict:
+    """{ticker: 'YYYY-MM-DD' dell'ultimo fallimento}. Non solleva mai."""
+    try:
+        with io.open(_INTROVABILI_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _introvabili_attivi() -> set:
+    """I ticker da saltare adesso (falliti da meno di _INTROVABILI_GIORNI)."""
+    limite = datetime.now() - timedelta(days=_INTROVABILI_GIORNI)
+    fuori  = set()
+    for tk, quando in _introvabili_leggi().items():
+        try:
+            if datetime.strptime(quando, '%Y-%m-%d') >= limite:
+                fuori.add(tk)
+        except Exception:
+            pass
+    return fuori
+
+
+def _introvabili_aggiorna(esiti: dict):
+    """esiti = {ticker: True se e' fallito adesso, False se e' arrivato}.
+
+    Chiamare SOLO quando la risposta di Yahoo e' arrivata davvero: su un batch
+    andato in timeout i titoli non sono introvabili, e' la rete che non va.
+    """
+    if not esiti:
+        return
+    oggi = datetime.now().strftime('%Y-%m-%d')
+    with _INTROVABILI_LOCK:
+        d = _introvabili_leggi()
+        prima = dict(d)
+        for tk, fallito in esiti.items():
+            if fallito:
+                d[tk] = oggi
+            else:
+                d.pop(tk, None)
+        if d == prima:
+            return
+        try:
+            _INTROVABILI_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _INTROVABILI_FILE.with_suffix('.json.tmp')
+            with io.open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(d, f, indent=1, sort_keys=True)
+            os.replace(tmp, _INTROVABILI_FILE)   # scrittura atomica come current.json
+            _cloud_push(_INTROVABILI_FILE)       # senza questo si perde a ogni riavvio
+        except Exception as e:
+            print(f"⚠ memoria ticker introvabili non salvata: {e}")
+
+
+def _introvabili_filtra(tickers, descrizione, valuta):
+    """Toglie dal download i ticker gia' noti come introvabili.
+
+    Restituisce (tickers, descrizione, valuta, messaggi_da_mostrare).
+    Se sono introvabili TUTTI, non salta nulla: meglio un download lento di un
+    download vuoto (magari e' cambiato qualcosa e vale la pena riprovare).
+    """
+    noti = _introvabili_attivi()
+    if not noti:
+        return tickers, descrizione, valuta, []
+    tieni   = [i for i, tk in enumerate(tickers) if tk not in noti]
+    saltati = [tk for tk in tickers if tk in noti]
+    if not tieni or not saltati:
+        return tickers, descrizione, valuta, []
+    print(f"⏭ saltati {len(saltati)} ticker che Yahoo non trova: {', '.join(saltati[:10])}"
+          + (' …' if len(saltati) > 10 else ''))
+    msg = [f"{tk}: saltato — Yahoo non lo trova (riprovo fra qualche giorno)" for tk in saltati]
+    return ([tickers[i] for i in tieni],
+            [descrizione[i] for i in tieni],
+            [valuta[i] for i in tieni], msg)
+
+
 _active_file_store: dict = {'filename': 'ETF.xlsx'}  # file attivo corrente
 _PENDING: dict = {}  # ticker in attesa di download da Gestisci — processati da start_refresh
 
@@ -949,9 +1039,10 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
     Se username è dato e update_buffer, scrive anche current.json (fonte unica).
     tipo: imposta '_tipo' in current.json (es. 'default:CRIPTO.xlsx')."""
     global _DL_STATE, _DL_BUFFER
+    tickers, descrizione, valuta, _saltati = _introvabili_filtra(tickers, descrizione, valuta)
     total = len(tickers)
     with _DL_LOCK:
-        _DL_STATE = {'status': 'running', 'current': 0, 'total': total, 'errors': []}
+        _DL_STATE = {'status': 'running', 'current': 0, 'total': total, 'errors': list(_saltati)}
 
     # Proxy e User-Agent da variabili d'ambiente (configura su Render se Yahoo blocca)
     _proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or None
@@ -1049,6 +1140,7 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
                     print(f"✅ Auto-corretto: {t} → {t_ok} ({curr_ok})")
                 else:
                     failed_map[t] = desc
+        _introvabili_aggiorna({tk: tk in failed_map for tk in bt})
         with _DL_LOCK:
             _DL_STATE['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
         time.sleep(0.3)
@@ -1136,9 +1228,11 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
 
 def _do_download_client_impl(tickers, descrizione, valuta, start_date, username='anon', pesi_p1=None):
     """Download per file cliente: dati isolati in _CL_BUFFERS[username]."""
+    tickers, descrizione, valuta, _saltati = _introvabili_filtra(tickers, descrizione, valuta)
     total = len(tickers)
     with _CL_LOCK:
-        _CL_STATES[username]  = {'status': 'running', 'current': 0, 'total': total, 'errors': []}
+        _CL_STATES[username]  = {'status': 'running', 'current': 0, 'total': total,
+                                 'errors': list(_saltati)}
         _CL_BUFFERS[username] = {}
 
     _proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or None
@@ -1227,6 +1321,8 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
                 except Exception as e2:
                     with _CL_LOCK:
                         _CL_STATES[username]['errors'].append(f"{t}: {e2}")
+            # Yahoo ha risposto: ora sappiamo davvero chi c'e' e chi no.
+            _introvabili_aggiorna({tk: bd[k] not in all_prices for k, tk in enumerate(bt)})
         with _CL_LOCK:
             _CL_STATES[username]['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
         time.sleep(0.3)
@@ -1281,15 +1377,18 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     """Scarica nuovi ticker da Gestisci, merge con i dati correnti (_DL_BUFFER), salva pkl utente.
     all_descr: lista completa delle descrizioni desiderate — filtra il merged result a questi soli."""
     import shutil as _shutil
+    new_tickers, new_descr, new_valuta, _saltati = _introvabili_filtra(
+        new_tickers, new_descr, new_valuta)
     total    = len(new_tickers)
     user_pkl = SESSIONS_DIR / f'market_data_{Path(filename).stem}_user_{username}.pkl'
 
     with _DL_LOCK:
-        _DL_STATE.update({'status': 'running', 'current': 0, 'total': total, 'errors': []})
+        _DL_STATE.update({'status': 'running', 'current': 0, 'total': total,
+                          'errors': list(_saltati)})
     # Su file personale il polling legge il buffer CLIENT: tienilo allineato (running)
     with _CL_LOCK:
         _CL_STATES.setdefault(username, {}).update(
-            {'status': 'running', 'current': 0, 'total': total, 'errors': []})
+            {'status': 'running', 'current': 0, 'total': total, 'errors': list(_saltati)})
 
     # Non copiare il pkl esistente: partiamo sempre da zero per non includere ticker non voluti.
     # Se l'utente non ha un pkl, non creiamone uno adesso — lo creiamo dopo il merge.
@@ -1418,6 +1517,7 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                     print(f"✅ Auto-corretto gestisci (batch-err): {t} → {t_ok} ({curr_ok})")
                 else:
                     _gestisci_failed.append(t)
+        _introvabili_aggiorna({tk: tk in _gestisci_failed for tk in bt})
         with _DL_LOCK:
             _DL_STATE['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
         time.sleep(0.3)

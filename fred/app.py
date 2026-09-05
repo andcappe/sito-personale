@@ -5,7 +5,6 @@ Analisi monetaria USA: M2, velocità, CPI, PIL reale
 
 import os
 import io, base64, warnings, json, urllib.request, math
-import statsmodels.api as sm
 from scipy import stats as scipy_stats
 import numpy as np
 from scipy.optimize import minimize_scalar
@@ -22,6 +21,50 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in _sys.path:
     _sys.path.insert(0, _ROOT)
 from settings.browser_css import BROWSER_RESET_CSS  # noqa: E402  (reset CSS unico del sito)
+
+
+# `statsmodels.api` costa da solo ~73 MB di memoria, piu' di tutti e sette i
+# cruscotti messi insieme, e qui serve solo dentro le funzioni di analisi.
+# Importarlo in cima significava pagarlo a ogni avvio anche per chi apre un
+# grafico e basta - su un'istanza da 512 MB e' la differenza fra un download
+# che finisce e un container ammazzato a meta'. Questo segnaposto si comporta
+# come il modulo ma lo carica alla prima `sm.qualcosa` davvero eseguita.
+class _StatsmodelsPigro:
+    _mod = None
+
+    def __getattr__(self, nome):
+        if _StatsmodelsPigro._mod is None:
+            import statsmodels.api as _m
+            _StatsmodelsPigro._mod = _m
+        return getattr(_StatsmodelsPigro._mod, nome)
+
+
+sm = _StatsmodelsPigro()
+
+
+class _PigroNome:
+    """Come `_StatsmodelsPigro` ma per un singolo nome (`SARIMAX`, `adfuller`, ...).
+
+    Si comporta come la funzione/classe che rappresenta: la si puo' chiamare e
+    leggerne gli attributi, ma il modulo che la contiene viene importato solo
+    alla prima chiamata vera, non quando si registrano le callback.
+    """
+
+    def __init__(self, modulo, nome):
+        self._modulo, self._nome, self._vero = modulo, nome, None
+
+    def _risolvi(self):
+        if self._vero is None:
+            import importlib
+            self._vero = getattr(importlib.import_module(self._modulo), self._nome)
+        return self._vero
+
+    def __call__(self, *a, **k):
+        return self._risolvi()(*a, **k)
+
+    def __getattr__(self, nome):
+        return getattr(self._risolvi(), nome)
+
 
 try:
     from fredapi import Fred
@@ -6227,7 +6270,10 @@ def register_shock_callbacks(app):
     import pandas as pd
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
-    import statsmodels.api as sm
+    # Questa funzione viene chiamata all'avvio per registrare le callback, non
+    # quando l'utente le usa: un `import statsmodels` qui dentro sembra pigro ma
+    # si paga a ogni accensione. Il segnaposto lo rimanda al primo uso vero.
+    sm = _StatsmodelsPigro()
     from scipy.optimize import minimize_scalar
     from dash import callback_context
     from dash.exceptions import PreventUpdate
@@ -8267,17 +8313,20 @@ def register_new_tab_callbacks(app):
       - ADL          (adl_populate,   adl_slider_label,   run_adl)
       - DSGE         (run_dsge)
     """
-    from statsmodels.tsa.statespace.sarimax import SARIMAX
-    from statsmodels.graphics.tsaplots import acf as sm_acf, pacf as sm_pacf
+    # Questa funzione gira all'accensione per registrare le callback, non quando
+    # l'utente le usa: importare qui statsmodels costava ~73 MB a ogni avvio anche
+    # a chi apre solo un grafico. I segnaposto lo caricano al primo uso vero.
+    # (`statsmodels.graphics.tsaplots` era importato e mai usato: tolto.)
+    SARIMAX = _PigroNome('statsmodels.tsa.statespace.sarimax', 'SARIMAX')
     from scipy import stats as sp_stats
 
     # =========================================================================
     # ARIMA / SARIMA  — callbacks (workflow Box-Jenkins 4 passi)
     # =========================================================================
-    import statsmodels.api as sm2
-    from statsmodels.tsa.statespace.sarimax import SARIMAX
-    from statsmodels.tsa.stattools import acf as _acf_fn, pacf as _pacf_fn, adfuller
-    from scipy import stats as sp_stats
+    sm2 = _StatsmodelsPigro()
+    _acf_fn = _PigroNome('statsmodels.tsa.stattools', 'acf')
+    _pacf_fn = _PigroNome('statsmodels.tsa.stattools', 'pacf')
+    adfuller = _PigroNome('statsmodels.tsa.stattools', 'adfuller')
     from scipy import signal as sp_signal
 
     # ── helper: grafico in-sample fit ────────────────────────────────────────
