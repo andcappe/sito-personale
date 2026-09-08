@@ -2640,6 +2640,131 @@ def get_correlation_matrix_tab(options_tickers=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Layout Tab — Analisi Rolling (portata da IR_FE_14.py tab-8, adattata)
+# ─────────────────────────────────────────────────────────────────────────────
+# Differenze rispetto all'originale, volute: gli asset non si scelgono dalla
+# griglia del dataset caricato ma si scrivono come ticker Yahoo (benchmark +
+# fino a tre confronti), e la finestra non e' una sola in giorni ma una o piu'
+# spunte in ANNI (1/2/3/5/10 + una libera).
+_ROLL_ANNI    = [1, 2, 3, 5, 10]
+_ROLL_GG_ANNO = 252            # giorni di borsa in un anno
+_ROLL_H_RIGA  = 300            # px per finestra nei due grafici affiancati
+_ROLL_COLORI  = ['#1a3a5c', '#e6194b', '#2ca02c', '#ff7f0e']   # BM, C1, C2, C3
+
+
+def _roll_casella(id_, etichetta, segnaposto, larghezza='140px'):
+    return html.Div([
+        html.Label(etichetta, style={'font-size': '11px', 'color': '#1a3a5c',
+                                     'font-weight': 'bold', 'margin-bottom': '2px'}),
+        dcc.Input(id=id_, type='text', value='', debounce=True,
+                  placeholder=segnaposto,
+                  style={'width': larghezza, 'font-size': '12px', 'padding': '5px 8px',
+                         'border': '1px solid #ccc', 'borderRadius': '4px'}),
+    ], style={'display': 'flex', 'flexDirection': 'column', 'margin-right': '12px'})
+
+
+def get_rolling_analysis_tab():
+    """Confronto rolling fra un benchmark Yahoo e fino a tre altri ticker."""
+    return html.Div([
+        # ── Riga controlli ───────────────────────────────────────────────────
+        html.Div([
+            get_date_range_bar('roll'),
+
+            # Ticker
+            html.Div([
+                _roll_casella('roll-bm-input',     'Benchmark (Yahoo)',  'es. SPY'),
+                _roll_casella('roll-cmp-input',    'Confronto (Yahoo)',  'es. QQQ'),
+                _roll_casella('roll-extra1-input', 'Altro 1 (opzionale)', '—'),
+                _roll_casella('roll-extra2-input', 'Altro 2 (opzionale)', '—'),
+            ], style={'display': 'flex', 'align-items': 'flex-end',
+                      'flex-wrap': 'wrap', 'margin-bottom': '8px'}),
+
+            # Finestre rolling
+            html.Div([
+                html.Label('Finestre rolling:',
+                           style={'font-size': '12px', 'font-weight': 'bold',
+                                  'color': '#1a3a5c', 'margin-right': '10px',
+                                  'white-space': 'nowrap'}),
+                dcc.Checklist(
+                    id='roll-windows-check',
+                    options=[{'label': f' {a} anno' if a == 1 else f' {a} anni',
+                              'value': a} for a in _ROLL_ANNI],
+                    value=[1, 3, 5],
+                    inline=True,
+                    labelStyle={'margin-right': '14px', 'font-size': '12px'},
+                    style={'display': 'inline-block'},
+                ),
+                html.Label('a piacere:',
+                           style={'font-size': '12px', 'color': '#555',
+                                  'margin': '0 6px 0 12px', 'white-space': 'nowrap'}),
+                dcc.Input(id='roll-custom-anni', type='number', min=0.1, max=30, step=0.5,
+                          placeholder='anni',
+                          style={'width': '75px', 'font-size': '12px', 'padding': '4px 6px',
+                                 'border': '1px solid #ccc', 'borderRadius': '4px'}),
+                html.Button('▶  Calcola Rolling', id='roll-calc-button', n_clicks=0,
+                            style={'background-color': '#28a745', 'color': 'white',
+                                   'border': 'none', 'padding': '7px 18px',
+                                   'border-radius': '4px', 'cursor': 'pointer',
+                                   'font-weight': 'bold', 'font-size': '12px',
+                                   'margin-left': '18px'}),
+            ], style={'display': 'flex', 'align-items': 'center',
+                      'flex-wrap': 'wrap', 'margin-bottom': '6px'}),
+
+            html.Div(id='roll-status',
+                     style={'font-size': '11px', 'color': '#666', 'min-height': '16px',
+                            'margin-bottom': '4px'}),
+            html.Div('Lo storico viene scaricato anche prima della data iniziale, tanto '
+                     'quanto serve alla finestra più lunga: altrimenti il primo tratto '
+                     'del grafico resterebbe vuoto.',
+                     style={'font-size': '10px', 'color': '#999', 'font-style': 'italic',
+                            'margin-bottom': '6px'}),
+        ], style={'padding': '8px 12px 0 12px'}),
+
+        html.Hr(style={'margin': '4px 0 8px 0'}),
+
+        # ── Grafici ──────────────────────────────────────────────────────────
+        html.Div([
+            # I due grafici stanno affiancati (rendimenti a sinistra, extra-rendimenti
+            # a destra) e non hanno altezza fissa: la decide la figura, cosi' tutte le
+            # finestre restano visibili senza barre di scorrimento interne.
+            html.Div([
+                html.Div([
+                    html.Div('Rendimenti rolling a confronto',
+                             style={'font-weight': 'bold', 'font-size': '12px',
+                                    'color': '#1a3a5c', 'margin-bottom': '4px'}),
+                    dcc.Loading(id='loading-roll-ret', type='circle', children=[
+                        dcc.Graph(id='roll-chart-returns', style={'width': '100%'},
+                                  config={'responsive': True})]),
+                ], style={'flex': '1 1 460px', 'min-width': '340px'}),
+
+                html.Div([
+                    html.Div('Extra-rendimento rispetto al benchmark (asset − benchmark)',
+                             style={'font-weight': 'bold', 'font-size': '12px',
+                                    'color': '#1a3a5c', 'margin-bottom': '4px'}),
+                    dcc.Loading(id='loading-roll-diff', type='circle', children=[
+                        dcc.Graph(id='roll-chart-diff', style={'width': '100%'},
+                                  config={'responsive': True})]),
+                ], style={'flex': '1 1 460px', 'min-width': '340px'}),
+            ], style={'display': 'flex', 'flex-wrap': 'wrap', 'gap': '16px',
+                      'align-items': 'flex-start'}),
+
+            html.Hr(style={'margin': '12px 0 8px 0'}),
+            html.Div('Riepilogo sovraperformance',
+                     style={'font-weight': 'bold', 'font-size': '12px',
+                            'color': '#1a3a5c', 'margin-bottom': '4px'}),
+            dcc.Loading(id='loading-roll-sum', type='circle', children=[
+                dcc.Graph(id='roll-chart-summary', style={'width': '100%', 'height': '55vh'},
+                          config={'responsive': True})]),
+
+            html.Hr(style={'margin': '8px 0'}),
+            html.Div('Statistiche', style={'font-weight': 'bold', 'font-size': '12px',
+                                           'color': '#1a3a5c', 'margin-bottom': '4px'}),
+            html.Div(id='roll-stats-table'),
+        ], style={'padding': '0 12px 20px 12px'}),
+    ])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Layout Tab 1
 # ─────────────────────────────────────────────────────────────────────────────
 def get_portfolio_analysis_tab(options_tickers):
@@ -3481,6 +3606,10 @@ app.layout = html.Div([
                 style={'font-size': '12px', 'padding': '8px 18px'},
                 selected_style={'font-size': '12px', 'padding': '8px 18px',
                                 'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
+        dcc.Tab(label='📉 Analisi Rolling', value='tab-rolling',
+                style={'font-size': '12px', 'padding': '8px 18px'},
+                selected_style={'font-size': '12px', 'padding': '8px 18px',
+                                'font-weight': 'bold', 'border-top': '3px solid #1a3a5c'}),
     ]),
     # Pre-renderizzato col tab Portafoglio: così i suoi componenti
     # (update-portfolio-button, dr-start-tab1, griglia…) esistono GIÀ nel layout
@@ -3496,6 +3625,11 @@ app.layout = html.Div([
     # callback trovano sempre i componenti (stesso pattern di Style Analysis).
     html.Div(id='tab-corr-content',
              children=get_correlation_matrix_tab([]),
+             style={'display': 'none'}),
+    # Analisi Rolling: stesso schema: i componenti devono esistere gia' al primo
+    # caricamento, altrimenti il callback va in "nonexistent object".
+    html.Div(id='tab-roll-content',
+             children=get_rolling_analysis_tab(),
              style={'display': 'none'}),
     dcc.Store(id='corr-calculated', data=False),
     # Frontiera e Rendimenti incorporate via iframe (app standalone, navbar nascosta).
@@ -3872,6 +4006,7 @@ app.clientside_callback(
     Output('tab-frontiera-content',  'style'),
     Output('tab-rendimenti-content', 'style'),
     Output('tab-corr-content',       'style'),
+    Output('tab-roll-content',       'style'),
     Input('main-tabs',       'value'),
     Input('asset-checklist', 'data'),
 )
@@ -3879,14 +4014,16 @@ def render_tab1(active_tab, options_tickers):
     show = {'display': 'block'}
     hide = {'display': 'none'}
     if active_tab == 'tab-sa':
-        return no_update, hide, show, hide, hide, hide
+        return no_update, hide, show, hide, hide, hide, hide
     if active_tab == 'tab-frontiera':
-        return no_update, hide, hide, show, hide, hide
+        return no_update, hide, hide, show, hide, hide, hide
     if active_tab == 'tab-rendimenti':
-        return no_update, hide, hide, hide, show, hide
+        return no_update, hide, hide, hide, show, hide, hide
     if active_tab == 'tab-correlazioni':
-        return no_update, hide, hide, hide, hide, show
-    return get_portfolio_analysis_tab(options_tickers), show, hide, hide, hide, hide
+        return no_update, hide, hide, hide, hide, show, hide
+    if active_tab == 'tab-rolling':
+        return no_update, hide, hide, hide, hide, hide, show
+    return get_portfolio_analysis_tab(options_tickers), show, hide, hide, hide, hide, hide
 
 
 # Carica/ricarica l'iframe (fresco, anti-cache) quando si apre il relativo tab
@@ -4200,6 +4337,407 @@ def update_rolling_corr(ml_vals, benchmark, stock_data, date_start, date_end, wi
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Analisi Rolling — calcoli (matematica portata da IR_FE_14.py tab-8)
+# ─────────────────────────────────────────────────────────────────────────────
+def _roll_giorni_cal(anni):
+    """Giorni di calendario di una finestra espressa in anni."""
+    return max(7, int(round(anni * 365.25)))
+
+
+def _roll_cum(prezzi, anni):
+    """Rendimento su una finestra di N anni di CALENDARIO.
+
+    Non si contano 252 righe all'indietro: su Yahoo lo storico di parecchi ETF
+    europei ha giorni mancanti (IWMO.MI ha 165 quotazioni nel 2015 e 170 nel
+    2016, contro le 252 di QQQ), e contando le righe la finestra "3 anni"
+    risaliva fino a 3,46 anni per un titolo e a 3,01 per l'altro: i due
+    rendimenti coprivano periodi diversi e la loro differenza non voleva dire
+    niente. Qui si confronta il prezzo di oggi con quello dell'ultimo giorno
+    utile esattamente N anni fa, uguale per tutti i mercati.
+    """
+    gg = _roll_giorni_cal(anni)
+    prima = prezzi.reindex(prezzi.index - pd.Timedelta(days=gg), method='ffill')
+    prima.index = prezzi.index
+    r = prezzi / prima - 1
+    # Finche' non c'e' N anni di storico il confronto cadrebbe sul primo prezzo
+    # disponibile, cioe' su una finestra piu' corta di quella chiesta: si scarta.
+    return r.where(prezzi.index >= prezzi.index[0] + pd.Timedelta(days=gg))
+
+
+def _roll_vol(rendimenti, anni):
+    """Volatilità rolling annualizzata, sulla stessa finestra di calendario."""
+    minimi = max(2, int(round(anni * _ROLL_GG_ANNO)) // 2)
+    return (rendimenti.rolling(f'{_roll_giorni_cal(anni)}D', min_periods=minimi)
+            .std() * np.sqrt(_ROLL_GG_ANNO))
+
+
+def _roll_dd(prezzi, anni):
+    """Drawdown rolling: quanto si è sotto al massimo della finestra mobile."""
+    massimo = prezzi.rolling(f'{_roll_giorni_cal(anni)}D', min_periods=1).max()
+    return (prezzi - massimo) / massimo
+
+
+def _roll_valuta(ticker):
+    """Valuta di quotazione secondo Yahoo. Best-effort: in caso di dubbio EUR."""
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        val = (fi.get('currency') if isinstance(fi, dict) else getattr(fi, 'currency', None))
+        return (val or 'EUR').upper()
+    except Exception:
+        return 'EUR'
+
+
+def _roll_scarica(tickers, data_inizio):
+    """Prezzi giornalieri in EUR per i ticker chiesti, da `data_inizio` a oggi.
+
+    Restituisce (prezzi: {ticker: Series}, valute: {ticker: str}, errori: [str]).
+    Come nel resto del sito tutto viene riportato in EUR e la chiamata di rete
+    sta in un thread con timeout: senza, una risposta che non arriva mai
+    lascerebbe la pagina a girare all'infinito.
+    """
+    prezzi, valute, errori = {}, {}, []
+
+    valute = {t: _roll_valuta(t) for t in tickers}
+    serve_fx = sorted({v for v in valute.values() if v in ('USD', 'GBP', 'CHF')})
+    simboli  = list(tickers) + [f'EUR{v}=X' for v in serve_fx]
+
+    risposta = [None]
+
+    def _scarica():
+        try:
+            risposta[0] = yf.download(simboli, start=data_inizio, group_by='ticker',
+                                      auto_adjust=True, progress=False)
+        except Exception as e:
+            errori.append(f"Yahoo non ha risposto: {e}")
+
+    th = threading.Thread(target=_scarica, daemon=True)
+    th.start()
+    th.join(timeout=90)
+    if th.is_alive():
+        return {}, valute, ["Yahoo non ha risposto entro 90 secondi — riprova."]
+
+    raw = risposta[0]
+    if raw is None or raw.empty:
+        return {}, valute, errori or ["Yahoo non ha restituito nessun dato."]
+
+    def _colonna(simbolo):
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                return raw[(simbolo, 'Close')].dropna()
+            return raw['Close'].dropna()
+        except Exception:
+            return None
+
+    fx = {}
+    for v in serve_fx:
+        s = _colonna(f'EUR{v}=X')
+        if s is not None and not s.empty:
+            fx[v] = s
+
+    for t in tickers:
+        s = _colonna(t)
+        if s is None or s.empty:
+            errori.append(f"{t}: nessun dato su Yahoo Finance (ticker sbagliato?)")
+            continue
+        v = valute.get(t, 'EUR')
+        if v in fx:
+            s = s / fx[v].reindex(s.index).ffill()
+        elif v != 'EUR':
+            errori.append(f"{t}: cambio EUR/{v} non disponibile, lasciato in {v}")
+        # Ordinato: le finestre di calendario e le rolling a tempo lo pretendono.
+        s = s.dropna().sort_index()
+        if s.empty:
+            errori.append(f"{t}: serie vuota dopo la conversione in EUR")
+            continue
+        prezzi[t] = s
+
+    return prezzi, valute, errori
+
+
+def _roll_vuoto(testo, colore='#888'):
+    fig = go.Figure()
+    fig.add_annotation(text=testo, xref='paper', yref='paper', x=0.5, y=0.5,
+                       showarrow=False, font=dict(size=13, color=colore))
+    fig.update_layout(height=260, paper_bgcolor='white', plot_bgcolor='white',
+                      xaxis=dict(visible=False), yaxis=dict(visible=False),
+                      margin=dict(t=20, b=20, l=20, r=20))
+    return fig
+
+
+def _roll_etichetta(anni):
+    return f"{anni:g} anno" if anni == 1 else f"{anni:g} anni"
+
+
+@app.callback(
+    Output('roll-chart-returns', 'figure'),
+    Output('roll-chart-diff',    'figure'),
+    Output('roll-chart-summary', 'figure'),
+    Output('roll-stats-table',   'children'),
+    Output('roll-status',        'children'),
+    Input('roll-calc-button',    'n_clicks'),
+    State('roll-bm-input',       'value'),
+    State('roll-cmp-input',      'value'),
+    State('roll-extra1-input',   'value'),
+    State('roll-extra2-input',   'value'),
+    State('roll-windows-check',  'value'),
+    State('roll-custom-anni',    'value'),
+    State('dr-start-roll',       'date'),
+    State('dr-end-roll',         'date'),
+    prevent_initial_call=True,
+)
+def calcola_rolling(n_clicks, bm, cmp1, extra1, extra2,
+                    finestre_spuntate, anni_liberi, dr_start, dr_end):
+    if not n_clicks:
+        raise PreventUpdate
+
+    def _pulisci(x):
+        return (x or '').strip().upper()
+
+    bm       = _pulisci(bm)
+    confronti = [t for t in (_pulisci(cmp1), _pulisci(extra1), _pulisci(extra2)) if t]
+    # Un ticker ripetuto non aggiunge nulla: toglilo mantenendo l'ordine.
+    visti, unici = set(), []
+    for t in confronti:
+        if t not in visti and t != bm:
+            visti.add(t)
+            unici.append(t)
+    confronti = unici
+
+    if not bm or not confronti:
+        msg = _roll_vuoto('Scrivi almeno il benchmark e un ticker di confronto.', '#c0392b')
+        return msg, msg, msg, None, '⚠ Servono il benchmark e almeno un confronto.'
+
+    # ── Finestre richieste ────────────────────────────────────────────────
+    anni = sorted({float(a) for a in (finestre_spuntate or [])})
+    if anni_liberi and float(anni_liberi) > 0:
+        anni = sorted(set(anni) | {round(float(anni_liberi), 2)})
+    if not anni:
+        msg = _roll_vuoto('Spunta almeno una finestra rolling.', '#c0392b')
+        return msg, msg, msg, None, '⚠ Nessuna finestra rolling selezionata.'
+
+    # ── Date ──────────────────────────────────────────────────────────────
+    try:
+        d_ini = pd.to_datetime(dr_start)
+        d_fin = pd.to_datetime(dr_end)
+    except Exception:
+        d_ini, d_fin = None, None
+    if d_ini is None or d_fin is None or d_ini >= d_fin:
+        msg = _roll_vuoto('Range temporale non valido.', '#c0392b')
+        return msg, msg, msg, None, '⚠ Controlla le date.'
+
+    # Si scarica anche PRIMA della data iniziale: una finestra di N anni ha il
+    # suo primo valore solo dopo N anni di storico, altrimenti il grafico
+    # partirebbe vuoto proprio nel tratto che interessa.
+    margine   = pd.DateOffset(years=int(np.ceil(max(anni))), days=45)
+    d_scarico = (d_ini - margine).strftime('%Y-%m-%d')
+
+    t0 = time.time()
+    prezzi, valute, errori = _roll_scarica([bm] + confronti, d_scarico)
+    durata = time.time() - t0
+
+    if bm not in prezzi:
+        msg = _roll_vuoto(f"Benchmark '{bm}' non scaricabile.", '#c0392b')
+        return msg, msg, msg, None, '⚠ ' + ' · '.join(errori or [f'{bm} non trovato'])
+
+    serie = [t for t in confronti if t in prezzi]
+    if not serie:
+        msg = _roll_vuoto('Nessun ticker di confronto scaricabile.', '#c0392b')
+        return msg, msg, msg, None, '⚠ ' + ' · '.join(errori or ['nessun confronto valido'])
+
+    nomi   = [bm] + serie
+    colore = {t: _ROLL_COLORI[i % len(_ROLL_COLORI)] for i, t in enumerate(nomi)}
+
+    # ── Serie rolling, una per finestra ───────────────────────────────────
+    rendimenti = {t: prezzi[t].pct_change().clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)
+                  for t in nomi}
+    troppo_corti = []
+    cum, vol, ddn = {}, {}, {}
+    for a in anni:
+        for t in nomi:
+            c = _roll_cum(prezzi[t], a).loc[d_ini:d_fin].dropna()
+            cum[(a, t)] = c
+            vol[(a, t)] = _roll_vol(rendimenti[t], a).loc[d_ini:d_fin].dropna()
+            ddn[(a, t)] = _roll_dd(prezzi[t], a).loc[d_ini:d_fin].dropna()
+            if c.empty:
+                troppo_corti.append(f"{t} @ {_roll_etichetta(a)}")
+
+    # ── Grafico 1: rendimenti rolling a confronto ─────────────────────────
+    fig_ret = make_subplots(
+        rows=len(anni), cols=1, shared_xaxes=False, vertical_spacing=0.08,
+        subplot_titles=[f'Rendimento rolling {_roll_etichetta(a)}' for a in anni])
+    for r, a in enumerate(anni, start=1):
+        for t in nomi:
+            s = cum[(a, t)]
+            if s.empty:
+                continue
+            fig_ret.add_trace(go.Scatter(
+                x=s.index, y=s.values * 100,
+                name=f'{t} (BM)' if t == bm else t,
+                legendgroup=t, showlegend=(r == 1),
+                line=dict(color=colore[t], width=2.4 if t == bm else 1.7),
+                hovertemplate='%{y:.2f}%<extra>' + t + '</extra>',
+            ), row=r, col=1)
+        fig_ret.add_hline(y=0, line_color='#999', line_width=1, row=r, col=1)
+        fig_ret.update_yaxes(title_text='Rendimento (%)', title_font=dict(size=9),
+                             row=r, col=1)
+    fig_ret.update_layout(
+        # Stessa altezza per riga del grafico gemello: affiancati, le finestre
+        # devono stare sulla stessa linea.
+        height=max(360, _ROLL_H_RIGA * len(anni)),
+        title=dict(text=f'Rendimenti rolling — benchmark {bm}  |  '
+                        f'{d_ini:%d/%m/%Y} → {d_fin:%d/%m/%Y}',
+                   font=dict(size=12), x=0.01),
+        hovermode='x unified', paper_bgcolor='white', plot_bgcolor='#f9f9f9',
+        legend=dict(orientation='h', x=0, y=1.015, yanchor='bottom', font=dict(size=10)),
+        margin=dict(t=78, b=35, l=55, r=25))
+
+    # ── Grafico 2: extra-rendimento (asset − benchmark) ───────────────────
+    # Segno: positivo = l'asset ha fatto meglio del benchmark su quella finestra.
+    stat = {}          # {(anni, ticker): dict di statistiche}
+    fig_diff = make_subplots(
+        rows=len(anni), cols=1, shared_xaxes=False, vertical_spacing=0.08,
+        subplot_titles=[f'Asset − benchmark, finestra {_roll_etichetta(a)}' for a in anni])
+    for r, a in enumerate(anni, start=1):
+        base = cum[(a, bm)]
+        for t in serie:
+            s = cum[(a, t)]
+            comune = s.index.intersection(base.index)
+            if comune.empty:
+                continue
+            d = (s.loc[comune] - base.loc[comune]) * 100
+            fig_diff.add_trace(go.Scatter(
+                x=d.index, y=d.values, name=t, legendgroup=t, showlegend=(r == 1),
+                line=dict(color=colore[t], width=1.7),
+                hovertemplate='%{y:+.2f} p.p.<extra>' + t + '</extra>',
+            ), row=r, col=1)
+
+            n_tot   = int(d.notna().sum())
+            vince   = d[d > 0]
+            perde   = d[d < 0]
+            stat[(a, t)] = {
+                'periodi':    n_tot,
+                'pct_asset':  round(len(vince) / n_tot * 100, 1) if n_tot else 0.0,
+                'pct_bm':     round(len(perde) / n_tot * 100, 1) if n_tot else 0.0,
+                'media_su':   round(float(vince.mean()), 2) if len(vince) else 0.0,
+                'media_giu':  round(float(perde.mean()), 2) if len(perde) else 0.0,
+                'rend_asset': round(float(s.mean() * 100), 2) if len(s) else 0.0,
+                'rend_bm':    round(float(base.mean() * 100), 2) if len(base) else 0.0,
+                'vol':        round(float(vol[(a, t)].mean() * 100), 2) if len(vol[(a, t)]) else 0.0,
+                'maxdd':      round(float(ddn[(a, t)].min() * 100), 2) if len(ddn[(a, t)]) else 0.0,
+            }
+        fig_diff.add_hline(y=0, line_color='black', line_width=1, row=r, col=1)
+        fig_diff.update_yaxes(title_text='Δ vs BM (punti perc.)', title_font=dict(size=9),
+                              row=r, col=1)
+    fig_diff.update_layout(
+        height=max(360, _ROLL_H_RIGA * len(anni)),
+        title=dict(text=f'Extra-rendimento rispetto a {bm} — sopra lo zero l\'asset ha fatto meglio',
+                   font=dict(size=12), x=0.01),
+        hovermode='x unified', paper_bgcolor='white', plot_bgcolor='#f9f9f9',
+        legend=dict(orientation='h', x=0, y=1.015, yanchor='bottom', font=dict(size=10)),
+        margin=dict(t=78, b=35, l=55, r=25))
+
+    # ── Grafico 3: riepilogo (stesse quattro statistiche dell'originale) ───
+    fig_sum = _roll_riepilogo(stat, anni, serie, colore, bm)
+
+    # ── Tabella ───────────────────────────────────────────────────────────
+    tabella = _roll_tabella(stat, anni, serie, bm)
+
+    # ── Riga di stato ─────────────────────────────────────────────────────
+    pezzi = [f"✅ {len(nomi)} serie in {durata:.0f}s",
+             'valute: ' + ', '.join(f'{t}={valute.get(t, "EUR")}' for t in nomi)]
+    if troppo_corti:
+        pezzi.append('⚠ storico insufficiente per: ' + ', '.join(troppo_corti[:6])
+                     + (' …' if len(troppo_corti) > 6 else ''))
+    if errori:
+        pezzi.append('⚠ ' + ' · '.join(errori[:3]))
+    return fig_ret, fig_diff, fig_sum, tabella, ' | '.join(pezzi)
+
+
+def _roll_riepilogo(stat, anni, serie, colore, bm):
+    """Le quattro barre di IR_FE_14: frequenza e magnitudo, per ogni finestra."""
+    if not stat:
+        return _roll_vuoto('Nessun confronto disponibile.')
+    x = [_roll_etichetta(a) for a in anni]
+    fig = make_subplots(
+        rows=2, cols=2, vertical_spacing=0.20, horizontal_spacing=0.10,
+        subplot_titles=[
+            '% periodi in cui l\'asset batte il benchmark',
+            f'% periodi in cui {bm} batte l\'asset',
+            'Δ medio quando l\'asset vince',
+            'Δ medio quando l\'asset perde',
+        ])
+    campi = [('pct_asset', 1, 1, '%{y:.1f}%'), ('pct_bm', 1, 2, '%{y:.1f}%'),
+             ('media_su', 2, 1, '%{y:+.2f}%'), ('media_giu', 2, 2, '%{y:+.2f}%')]
+    for campo, r, c, hov in campi:
+        for t in serie:
+            y = [stat.get((a, t), {}).get(campo, 0.0) for a in anni]
+            fig.add_trace(go.Bar(
+                x=x, y=y, name=t, legendgroup=t, showlegend=(r == 1 and c == 1),
+                marker_color=colore[t], marker_line_width=1, marker_line_color='white',
+                text=[f'{v:.1f}' for v in y], textposition='outside', textfont=dict(size=8),
+                hovertemplate='<b>%{x}</b><br>' + t + ': ' + hov + '<extra></extra>',
+            ), row=r, col=c)
+    for c in (1, 2):
+        fig.add_hline(y=50, line_color='orange', line_width=1.2, line_dash='dash',
+                      row=1, col=c)
+        fig.add_hline(y=0, line_color='black', line_width=1.0, row=2, col=c)
+    fig.update_yaxes(title_text='% periodi', title_font=dict(size=9), row=1, col=1)
+    fig.update_yaxes(title_text='% periodi', title_font=dict(size=9), row=1, col=2)
+    fig.update_yaxes(title_text='Δ medio (%)', title_font=dict(size=9), row=2, col=1)
+    fig.update_yaxes(title_text='Δ medio (%)', title_font=dict(size=9), row=2, col=2)
+    fig.update_layout(
+        height=620, barmode='group', paper_bgcolor='white', plot_bgcolor='#f9f9f9',
+        title=dict(text='Riga 1 = quanto spesso · Riga 2 = di quanto', font=dict(size=11), x=0.01),
+        legend=dict(orientation='h', y=-0.12, font=dict(size=10)),
+        margin=dict(t=70, b=60, l=55, r=30),
+        uniformtext_minsize=7, uniformtext_mode='hide')
+    return fig
+
+
+def _roll_tabella(stat, anni, serie, bm):
+    """Le stesse statistiche in numeri, una riga per asset e finestra."""
+    if not stat:
+        return None
+    colonne = [
+        ('Asset', 'asset'), ('Finestra', 'finestra'), ('Periodi', 'periodi'),
+        (f'% Asset↑', 'pct_asset'), (f'% {bm}↑', 'pct_bm'),
+        ('Δ medio se vince', 'media_su'), ('Δ medio se perde', 'media_giu'),
+        ('Rend. medio asset', 'rend_asset'), (f'Rend. medio {bm}', 'rend_bm'),
+        ('Volatilità media', 'vol'), ('Max drawdown', 'maxdd'),
+    ]
+    righe = []
+    for t in serie:
+        for a in anni:
+            s = stat.get((a, t))
+            if not s:
+                continue
+            righe.append({'asset': t, 'finestra': _roll_etichetta(a), **s})
+    if not righe:
+        return html.Div('Nessuna statistica disponibile.',
+                        style={'font-size': '12px', 'color': '#888'})
+    return dash_table.DataTable(
+        columns=[{'name': n, 'id': i} for n, i in colonne],
+        data=righe,
+        style_table={'overflowX': 'auto'},
+        style_header={'backgroundColor': '#f0f4fa', 'fontWeight': '700',
+                      'fontSize': '11px', 'padding': '6px 8px', 'color': '#1a3a5c'},
+        style_cell={'fontSize': '11px', 'padding': '5px 8px', 'textAlign': 'right',
+                    'border': '1px solid #e0e4ec'},
+        style_cell_conditional=[
+            {'if': {'column_id': 'asset'},    'textAlign': 'left', 'fontWeight': '600'},
+            {'if': {'column_id': 'finestra'}, 'textAlign': 'left'},
+        ],
+        style_data_conditional=[
+            {'if': {'row_index': 'odd'}, 'backgroundColor': '#fafbfd'},
+            {'if': {'filter_query': '{pct_asset} > 50', 'column_id': 'pct_asset'},
+             'color': '#1b5e20', 'fontWeight': '700'},
+            {'if': {'filter_query': '{pct_bm} > 50', 'column_id': 'pct_bm'},
+             'color': '#b71c1c', 'fontWeight': '700'},
+        ],
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Callback: cambio file dataset
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
@@ -4326,8 +4864,10 @@ _TAB_ALIASES = {
     'rendimenti': 'tab-rendimenti',
     'sa': 'tab-sa', 'style': 'tab-sa', 'style-analysis': 'tab-sa', 'styleanalysis': 'tab-sa',
     'correlazioni': 'tab-correlazioni', 'corr': 'tab-correlazioni',
+    'rolling': 'tab-rolling', 'roll': 'tab-rolling',
 }
-_TAB_VALID = {'tab-portfolio', 'tab-frontiera', 'tab-rendimenti', 'tab-sa', 'tab-correlazioni'}
+_TAB_VALID = {'tab-portfolio', 'tab-frontiera', 'tab-rendimenti', 'tab-sa',
+              'tab-correlazioni', 'tab-rolling'}
 
 
 @app.callback(
