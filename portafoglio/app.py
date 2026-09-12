@@ -2704,18 +2704,34 @@ def get_rolling_analysis_tab():
         html.Div([
             get_date_range_bar('roll'),
 
-            # Ticker
+            # Le quattro caselle sono alla pari: nessuna e' il benchmark per
+            # posizione, lo decide la tendina qui sotto. Gli id restano quelli
+            # di prima (roll-bm-input, roll-cmp-input...) per non spezzare il
+            # suffisso '-valuta' e i callback gia' scritti.
             html.Div([
-                _roll_casella('roll-bm-input',     'Benchmark (Yahoo)',  'es. SPY'),
-                _roll_casella('roll-cmp-input',    'Confronto (Yahoo)',  'es. QQQ'),
-                _roll_casella('roll-extra1-input', 'Altro 1 (opzionale)', '—'),
-                _roll_casella('roll-extra2-input', 'Altro 2 (opzionale)', '—'),
+                _roll_casella('roll-bm-input',     'Asset 1 (Yahoo)',     'es. SPY'),
+                _roll_casella('roll-cmp-input',    'Asset 2 (Yahoo)',     'es. QQQ'),
+                _roll_casella('roll-extra1-input', 'Asset 3 (opzionale)', '—'),
+                _roll_casella('roll-extra2-input', 'Asset 4 (opzionale)', '—'),
+                html.Div([
+                    html.Label('Benchmark (termine di paragone)',
+                               style={'font-size': '11px', 'color': '#1a3a5c',
+                                      'font-weight': 'bold', 'margin-bottom': '2px'}),
+                    dcc.Dropdown(id='roll-bm-scelta', options=[], value=None,
+                                 clearable=False, placeholder='—',
+                                 style={'width': '160px', 'fontSize': '11px'},
+                                 optionHeight=26),
+                ], style={'display': 'flex', 'flexDirection': 'column',
+                          'margin-bottom': '6px', 'padding': '4px 8px',
+                          'background-color': '#f0f4fa', 'border-radius': '5px'}),
             ], style={'display': 'flex', 'align-items': 'flex-end',
                       'flex-wrap': 'wrap', 'margin-bottom': '2px'}),
 
             html.Div('Accanto a ogni ticker c\'è la valuta di quotazione: «Auto» la '
-                     'chiede a Yahoo, altrimenti la imposti tu. I prezzi vengono '
-                     'comunque riportati tutti in euro prima del confronto.',
+                     'chiede a Yahoo, altrimenti la imposti tu; i prezzi vengono '
+                     'comunque riportati tutti in euro prima del confronto. '
+                     'Il benchmark si sceglie fra i ticker scritti: cambiandolo, tutto '
+                     'il confronto e le statistiche si rifanno da capo.',
                      style={'font-size': '10px', 'color': '#999', 'font-style': 'italic',
                             'margin-bottom': '8px'}),
 
@@ -2793,7 +2809,10 @@ def get_rolling_analysis_tab():
                      style={'font-weight': 'bold', 'font-size': '12px',
                             'color': '#1a3a5c', 'margin-bottom': '4px'}),
             dcc.Loading(id='loading-roll-sum', type='circle', children=[
-                dcc.Graph(id='roll-chart-summary', style={'width': '100%', 'height': '55vh'},
+                # Nessuna altezza CSS, come per i due grafici sopra: la figura e'
+                # alta 620px e in un contenitore da 55vh (circa 440px su un
+                # portatile) sbordava, finendo sotto la tabella delle statistiche.
+                dcc.Graph(id='roll-chart-summary', style={'width': '100%'},
                           config={'responsive': True})]),
 
             html.Hr(style={'margin': '8px 0'}),
@@ -4618,12 +4637,39 @@ def _roll_etichetta(anni):
 
 
 @app.callback(
+    Output('roll-bm-scelta', 'options'),
+    Output('roll-bm-scelta', 'value'),
+    Input('roll-bm-input',     'value'),
+    Input('roll-cmp-input',    'value'),
+    Input('roll-extra1-input', 'value'),
+    Input('roll-extra2-input', 'value'),
+    State('roll-bm-scelta',    'value'),
+)
+def _roll_lista_benchmark(a1, a2, a3, a4, scelto):
+    """Tiene la tendina del benchmark allineata ai ticker scritti nelle caselle."""
+    tickers = []
+    for x in (a1, a2, a3, a4):
+        t = (x or '').strip().upper()
+        if t and t not in tickers:
+            tickers.append(t)
+    opzioni = [{'label': t, 'value': t} for t in tickers]
+    nuovo = scelto if scelto in tickers else (tickers[0] if tickers else None)
+    # Il valore si riscrive solo se e' davvero cambiato: riscriverlo uguale
+    # farebbe ripartire il calcolo, e quindi un nuovo scarico da Yahoo, a ogni
+    # ritocco di una casella ticker.
+    return opzioni, (no_update if nuovo == scelto else nuovo)
+
+
+@app.callback(
     Output('roll-chart-returns', 'figure'),
     Output('roll-chart-diff',    'figure'),
     Output('roll-chart-summary', 'figure'),
     Output('roll-stats-table',   'children'),
     Output('roll-status',        'children'),
     Input('roll-calc-button',    'n_clicks'),
+    # Il benchmark e' un Input e non uno State: cambiandolo il confronto si
+    # rifa' da solo, che e' il senso di poterlo ribaltare.
+    Input('roll-bm-scelta',      'value'),
     State('roll-bm-input',       'value'),
     State('roll-cmp-input',      'value'),
     State('roll-extra1-input',   'value'),
@@ -4638,7 +4684,7 @@ def _roll_etichetta(anni):
     State('dr-end-roll',         'date'),
     prevent_initial_call=True,
 )
-def calcola_rolling(n_clicks, bm, cmp1, extra1, extra2,
+def calcola_rolling(n_clicks, bm_scelto, bm, cmp1, extra1, extra2,
                     val_bm, val_cmp1, val_extra1, val_extra2,
                     finestre_spuntate, anni_liberi, dr_start, dr_end):
     if not n_clicks:
@@ -4647,30 +4693,33 @@ def calcola_rolling(n_clicks, bm, cmp1, extra1, extra2,
     def _pulisci(x):
         return (x or '').strip().upper()
 
-    bm       = _pulisci(bm)
-    confronti = [t for t in (_pulisci(cmp1), _pulisci(extra1), _pulisci(extra2)) if t]
-
-    # Valuta indicata a mano, casella per casella. Si legge prima di scartare i
-    # doppioni, cosi' resta agganciata al ticker giusto anche se una casella e'
-    # vuota; se la stessa sigla compare due volte con valute diverse vince la
-    # prima, tanto e' lo stesso titolo.
+    # Valuta indicata a mano, casella per casella. Si legge dalle caselle grezze,
+    # cosi' resta agganciata al ticker giusto; se la stessa sigla compare due
+    # volte con valute diverse vince la prima, tanto e' lo stesso titolo.
     valute_scelte = {}
     for testo, scelta in ((bm, val_bm), (cmp1, val_cmp1),
                           (extra1, val_extra1), (extra2, val_extra2)):
         t = _pulisci(testo)
         if t and scelta:
             valute_scelte.setdefault(t, scelta)
-    # Un ticker ripetuto non aggiunge nulla: toglilo mantenendo l'ordine.
-    visti, unici = set(), []
-    for t in confronti:
-        if t not in visti and t != bm:
-            visti.add(t)
-            unici.append(t)
-    confronti = unici
+
+    # Le quattro caselle sono alla pari: benchmark quello scelto nella tendina,
+    # gli altri diventano i confronti. Un ticker ripetuto non aggiunge nulla.
+    asset = []
+    for x in (bm, cmp1, extra1, extra2):
+        t = _pulisci(x)
+        if t and t not in asset:
+            asset.append(t)
+
+    # Se la tendina punta a un ticker che non c'e' piu' (casella svuotata) si
+    # ripiega sul primo: fermare il calcolo per questo sarebbe solo fastidioso.
+    scelto = _pulisci(bm_scelto)
+    bm = scelto if scelto in asset else (asset[0] if asset else '')
+    confronti = [t for t in asset if t != bm]
 
     if not bm or not confronti:
-        msg = _roll_vuoto('Scrivi almeno il benchmark e un ticker di confronto.', '#c0392b')
-        return msg, msg, msg, None, '⚠ Servono il benchmark e almeno un confronto.'
+        msg = _roll_vuoto('Servono almeno due asset da confrontare.', '#c0392b')
+        return msg, msg, msg, None, '⚠ Scrivi almeno due ticker.'
 
     # ── Finestre richieste ────────────────────────────────────────────────
     anni = sorted({float(a) for a in (finestre_spuntate or [])})
