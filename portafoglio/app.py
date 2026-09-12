@@ -2651,16 +2651,50 @@ _ROLL_GG_ANNO = 252            # giorni di borsa in un anno
 _ROLL_H_RIGA  = 300            # px per finestra nei due grafici affiancati
 _ROLL_COLORI  = ['#1a3a5c', '#e6194b', '#2ca02c', '#ff7f0e']   # BM, C1, C2, C3
 
+# Valute che si possono indicare a mano per ogni asset. Il confronto rolling ha
+# senso solo fra serie nella stessa moneta, quindi tutto viene riportato in euro
+# come nel resto del sito: Yahoo quota il cambio come EUR<valuta>=X e per passare
+# a euro si DIVIDE il prezzo per quel cambio.
+_ROLL_VALUTE = ['EUR', 'USD', 'GBP', 'GBp', 'CHF', 'JPY', 'CAD', 'AUD', 'NZD',
+                'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'HKD', 'SGD', 'CNY',
+                'KRW', 'INR', 'BRL', 'MXN', 'ZAR', 'TRY', 'ILS']
+
+# Alcune piazze quotano in centesimi: Londra in penny ('GBp'), Tel Aviv in agorot
+# ('ILA'), Johannesburg in cent ('ZAc'). Il prezzo va diviso per 100 e poi cambiato
+# con la valuta piena. Il codice si confronta COSI' COM'E', senza maiuscole:
+# 'GBp'.upper() diventa 'GBP' e i penny sparirebbero dentro le sterline.
+_ROLL_CENTESIMI = {'GBp': 'GBP', 'GBX': 'GBP', 'ILA': 'ILS', 'ZAc': 'ZAR'}
+
+
+def _roll_opzioni_valuta():
+    """Tendina valute: 'Auto' lascia decidere a Yahoo."""
+    etichette = {'GBp': 'GBp (penny)'}
+    return ([{'label': 'Auto', 'value': ''}]
+            + [{'label': etichette.get(v, v), 'value': v} for v in _ROLL_VALUTE])
+
 
 def _roll_casella(id_, etichetta, segnaposto, larghezza='140px'):
+    """Ticker + valuta di quotazione.
+
+    La valuta serve perche' i prezzi vanno riportati in euro prima di confrontarli:
+    'Auto' la chiede a Yahoo, ma Yahoo a volte non risponde o la sbaglia, e in quel
+    caso l'asset resterebbe nella sua moneta senza che si veda. Indicandola a mano
+    la conversione e' certa.
+    """
     return html.Div([
         html.Label(etichetta, style={'font-size': '11px', 'color': '#1a3a5c',
                                      'font-weight': 'bold', 'margin-bottom': '2px'}),
-        dcc.Input(id=id_, type='text', value='', debounce=True,
-                  placeholder=segnaposto,
-                  style={'width': larghezza, 'font-size': '12px', 'padding': '5px 8px',
-                         'border': '1px solid #ccc', 'borderRadius': '4px'}),
-    ], style={'display': 'flex', 'flexDirection': 'column', 'margin-right': '12px'})
+        html.Div([
+            dcc.Input(id=id_, type='text', value='', debounce=True,
+                      placeholder=segnaposto,
+                      style={'width': larghezza, 'font-size': '12px', 'padding': '5px 8px',
+                             'border': '1px solid #ccc', 'borderRadius': '4px'}),
+            dcc.Dropdown(id=id_ + '-valuta', options=_roll_opzioni_valuta(),
+                         value='', clearable=False, searchable=False,
+                         style={'width': '92px', 'fontSize': '11px'}, optionHeight=26),
+        ], style={'display': 'flex', 'align-items': 'center', 'gap': '4px'}),
+    ], style={'display': 'flex', 'flexDirection': 'column',
+              'margin-right': '12px', 'margin-bottom': '6px'})
 
 
 def get_rolling_analysis_tab():
@@ -2677,7 +2711,13 @@ def get_rolling_analysis_tab():
                 _roll_casella('roll-extra1-input', 'Altro 1 (opzionale)', '—'),
                 _roll_casella('roll-extra2-input', 'Altro 2 (opzionale)', '—'),
             ], style={'display': 'flex', 'align-items': 'flex-end',
-                      'flex-wrap': 'wrap', 'margin-bottom': '8px'}),
+                      'flex-wrap': 'wrap', 'margin-bottom': '2px'}),
+
+            html.Div('Accanto a ogni ticker c\'è la valuta di quotazione: «Auto» la '
+                     'chiede a Yahoo, altrimenti la imposti tu. I prezzi vengono '
+                     'comunque riportati tutti in euro prima del confronto.',
+                     style={'font-size': '10px', 'color': '#999', 'font-style': 'italic',
+                            'margin-bottom': '8px'}),
 
             # Finestre rolling
             html.Div([
@@ -4377,29 +4417,80 @@ def _roll_dd(prezzi, anni):
     return (prezzi - massimo) / massimo
 
 
+_ROLL_VALUTA_CACHE = {}
+
+
 def _roll_valuta(ticker):
-    """Valuta di quotazione secondo Yahoo. Best-effort: in caso di dubbio EUR."""
+    """Valuta di quotazione secondo Yahoo, nella forma esatta che usa Yahoo
+    ('GBp' e 'GBP' non sono la stessa cosa). None se non si riesce a saperlo:
+    un fallback a EUR silenzioso lascerebbe l'asset non convertito facendolo
+    passare per gia' in euro.
+
+    E' una chiamata di rete per ticker e la valuta di quotazione non cambia nel
+    tempo, quindi le risposte buone restano in cache finche' il processo vive.
+    Gli errori no: un problema di rete momentaneo si porterebbe dietro il dubbio
+    per tutta la giornata.
+    """
+    if ticker in _ROLL_VALUTA_CACHE:
+        return _ROLL_VALUTA_CACHE[ticker]
     try:
         fi = yf.Ticker(ticker).fast_info
         val = (fi.get('currency') if isinstance(fi, dict) else getattr(fi, 'currency', None))
-        return (val or 'EUR').upper()
     except Exception:
-        return 'EUR'
+        return None
+    val = str(val).strip() if val else ''
+    if not val:
+        return None
+    _ROLL_VALUTA_CACHE[ticker] = val
+    return val
 
 
-def _roll_scarica(tickers, data_inizio):
+def _roll_valuta_piena(codice):
+    """Da un codice Yahoo alla coppia (valuta piena, divisore): 'GBp' -> ('GBP', 100),
+    'USD' -> ('USD', 1). Il divisore riporta i centesimi all'unita' di valuta."""
+    c = (codice or '').strip()
+    if c in _ROLL_CENTESIMI:
+        return _ROLL_CENTESIMI[c], 100.0
+    return (c.upper() or 'EUR'), 1.0
+
+
+def _roll_scarica(tickers, data_inizio, valute_scelte=None):
     """Prezzi giornalieri in EUR per i ticker chiesti, da `data_inizio` a oggi.
 
-    Restituisce (prezzi: {ticker: Series}, valute: {ticker: str}, errori: [str]).
+    `valute_scelte` è {ticker: codice} e vince su Yahoo; dove manca (o è vuoto)
+    la valuta la si chiede a Yahoo.
+
+    Restituisce (prezzi: {ticker: Series}, info: {ticker: dict}, errori: [str]),
+    dove ogni `info` racconta com'è andata la conversione: valuta di partenza,
+    da dove arriva quel dato, cambio usato, riuscita sì/no. Serve a mostrarlo in
+    pagina: un asset rimasto nella sua moneta falserebbe tutti i confronti e
+    senza quella riga non se ne accorgerebbe nessuno.
+
     Come nel resto del sito tutto viene riportato in EUR e la chiamata di rete
     sta in un thread con timeout: senza, una risposta che non arriva mai
     lascerebbe la pagina a girare all'infinito.
     """
-    prezzi, valute, errori = {}, {}, []
+    prezzi, info, errori = {}, {}, []
+    valute_scelte = valute_scelte or {}
 
-    valute = {t: _roll_valuta(t) for t in tickers}
-    serve_fx = sorted({v for v in valute.values() if v in ('USD', 'GBP', 'CHF')})
-    simboli  = list(tickers) + [f'EUR{v}=X' for v in serve_fx]
+    for t in tickers:
+        scelta = (valute_scelte.get(t) or '').strip()
+        if scelta:
+            grezza, origine = scelta, 'scelta'
+        else:
+            grezza = _roll_valuta(t)
+            origine = 'Yahoo' if grezza else 'ignota'
+            if not grezza:
+                grezza = 'EUR'
+                errori.append(f"{t}: Yahoo non dice la valuta, trattato come EUR "
+                              f"— indicala a mano se non lo è")
+        piena, divisore = _roll_valuta_piena(grezza)
+        info[t] = {'grezza': grezza, 'valuta': piena, 'origine': origine,
+                   'divisore': divisore, 'convertita': False,
+                   'cambio': None if piena == 'EUR' else f'EUR{piena}=X'}
+
+    serve_fx = sorted({d['cambio'] for d in info.values() if d['cambio']})
+    simboli  = list(tickers) + serve_fx
 
     risposta = [None]
 
@@ -4414,11 +4505,11 @@ def _roll_scarica(tickers, data_inizio):
     th.start()
     th.join(timeout=90)
     if th.is_alive():
-        return {}, valute, ["Yahoo non ha risposto entro 90 secondi — riprova."]
+        return {}, info, ["Yahoo non ha risposto entro 90 secondi — riprova."]
 
     raw = risposta[0]
     if raw is None or raw.empty:
-        return {}, valute, errori or ["Yahoo non ha restituito nessun dato."]
+        return {}, info, errori or ["Yahoo non ha restituito nessun dato."]
 
     def _colonna(simbolo):
         try:
@@ -4429,21 +4520,28 @@ def _roll_scarica(tickers, data_inizio):
             return None
 
     fx = {}
-    for v in serve_fx:
-        s = _colonna(f'EUR{v}=X')
+    for simbolo in serve_fx:
+        s = _colonna(simbolo)
         if s is not None and not s.empty:
-            fx[v] = s
+            fx[simbolo] = s
 
     for t in tickers:
         s = _colonna(t)
         if s is None or s.empty:
             errori.append(f"{t}: nessun dato su Yahoo Finance (ticker sbagliato?)")
             continue
-        v = valute.get(t, 'EUR')
-        if v in fx:
-            s = s / fx[v].reindex(s.index).ffill()
-        elif v != 'EUR':
-            errori.append(f"{t}: cambio EUR/{v} non disponibile, lasciato in {v}")
+        d = info[t]
+        # Prima i centesimi (penny, agorot, cent) e poi il cambio sulla valuta piena.
+        if d['divisore'] != 1.0:
+            s = s / d['divisore']
+        if d['cambio'] is None:
+            d['convertita'] = True                      # già in euro, niente da fare
+        elif d['cambio'] in fx:
+            s = s / fx[d['cambio']].reindex(s.index).ffill()
+            d['convertita'] = True
+        else:
+            errori.append(f"{t}: cambio {d['cambio']} non disponibile, "
+                          f"serie lasciata in {d['valuta']}")
         # Ordinato: le finestre di calendario e le rolling a tempo lo pretendono.
         s = s.dropna().sort_index()
         if s.empty:
@@ -4451,7 +4549,58 @@ def _roll_scarica(tickers, data_inizio):
             continue
         prezzi[t] = s
 
-    return prezzi, valute, errori
+    return prezzi, info, errori
+
+
+def _roll_valuta_testo(d):
+    """Come e' stato riportato in euro un asset, in breve: 'USD → EUR'."""
+    if not d:
+        return '—'
+    if d['cambio'] is None and d['divisore'] == 1.0:
+        return 'EUR'
+    if not d['convertita']:
+        return f"{d['grezza']} (non convertita)"
+    return f"{d['grezza']} → EUR"
+
+
+def _roll_riga_valute(info, nomi):
+    """Un riquadro per asset con la valuta di partenza e il cambio applicato.
+
+    Il grafico mostra solo numeri gia' convertiti: senza questa riga non si
+    saprebbe se un confronto e' fra due serie in euro o fra una in euro e una
+    rimasta in dollari, che e' un confronto senza senso.
+    """
+    base = {'font-size': '10px', 'padding': '2px 7px', 'border-radius': '10px',
+            'border': '1px solid', 'white-space': 'nowrap'}
+    riquadri = []
+    for t in nomi:
+        d = info.get(t)
+        if not d:
+            continue
+        if not d.get('convertita'):
+            testo = f"{t}: {d['grezza']} — NON convertita"
+            stile = {**base, 'color': '#b71c1c', 'border-color': '#e6a2a2',
+                     'background-color': '#fdecec', 'font-weight': '700'}
+        elif d['cambio'] is None and d['divisore'] == 1.0:
+            testo = f"{t}: EUR"
+            stile = {**base, 'color': '#555', 'border-color': '#ddd',
+                     'background-color': '#f6f6f6'}
+        else:
+            cambio = f" ÷ {d['cambio']}" if d['cambio'] else ''
+            cent   = ' ÷ 100' if d['divisore'] != 1.0 else ''
+            testo  = f"{t}: {d['grezza']} → EUR{cent}{cambio}"
+            stile  = {**base, 'color': '#1b5e20', 'border-color': '#bcd9bd',
+                      'background-color': '#f0f7f0'}
+        if d.get('origine') == 'scelta':
+            testo += ' (impostata)'
+        riquadri.append(html.Span(testo, style=stile))
+    if not riquadri:
+        return None
+    return html.Div(
+        [html.Span('Valute: ', style={'font-size': '10px', 'color': '#888',
+                                      'font-weight': 'bold'})] + riquadri,
+        style={'display': 'flex', 'flex-wrap': 'wrap', 'gap': '6px',
+               'align-items': 'center', 'margin-top': '3px'})
 
 
 def _roll_vuoto(testo, colore='#888'):
@@ -4479,6 +4628,10 @@ def _roll_etichetta(anni):
     State('roll-cmp-input',      'value'),
     State('roll-extra1-input',   'value'),
     State('roll-extra2-input',   'value'),
+    State('roll-bm-input-valuta',     'value'),
+    State('roll-cmp-input-valuta',    'value'),
+    State('roll-extra1-input-valuta', 'value'),
+    State('roll-extra2-input-valuta', 'value'),
     State('roll-windows-check',  'value'),
     State('roll-custom-anni',    'value'),
     State('dr-start-roll',       'date'),
@@ -4486,6 +4639,7 @@ def _roll_etichetta(anni):
     prevent_initial_call=True,
 )
 def calcola_rolling(n_clicks, bm, cmp1, extra1, extra2,
+                    val_bm, val_cmp1, val_extra1, val_extra2,
                     finestre_spuntate, anni_liberi, dr_start, dr_end):
     if not n_clicks:
         raise PreventUpdate
@@ -4495,6 +4649,17 @@ def calcola_rolling(n_clicks, bm, cmp1, extra1, extra2,
 
     bm       = _pulisci(bm)
     confronti = [t for t in (_pulisci(cmp1), _pulisci(extra1), _pulisci(extra2)) if t]
+
+    # Valuta indicata a mano, casella per casella. Si legge prima di scartare i
+    # doppioni, cosi' resta agganciata al ticker giusto anche se una casella e'
+    # vuota; se la stessa sigla compare due volte con valute diverse vince la
+    # prima, tanto e' lo stesso titolo.
+    valute_scelte = {}
+    for testo, scelta in ((bm, val_bm), (cmp1, val_cmp1),
+                          (extra1, val_extra1), (extra2, val_extra2)):
+        t = _pulisci(testo)
+        if t and scelta:
+            valute_scelte.setdefault(t, scelta)
     # Un ticker ripetuto non aggiunge nulla: toglilo mantenendo l'ordine.
     visti, unici = set(), []
     for t in confronti:
@@ -4532,7 +4697,7 @@ def calcola_rolling(n_clicks, bm, cmp1, extra1, extra2,
     d_scarico = (d_ini - margine).strftime('%Y-%m-%d')
 
     t0 = time.time()
-    prezzi, valute, errori = _roll_scarica([bm] + confronti, d_scarico)
+    prezzi, info_val, errori = _roll_scarica([bm] + confronti, d_scarico, valute_scelte)
     durata = time.time() - t0
 
     if bm not in prezzi:
@@ -4640,17 +4805,18 @@ def calcola_rolling(n_clicks, bm, cmp1, extra1, extra2,
     fig_sum = _roll_riepilogo(stat, anni, serie, colore, bm)
 
     # ── Tabella ───────────────────────────────────────────────────────────
-    tabella = _roll_tabella(stat, anni, serie, bm)
+    tabella = _roll_tabella(stat, anni, serie, bm, info_val)
 
     # ── Riga di stato ─────────────────────────────────────────────────────
-    pezzi = [f"✅ {len(nomi)} serie in {durata:.0f}s",
-             'valute: ' + ', '.join(f'{t}={valute.get(t, "EUR")}' for t in nomi)]
+    pezzi = [f"✅ {len(nomi)} serie in {durata:.0f}s", 'tutte riportate in EUR']
     if troppo_corti:
         pezzi.append('⚠ storico insufficiente per: ' + ', '.join(troppo_corti[:6])
                      + (' …' if len(troppo_corti) > 6 else ''))
     if errori:
         pezzi.append('⚠ ' + ' · '.join(errori[:3]))
-    return fig_ret, fig_diff, fig_sum, tabella, ' | '.join(pezzi)
+    stato = html.Div([html.Div(' | '.join(pezzi)),
+                      _roll_riga_valute(info_val, nomi)])
+    return fig_ret, fig_diff, fig_sum, tabella, stato
 
 
 def _roll_riepilogo(stat, anni, serie, colore, bm):
@@ -4694,12 +4860,14 @@ def _roll_riepilogo(stat, anni, serie, colore, bm):
     return fig
 
 
-def _roll_tabella(stat, anni, serie, bm):
+def _roll_tabella(stat, anni, serie, bm, info_val=None):
     """Le stesse statistiche in numeri, una riga per asset e finestra."""
     if not stat:
         return None
+    info_val = info_val or {}
     colonne = [
-        ('Asset', 'asset'), ('Finestra', 'finestra'), ('Periodi', 'periodi'),
+        ('Asset', 'asset'), ('Valuta', 'valuta'),
+        ('Finestra', 'finestra'), ('Periodi', 'periodi'),
         (f'% Asset↑', 'pct_asset'), (f'% {bm}↑', 'pct_bm'),
         ('Δ medio se vince', 'media_su'), ('Δ medio se perde', 'media_giu'),
         ('Rend. medio asset', 'rend_asset'), (f'Rend. medio {bm}', 'rend_bm'),
@@ -4711,7 +4879,8 @@ def _roll_tabella(stat, anni, serie, bm):
             s = stat.get((a, t))
             if not s:
                 continue
-            righe.append({'asset': t, 'finestra': _roll_etichetta(a), **s})
+            righe.append({'asset': t, 'finestra': _roll_etichetta(a),
+                          'valuta': _roll_valuta_testo(info_val.get(t)), **s})
     if not righe:
         return html.Div('Nessuna statistica disponibile.',
                         style={'font-size': '12px', 'color': '#888'})
@@ -4725,6 +4894,7 @@ def _roll_tabella(stat, anni, serie, bm):
                     'border': '1px solid #e0e4ec'},
         style_cell_conditional=[
             {'if': {'column_id': 'asset'},    'textAlign': 'left', 'fontWeight': '600'},
+            {'if': {'column_id': 'valuta'},   'textAlign': 'left', 'color': '#666'},
             {'if': {'column_id': 'finestra'}, 'textAlign': 'left'},
         ],
         style_data_conditional=[
