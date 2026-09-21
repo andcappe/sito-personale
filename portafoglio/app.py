@@ -807,6 +807,10 @@ def _write_user_json(cr, op, tm, vm=None, username=None, reset_state=False, tipo
     _tipo = tipo if tipo is not None else existing.get('_tipo')
     if _tipo:
         result['_tipo'] = _tipo
+    # La marcatura delle regole di conversione si conserva come _tipo: senza,
+    # una riscrittura del file lo rimanderebbe in coda al riavvio.
+    if existing.get('_versione_prezzi'):
+        result['_versione_prezzi'] = existing['_versione_prezzi']
     _atomic_json_write(path, result)
     # La valuta qui arriva dal pkl da cui stiamo riscrivendo, che puo' essere
     # vecchio (i pkl dei dataset condivisi non ce l'hanno nemmeno). Se in questo
@@ -8281,6 +8285,10 @@ def _aggiorna_current_json(username, op, cr, tm, vm=None):
         v['prices']  = [round(float(x), 4) if pd.notna(x) else None for x in op[desc]]
         v['returns'] = [round(float(x), 6) if pd.notna(x) else None for x in cr[desc]]
         n += 1
+    if n:
+        # Prezzi rifatti da un download nuovo: il file passa alle regole attuali
+        # di conversione e al riavvio non viene piu' riscaricato per questo.
+        raw['_versione_prezzi'] = dc.VERSIONE_PREZZI
     if n and not _atomic_json_write(path, raw):
         return 0
     return n
@@ -8401,6 +8409,17 @@ def _ultima_data_utente(username):
         return None
 
 
+def _prezzi_da_riconvertire(username):
+    """True se il file dell'utente ha prezzi scritti con le regole vecchie, cioe'
+    un titolo estero salvato nella sua valuta invece che in euro. Solo lettura del
+    file, nessuna rete."""
+    try:
+        with open(_user_json_path(username)) as f:
+            return dc.prezzi_da_riconvertire(json.load(f))
+    except Exception:
+        return False
+
+
 def _prewarm_dati_utenti(giorni=5):
     """Al boot aggiorna i dati personali solo se sono davvero indietro. Serve dopo
     un deploy o un fermo prolungato: senza questo si aspetterebbe l'01:00. La
@@ -8408,17 +8427,27 @@ def _prewarm_dati_utenti(giorni=5):
     (ultimo prezzo = venerdì) non parte nessun download."""
     def _lavora():
         try:
-            vecchi = []
+            vecchi, da_convertire = [], []
             for u in _utenti_con_dati():
                 ultima = _ultima_data_utente(u)
                 if ultima is None or (pd.Timestamp.today().normalize() - ultima).days > giorni:
                     vecchi.append((u, ultima))
-            if not vecchi:
+                elif _prezzi_da_riconvertire(u):
+                    # Dati freschi ma nella valuta sbagliata: un file scritto quando
+                    # comandava la valuta scritta a mano. Si rifa' una volta sola,
+                    # poi resta marcato (vedi _aggiorna_current_json).
+                    da_convertire.append((u, ultima))
+            if not vecchi and not da_convertire:
                 print("✓ [dati utenti] tutti aggiornati — nessun download al boot")
                 return
-            print(f"⏳ [dati utenti] {len(vecchi)} utenti indietro: " +
-                  ", ".join(f"{u} ({ultima:%d/%m/%Y})" if ultima is not None else f"{u} (?)"
-                            for u, ultima in vecchi))
+            if vecchi:
+                print(f"⏳ [dati utenti] {len(vecchi)} utenti indietro: " +
+                      ", ".join(f"{u} ({ultima:%d/%m/%Y})" if ultima is not None else f"{u} (?)"
+                                for u, ultima in vecchi))
+            if da_convertire:
+                print(f"⏳ [dati utenti] {len(da_convertire)} utenti con prezzi da "
+                      f"riportare in euro: " + ", ".join(u for u, _ in da_convertire))
+            vecchi = vecchi + da_convertire
             start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
             global _DL_STATE
             with _DL_LOCK:

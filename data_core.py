@@ -311,6 +311,34 @@ def valuta_da_salvare(dichiarata, codice):
     return valuta_dichiarata(dichiarata) or 'EUR'
 
 
+# Versione delle regole con cui i prezzi sono finiti nel file dell'utente.
+# Si alza quando cambia il modo di convertire: i file scritti con le regole vecchie
+# non si possono correggere a tavolino (il prezzo giusto lo sa solo Yahoo), quindi
+# vengono riscaricati.
+#   1 = prezzi in euro convertiti con la valuta di Yahoo. Prima comandava la valuta
+#       scritta nel file: dove diceva EUR — cioe' quasi ovunque — non si convertiva
+#       niente e un titolo americano restava salvato in dollari.
+VERSIONE_PREZZI = 1
+
+
+def prezzi_da_riconvertire(raw):
+    """True se i prezzi di questo current.json vanno riscaricati per finire in euro.
+    Due condizioni: il file e' stato scritto con regole precedenti e ha almeno un
+    asset in valuta estera. Se e' tutto in euro non c'e' niente da convertire e
+    basta marcarlo. `raw` e' il file com'e' su disco, chiavi meta comprese."""
+    if not isinstance(raw, dict):
+        return False
+    try:
+        if int(raw.get('_versione_prezzi') or 0) >= VERSIONE_PREZZI:
+            return False
+    except (TypeError, ValueError):
+        pass
+    return any(isinstance(v, dict) and v.get('prices')
+               and not e_cambio(v.get('ticker') or '')
+               and valuta_piena(valuta_dichiarata(v.get('currency')))[0] != 'EUR'
+               for v in raw.values())
+
+
 def problema_valuta(ticker, dichiarata, yahoo):
     """Confronta la valuta del file con quella di Yahoo → (tipo, messaggio) o None.
     GBP e GBp sono la stessa valuta (i centesimi li gestisce la conversione)."""
