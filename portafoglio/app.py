@@ -611,6 +611,40 @@ def _introvabili_filtra(tickers, descrizione, valuta):
             [valuta[i] for i in tieni], msg)
 
 
+def _problemi_saltati(prima_t, prima_d, prima_v, dopo_t):
+    """Controllo asset: gli asset tolti dal download da _introvabili_filtra."""
+    rimasti = set(dopo_t)
+    return [_problema_introvabile(d, t, nota=' (saltato, riprovo fra qualche giorno)', valuta=v)
+            for t, d, v in zip(prima_t, prima_d, prima_v) if t not in rimasti]
+
+
+def _problema_introvabile(desc, ticker, suggerimenti=None, nota='', valuta=''):
+    """valuta: quella scritta nel file. L'asset non finisce in current.json, quindi
+    Gestisci la rilegge da qui per rimetterlo in lista con ticker e valuta giusti."""
+    msg = 'Yahoo Finance non trova questo ticker' + nota
+    if suggerimenti:
+        msg += f" — prova: {' · '.join(suggerimenti[:3])}"
+    valuta = valuta.strip() if isinstance(valuta, str) else ''
+    extra = {'valuta_file': valuta} if valuta else {}
+    return dc.problema(desc, ticker, 'introvabile', msg, **extra)
+
+
+def _problema_sostituito(desc, ticker, t_ok, curr_ok):
+    return dc.problema(desc, ticker, 'ticker_sostituito',
+                       f"Yahoo non trova {ticker}: al suo posto è stata usata la quotazione "
+                       f"{t_ok} ({curr_ok}), controlla che sia lo stesso titolo",
+                       gravita='avviso', ticker_usato=t_ok)
+
+
+def _controlla_dopo_download(username, problemi, origine, azzera=False, riscaricati=()):
+    """Aggiorna il Controllo asset dell'utente. Non fa mai fallire il download."""
+    try:
+        dc.controlla_asset(username, problemi, origine=origine, azzera=azzera,
+                           riscaricati=riscaricati, timeout=15)
+    except Exception as e:
+        print(f"⚠ Controllo asset [{username}] non riuscito: {e}", flush=True)
+
+
 _active_file_store: dict = {'filename': 'ETF.xlsx'}  # file attivo corrente
 _PENDING: dict = {}  # ticker in attesa di download da Gestisci — processati da start_refresh
 
@@ -774,6 +808,17 @@ def _write_user_json(cr, op, tm, vm=None, username=None, reset_state=False, tipo
     if _tipo:
         result['_tipo'] = _tipo
     _atomic_json_write(path, result)
+    # La valuta qui arriva dal pkl da cui stiamo riscrivendo, che puo' essere
+    # vecchio (i pkl dei dataset condivisi non ce l'hanno nemmeno). Se in questo
+    # processo Yahoo ha gia' detto la valuta di questi ticker la si allinea
+    # subito: niente rete, solo quello che sappiamo gia'.
+    try:
+        note = dc.valute_note([v['ticker'] for v in result.values()
+                               if isinstance(v, dict) and v.get('ticker')])
+        if any(note.values()):
+            dc.allinea_valute(username, yahoo=note)
+    except Exception as _e:
+        print(f"⚠ allineamento valute saltato: {_e}")
 
 def _update_user_json(checked=None, weights=None, username=None):
     path = _user_json_path(username)
@@ -970,6 +1015,8 @@ def _do_add_tickers(new_tickers, new_descr, new_valuta, start_date, cache_file):
                     merged['original_prices'] = ex_op
                     merged['close_returns']   = ex_cr
                     merged['ticker_map']      = ex_tm
+                    merged['valuta_map']      = {**ex.get('valuta_map', {}),
+                                                 **new_data.get('valuta_map', {})}
                     print(f"✓ Merge — {len(ex_op.columns)} asset totali")
             except Exception as e:
                 print(f"⚠ Merge fallito, uso solo nuovi: {e}")
@@ -1034,12 +1081,19 @@ def _do_full_update(tickers, descr, valuta, start_date, cache_file, incremental=
         _do_download(tickers, descr, valuta, start_date, cache_file=cache_file, update_buffer=True)
 
 
-def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True, username=None, tipo=None):
+def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, update_buffer=True,
+                 username=None, tipo=None, cerca_alternative=True):
     """Scarica da Yahoo Finance e salva nella cache; cache_file=None usa market_data.pkl.
     Se username è dato e update_buffer, scrive anche current.json (fonte unica).
-    tipo: imposta '_tipo' in current.json (es. 'default:CRIPTO.xlsx')."""
+    tipo: imposta '_tipo' in current.json (es. 'default:CRIPTO.xlsx').
+    cerca_alternative=False: un ticker senza dati si riprova da solo e NON si
+    sostituisce con un'altra quotazione (aggiornamento notturno: il file
+    dell'utente non si cambia di nascosto).
+    Restituisce i problemi trovati, per il Controllo asset."""
     global _DL_STATE, _DL_BUFFER
+    _prima = (list(tickers), list(descrizione), list(valuta))
     tickers, descrizione, valuta, _saltati = _introvabili_filtra(tickers, descrizione, valuta)
+    problemi = _problemi_saltati(*_prima, tickers)
     total = len(tickers)
     with _DL_LOCK:
         _DL_STATE = {'status': 'running', 'current': 0, 'total': total, 'errors': list(_saltati)}
@@ -1070,35 +1124,49 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
     except Exception:
         pass
 
-    # FX
-    fx = None
-    try:
-        fx = yf.download(['EURUSD=X', 'EURGBP=X', 'EURCHF=X'], start=start_date,
-                         group_by='ticker', **_dl_kwargs)
-    except Exception as e:
-        print(f"⚠ FX download fallito: {e}")
-
-    def _fx(name):
-        if fx is None or fx.empty:
-            return None
-        try:
-            return fx[(name, 'Close')] if isinstance(fx.columns, pd.MultiIndex) else fx['Close']
-        except Exception:
-            return None
-
-    eurusd, eurgbp, eurchf = _fx('EURUSD=X'), _fx('EURGBP=X'), _fx('EURCHF=X')
+    # Cambi: valuta di ogni ticker secondo Yahoo e cambi EUR<valuta>=X che servono
+    cambi       = dc.CambiEuro(tickers, valuta, start_date)
     all_prices  = {}
     failed_map  = {}   # {ticker: descrizione} per ticker non scaricati
     _resolved   = {}   # {descrizione: ticker_risolto} per aggiornare ticker_map
+    valuta_map  = {}   # {descrizione: valuta con cui i prezzi sono stati convertiti}
+    senza_cambio = set()
 
-    def _apply_fx(px, curr):
-        if curr == 'USD' and eurusd is not None:
-            return px / eurusd.reindex(px.index).ffill()
-        if curr == 'GBP' and eurgbp is not None:
-            return px / eurgbp.reindex(px.index).ffill()
-        if curr == 'CHF' and eurchf is not None:
-            return px / eurchf.reindex(px.index).ffill()
-        return px
+    def _in_euro(px, desc, t, curr, dichiarata):
+        """Mette in all_prices la serie in euro. Senza cambio l'asset resta fuori,
+        con un errore visibile: lasciato in valuta passerebbe per euro.
+        La valuta e' quella di Yahoo, sia per convertire sia da scrivere nel file."""
+        if px.dropna().empty:
+            raise ValueError(f"{t}: nessun prezzo")
+        px_eur, codice, errore = cambi.converti(px, t, curr)
+        if errore:
+            print(f"⚠ {errore}")
+            with _DL_LOCK:
+                _DL_STATE['errors'].append(errore)
+            senza_cambio.add(desc)
+            problemi.append(dc.problema(desc, t, 'cambio_mancante', errore))
+            return False
+        all_prices[desc] = px_eur
+        valuta_map[desc] = dc.valuta_da_salvare(dichiarata, codice)
+        return True
+
+    def _ripiega(t, desc, curr):
+        """Ticker senza dati. Di giorno si sceglie la quotazione con più storico
+        (ticker + valuta); con cerca_alternative=False si riprova solo lui."""
+        if cerca_alternative:
+            t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
+        else:
+            t_ok, curr_ok, px_ok = _riprova_ticker(t, start_date, _dl_kwargs, curr)
+        if not t_ok or px_ok is None:
+            failed_map[t] = desc
+            return
+        if not _in_euro(px_ok, desc, t_ok, curr_ok, curr) or t_ok == t:
+            return
+        _resolved[desc] = t_ok
+        with _DL_LOCK:
+            _DL_STATE.setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
+        problemi.append(_problema_sostituito(desc, t, t_ok, curr_ok))
+        print(f"✅ Auto-corretto: {t} → {t_ok} ({curr_ok})")
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
         bt = tickers[i:i + DOWNLOAD_BATCH_SIZE]
@@ -1113,33 +1181,14 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
                 try:
                     px = (raw[(t, 'Close')].copy() if isinstance(raw.columns, pd.MultiIndex)
                           else raw['Close'].copy())
-                    px = _apply_fx(px.ffill(), curr)
-                    all_prices[desc] = px
+                    _in_euro(px.ffill(), desc, t, curr, curr)
                 except Exception:
-                    # Nessun dato: scegli la quotazione con più storico (ticker + valuta)
-                    t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
-                    if t_ok and px_ok is not None:
-                        px_ok = _apply_fx(px_ok, curr_ok)
-                        all_prices[desc] = px_ok
-                        _resolved[desc]  = t_ok
-                        with _DL_LOCK:
-                            _DL_STATE.setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
-                        print(f"✅ Auto-corretto: {t} → {t_ok} ({curr_ok})")
-                    else:
-                        failed_map[t] = desc
+                    _ripiega(t, desc, curr)
         except Exception:
-            # Batch fallito (es. HTTP 404) → riprova ogni ticker cercando la miglior quotazione
+            # Batch fallito (es. HTTP 404) → riprova ogni ticker rimasto senza dati
             for j2, t in enumerate(bt):
-                desc, curr = bd[j2], bv[j2]
-                t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
-                if t_ok and px_ok is not None:
-                    all_prices[desc] = _apply_fx(px_ok, curr_ok)
-                    _resolved[desc]  = t_ok
-                    with _DL_LOCK:
-                        _DL_STATE.setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
-                    print(f"✅ Auto-corretto: {t} → {t_ok} ({curr_ok})")
-                else:
-                    failed_map[t] = desc
+                if bd[j2] not in all_prices and bd[j2] not in senza_cambio:
+                    _ripiega(t, bd[j2], bv[j2])
         _introvabili_aggiorna({tk: tk in failed_map for tk in bt})
         with _DL_LOCK:
             _DL_STATE['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
@@ -1157,12 +1206,15 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
                 _DL_STATE['errors'].append(f"{t}: non trovato su Yahoo Finance")
         with _DL_LOCK:
             _DL_STATE['suggestions'] = suggestions
+        nota = '' if cerca_alternative else " (restano i prezzi dell'ultimo aggiornamento)"
+        problemi.extend(_problema_introvabile(d, t, suggestions.get(t), nota)
+                        for t, d in failed_map.items())
 
     if not all_prices:
         with _DL_LOCK:
             _DL_STATE['status'] = 'error'
         print("❌ Download fallito: nessun dato")
-        return
+        return problemi
 
     original_prices = pd.DataFrame(all_prices)
     original_prices.index = pd.to_datetime(original_prices.index)
@@ -1179,6 +1231,7 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
         'ticker_map':      ticker_map,
         'original_prices': original_prices,
         'close_returns':   close_returns,
+        'valuta_map':      valuta_map,
     }
     target_pkl = cache_file or _MARKET_DATA_FILE
     try:
@@ -1187,21 +1240,25 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
     except Exception as e:
         print(f"⚠ Salvataggio su disco fallito: {e}")
 
+    # Fonte unica: current.json si scrive PRIMA di dire 'done', così il polling
+    # legge già il file nuovo e il Controllo asset lo ha già guardato.
+    if username and update_buffer:
+        try:
+            _write_user_json(close_returns, original_prices, ticker_map, valuta_map,
+                             username=username, reset_state=True, tipo=tipo)
+        except Exception as e:
+            print(f"⚠ _do_download current.json fallito: {e}", flush=True)
+        _controlla_dopo_download(username, problemi, 'download dati', azzera=True)
     with _DL_LOCK:
         if update_buffer:
             _DL_BUFFER.update(data)
             _DL_STATE['status'] = 'done'
         _DL_STATE['current'] = total
-    # Fonte unica: scrivi current.json per l'utente (così il polling lo legge)
-    if username and update_buffer:
-        try:
-            _write_user_json(close_returns, original_prices, ticker_map,
-                             username=username, reset_state=True, tipo=tipo)
-        except Exception as e:
-            print(f"⚠ _do_download current.json fallito: {e}", flush=True)
+    return problemi
 
 
-def _do_download_client(tickers, descrizione, valuta, start_date, username='anon', pesi_p1=None):
+def _do_download_client(tickers, descrizione, valuta, start_date, username='anon', pesi_p1=None,
+                        problemi_file=None):
     """Come `_do_download_client_impl`, ma non lascia mai lo stato su 'running'.
 
     Il polling mostra la barra di avanzamento finché legge `'running'`, e nessuno
@@ -1212,7 +1269,7 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
     """
     try:
         _do_download_client_impl(tickers, descrizione, valuta, start_date,
-                                 username, pesi_p1)
+                                 username, pesi_p1, problemi_file)
     except Exception as e:
         import traceback
         print(f"❌ Download cliente [{username}] interrotto: {e}")
@@ -1226,9 +1283,14 @@ def _do_download_client(tickers, descrizione, valuta, start_date, username='anon
                     "Il download si è interrotto prima di finire.")
 
 
-def _do_download_client_impl(tickers, descrizione, valuta, start_date, username='anon', pesi_p1=None):
-    """Download per file cliente: dati isolati in _CL_BUFFERS[username]."""
+def _do_download_client_impl(tickers, descrizione, valuta, start_date, username='anon', pesi_p1=None,
+                             problemi_file=None):
+    """Download per file cliente: dati isolati in _CL_BUFFERS[username].
+    problemi_file: righe del file scartate prima del download (Controllo asset)."""
+    _prima = (list(tickers), list(descrizione), list(valuta))
+    valute_file = dict(zip(descrizione, valuta))   # anche degli asset non scaricati (Gestisci)
     tickers, descrizione, valuta, _saltati = _introvabili_filtra(tickers, descrizione, valuta)
+    problemi = list(problemi_file or []) + _problemi_saltati(*_prima, tickers)
     total = len(tickers)
     with _CL_LOCK:
         _CL_STATES[username]  = {'status': 'running', 'current': 0, 'total': total,
@@ -1256,34 +1318,14 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
     except Exception:
         pass
 
-    # Stessa rete di sicurezza del ciclo dei titoli qui sotto e di
-    # `_do_gestisci_download`: era l'unica chiamata di rete senza timeout, e se
-    # Yahoo non rispondeva bloccava il thread PRIMA del primo titolo — barra
-    # ferma a 0 all'infinito, nessun errore, niente.
-    _fx_res = [None]
-    def _dl_fx():
-        try:
-            _fx_res[0] = yf.download(['EURUSD=X', 'EURGBP=X', 'EURCHF=X'],
-                                     start=start_date, group_by='ticker', **_dl_kwargs)
-        except Exception as e:
-            print(f"⚠ FX download cliente fallito: {e}")
-    _fx_t = threading.Thread(target=_dl_fx, daemon=True)
-    _fx_t.start()
-    _fx_t.join(timeout=30)
-    if _fx_t.is_alive():
-        print(f"⚠ FX cliente [{username}]: timeout 30s — proseguo senza cambi")
-    fx = _fx_res[0]
-
-    def _fx(name):
-        if fx is None or fx.empty:
-            return None
-        try:
-            return fx[(name, 'Close')] if isinstance(fx.columns, pd.MultiIndex) else fx['Close']
-        except Exception:
-            return None
-
-    eurusd, eurgbp, eurchf = _fx('EURUSD=X'), _fx('EURGBP=X'), _fx('EURCHF=X')
+    # Cambi (valuta secondo Yahoo + EUR<valuta>=X): le chiamate di rete hanno un
+    # timeout dentro CambiEuro, come il ciclo dei titoli qui sotto. Senza, se Yahoo
+    # non rispondeva, il thread si bloccava PRIMA del primo titolo con la barra a 0.
+    cambi      = dc.CambiEuro(tickers, valuta, start_date)
     all_prices = {}
+    valuta_map = {}
+    esclusi_fx = set()   # senza cambio: NON sono ticker introvabili
+    non_trovati = {}     # {descrizione: ticker} senza nessun prezzo su Yahoo
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
         bt = tickers[i:i + DOWNLOAD_BATCH_SIZE]
@@ -1303,6 +1345,9 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
             with _CL_LOCK:
                 _CL_STATES[username]['errors'].append(
                     f"Batch {i//DOWNLOAD_BATCH_SIZE+1} ({','.join(bt)}): timeout o risposta vuota")
+            problemi.extend(dc.problema(d, t, 'non_scaricato',
+                                        "Yahoo non ha risposto in tempo: riprova a caricare il file")
+                            for t, d in zip(bt, bd))
         else:
             raw = raw_res[0]
             for j, t in enumerate(bt):
@@ -1310,24 +1355,47 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
                 try:
                     px = (raw[(t, 'Close')].copy() if isinstance(raw.columns, pd.MultiIndex)
                           else raw['Close'].copy())
-                    px = px.ffill()
-                    if curr == 'USD' and eurusd is not None:
-                        px = px / eurusd.reindex(px.index).ffill()
-                    elif curr == 'GBP' and eurgbp is not None:
-                        px = px / eurgbp.reindex(px.index).ffill()
-                    elif curr == 'CHF' and eurchf is not None:
-                        px = px / eurchf.reindex(px.index).ffill()
-                    all_prices[desc] = px
+                    if px.dropna().empty:
+                        non_trovati[desc] = t
+                        continue
+                    px_eur, codice, errore = cambi.converti(px.ffill(), t, curr)
+                    if errore:
+                        esclusi_fx.add(desc)
+                        with _CL_LOCK:
+                            _CL_STATES[username]['errors'].append(errore)
+                        problemi.append(dc.problema(desc, t, 'cambio_mancante', errore))
+                    else:
+                        all_prices[desc] = px_eur
+                        # la valuta di Yahoo: quella con cui si converte e' anche
+                        # quella che finisce nel file
+                        valuta_map[desc] = dc.valuta_da_salvare(curr, codice)
+                except KeyError:
+                    non_trovati[desc] = t
                 except Exception as e2:
                     with _CL_LOCK:
                         _CL_STATES[username]['errors'].append(f"{t}: {e2}")
+                    problemi.append(dc.problema(desc, t, 'non_scaricato', f"Errore nel download: {e2}"))
             # Yahoo ha risposto: ora sappiamo davvero chi c'e' e chi no.
-            _introvabili_aggiorna({tk: bd[k] not in all_prices for k, tk in enumerate(bt)})
+            _introvabili_aggiorna({tk: bd[k] not in all_prices and bd[k] not in esclusi_fx
+                                   for k, tk in enumerate(bt)})
         with _CL_LOCK:
             _CL_STATES[username]['current'] = min(i + DOWNLOAD_BATCH_SIZE, total)
         time.sleep(0.3)
 
+    if non_trovati:
+        sug = {}
+        for desc, t in non_trovati.items():
+            s_t = _suggest_ticker(t) if len(sug) < 6 else []
+            if s_t:
+                sug[t] = s_t
+            problemi.append(_problema_introvabile(desc, t, s_t, valuta=valute_file.get(desc, '')))
+        with _CL_LOCK:
+            st = _CL_STATES[username]
+            st['errors'].extend(f"{t}: non trovato su Yahoo Finance" for t in non_trovati.values())
+            st['suggestions'] = {**st.get('suggestions', {}), **sug}
+
     if not all_prices:
+        _controlla_dopo_download(username, problemi, 'caricamento file', azzera=True)
         with _CL_LOCK:
             _CL_STATES[username]['status'] = 'error'
         print(f"❌ Download cliente [{username}] fallito: nessun dato")
@@ -1341,7 +1409,6 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
     ticker_map      = {descrizione[i]: tickers[i] for i in range(len(tickers))}
     saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
 
-    valuta_map = {descrizione[i]: valuta[i] for i in range(len(tickers))}
     with _CL_LOCK:
         _CL_BUFFERS[username].update({
             'date':            datetime.now().strftime('%Y-%m-%d'),
@@ -1350,6 +1417,7 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
             'original_prices': original_prices,
             'close_returns':   close_returns,
             'valuta_map':      valuta_map,
+            'valuta_file':     valute_file,
         })
         _CL_STATES[username]['current'] = total
     # Scrivi JSON e pesi P1 PRIMA di segnalare 'done' al poll
@@ -1366,6 +1434,7 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
         'saved_at':        saved_at,
         '_source':         'user_file',
     })
+    _controlla_dopo_download(username, problemi, 'caricamento file', azzera=True)
     with _CL_LOCK:
         _CL_STATES[username]['status'] = 'done'
     # Caricare un file ticker da zero → file di lavoro Personale (persistito).
@@ -1373,12 +1442,19 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
     print(f"✓ Download cliente [{username}]: {len(all_prices)} asset isolati")
 
 
-def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, username, filename, all_descr=None, persist_personale=False):
+def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, username, filename, all_descr=None,
+                          persist_personale=False, valute_file=None, azzera_controllo=False, problemi_extra=None):
     """Scarica nuovi ticker da Gestisci, merge con i dati correnti (_DL_BUFFER), salva pkl utente.
-    all_descr: lista completa delle descrizioni desiderate — filtra il merged result a questi soli."""
+    all_descr: lista completa delle descrizioni desiderate — filtra il merged result a questi soli.
+    valute_file: {descrizione: valuta} di tutte le righe di Gestisci — comandano anche sugli
+    asset non riscaricati. azzera_controllo: la lista è stata riscritta, i vecchi problemi
+    di download nel Controllo asset non valgono più. problemi_extra: righe della lista
+    non scaricate apposta (ticker già introvabili), da tenere nel Controllo asset."""
     import shutil as _shutil
+    _prima = (list(new_tickers), list(new_descr), list(new_valuta))
     new_tickers, new_descr, new_valuta, _saltati = _introvabili_filtra(
         new_tickers, new_descr, new_valuta)
+    problemi = list(problemi_extra or []) + _problemi_saltati(*_prima, new_tickers)
     total    = len(new_tickers)
     user_pkl = SESSIONS_DIR / f'market_data_{Path(filename).stem}_user_{username}.pkl'
 
@@ -1412,26 +1488,31 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     except Exception:
         pass
 
-    _needs_fx = any(v.upper() not in ('EUR', '', 'NAN') for v in new_valuta if v)
-    _fx_res   = [None]
+    # Cambi: valuta di ogni ticker secondo Yahoo e cambi EUR<valuta>=X che servono
+    cambi = dc.CambiEuro(new_tickers, new_valuta, start_date)
 
-    def _dl_fx():
-        try:
-            _fx_res[0] = yf.download(['EURUSD=X', 'EURGBP=X', 'EURCHF=X'], start=start_date,
-                                     group_by='ticker', **_dl_kwargs)
-        except Exception as e:
-            print(f"⚠ FX gestisci fallito: {e}")
-
-    # Avvia download FX in parallelo con i batch ticker
-    _fx_thread = None
-    if _needs_fx:
-        _fx_thread = threading.Thread(target=_dl_fx, daemon=True)
-        _fx_thread.start()
-
-    # Fase 1: scarica i prezzi grezzi di tutti i batch (FX scarica in parallelo)
     all_prices       = {}
     _gestisci_failed = []   # ticker falliti → usati per suggerimenti
     _resolved_g = {}        # {descrizione: ticker_risolto} per aggiornare ticker_map
+    new_vm      = {}        # {descrizione: valuta con cui i prezzi sono stati convertiti}
+
+    def _in_euro(px, desc, t, curr, dichiarata):
+        """Serie in euro in all_prices; senza cambio l'asset resta fuori con un errore.
+        La valuta e' quella di Yahoo, sia per convertire sia da scrivere nel file."""
+        if px.dropna().empty:
+            raise ValueError(f"{t}: nessun prezzo")
+        px_eur, codice, errore = cambi.converti(px, t, curr)
+        if errore:
+            print(f"⚠ {errore}")
+            with _DL_LOCK:
+                _DL_STATE['errors'].append(errore)
+            with _CL_LOCK:
+                _CL_STATES.setdefault(username, {}).setdefault('errors', []).append(errore)
+            problemi.append(dc.problema(desc, t, 'cambio_mancante', errore))
+            return False
+        all_prices[desc] = px_eur
+        new_vm[desc]     = dc.valuta_da_salvare(dichiarata, codice)
+        return True
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
         bt = new_tickers[i:i + DOWNLOAD_BATCH_SIZE]
@@ -1441,43 +1522,21 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
             raw = yf.download(bt, start=start_date, group_by='ticker', **_dl_kwargs)
             if raw.empty:
                 raise ValueError("risposta vuota")
-            # Al primo batch: FX thread dovrebbe essere finito in parallelo — join con timeout
-            if i == 0 and _fx_thread is not None:
-                _fx_thread.join(timeout=30)
-            _eurusd = _fx_res[0]
-            def _get_fx(name):
-                if _eurusd is None or _eurusd.empty: return None
-                try:
-                    return _eurusd[(name, 'Close')] if isinstance(_eurusd.columns, pd.MultiIndex) else _eurusd['Close']
-                except Exception: return None
-            eurusd = _get_fx('EURUSD=X')
-            eurgbp = _get_fx('EURGBP=X')
-            eurchf = _get_fx('EURCHF=X')
             for j, t in enumerate(bt):
                 desc, curr = bd[j], bv[j]
                 try:
                     px = (raw[(t, 'Close')].copy() if isinstance(raw.columns, pd.MultiIndex)
                           else raw['Close'].copy())
-                    px = px.ffill()
-                    if curr == 'USD' and eurusd is not None:
-                        px = px / eurusd.reindex(px.index).ffill()
-                    elif curr == 'GBP' and eurgbp is not None:
-                        px = px / eurgbp.reindex(px.index).ffill()
-                    elif curr == 'CHF' and eurchf is not None:
-                        px = px / eurchf.reindex(px.index).ffill()
-                    all_prices[desc] = px
+                    _in_euro(px.ffill(), desc, t, curr, curr)
                 except Exception:
                     # Nessun dato: scegli la quotazione con più storico (ticker + valuta)
                     t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
                     if t_ok and px_ok is not None:
-                        if curr_ok == 'USD' and eurusd is not None:
-                            px_ok = px_ok / eurusd.reindex(px_ok.index).ffill()
-                        elif curr_ok == 'GBP' and eurgbp is not None:
-                            px_ok = px_ok / eurgbp.reindex(px_ok.index).ffill()
-                        elif curr_ok == 'CHF' and eurchf is not None:
-                            px_ok = px_ok / eurchf.reindex(px_ok.index).ffill()
-                        all_prices[desc] = px_ok
+                        if not _in_euro(px_ok, desc, t_ok, curr_ok, curr):
+                            continue
                         _resolved_g[desc] = t_ok
+                        if t_ok != t:
+                            problemi.append(_problema_sostituito(desc, t, t_ok, curr_ok))
                         with _DL_LOCK:
                             _DL_STATE.setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
                         with _CL_LOCK:
@@ -1487,29 +1546,15 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                         _gestisci_failed.append(t)
         except Exception:
             # Batch fallito (es. HTTP 404 su tutti) → riprova ciascun ticker individualmente
-            if i == 0 and _fx_thread is not None:
-                _fx_thread.join(timeout=30)
-            _eurusd = _fx_res[0]
-            def _get_fx2(name):
-                if _eurusd is None or _eurusd.empty: return None
-                try:
-                    return _eurusd[(name, 'Close')] if isinstance(_eurusd.columns, pd.MultiIndex) else _eurusd['Close']
-                except Exception: return None
-            eurusd2 = _get_fx2('EURUSD=X')
-            eurgbp2 = _get_fx2('EURGBP=X')
-            eurchf2 = _get_fx2('EURCHF=X')
             for j, t in enumerate(bt):
                 desc, curr = bd[j], bv[j]
                 t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
                 if t_ok and px_ok is not None:
-                    if curr_ok == 'USD' and eurusd2 is not None:
-                        px_ok = px_ok / eurusd2.reindex(px_ok.index).ffill()
-                    elif curr_ok == 'GBP' and eurgbp2 is not None:
-                        px_ok = px_ok / eurgbp2.reindex(px_ok.index).ffill()
-                    elif curr_ok == 'CHF' and eurchf2 is not None:
-                        px_ok = px_ok / eurchf2.reindex(px_ok.index).ffill()
-                    all_prices[desc] = px_ok
+                    if not _in_euro(px_ok, desc, t_ok, curr_ok, curr):
+                        continue
                     _resolved_g[desc] = t_ok
+                    if t_ok != t:
+                        problemi.append(_problema_sostituito(desc, t, t_ok, curr_ok))
                     with _DL_LOCK:
                         _DL_STATE.setdefault('auto_fixed', {})[t] = f"{t_ok} ({curr_ok})"
                     with _CL_LOCK:
@@ -1538,6 +1583,10 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
             with _CL_LOCK:
                 st = _CL_STATES.setdefault(username, {})
                 st['suggestions'] = {**st.get('suggestions', {}), **sug}
+        _descr_di = dict(zip(new_tickers, new_descr))
+        problemi.extend(_problema_introvabile(_descr_di.get(t, t), t, sug.get(t),
+                                              valuta=(valute_file or {}).get(_descr_di.get(t, t), ''))
+                        for t in _gestisci_failed)
 
     if not all_prices:
         with _DL_LOCK:
@@ -1545,6 +1594,8 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
         with _CL_LOCK:
             _CL_STATES.setdefault(username, {})['status'] = 'error'
         print(f"❌ Gestisci [{username}]: nessun dato scaricato")
+        _controlla_dopo_download(username, problemi, 'Gestisci', azzera=azzera_controllo,
+                                 riscaricati=_prima[1])
         return
 
     new_prices = pd.DataFrame(all_prices)
@@ -1556,11 +1607,12 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                   for i in range(len(new_tickers))}
     merged_op  = new_prices.copy()
     merged_tm  = dict(new_tm)
+    merged_vm  = dict(new_vm)
 
     # Merge con i dati esistenti. FONTE PRIMARIA: current.json (sempre la lista
     # corrente completa) → l'accodo non perde mai gli asset esistenti.
     # Fallback: pkl utente, poi _DL_BUFFER.
-    ex_op, ex_tm = None, {}
+    ex_op, ex_tm, ex_vm = None, {}, {}
     try:
         _cur = json.load(open(_user_json_path(username)))
         _cols = {}
@@ -1568,11 +1620,12 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
             if isinstance(_v, dict) and _v.get('prices') and _v.get('dates'):
                 _cols[_a] = pd.Series(_v['prices'], index=pd.to_datetime(_v['dates']))
                 ex_tm[_a] = _v.get('ticker') or _a
+                ex_vm[_a] = _v.get('currency') or 'EUR'
         if _cols:
             ex_op = pd.DataFrame(_cols).sort_index()
             print(f"✓ Merge gestisci da current.json — {len(ex_op.columns)} asset esistenti")
     except Exception as _e:
-        ex_op, ex_tm = None, {}
+        ex_op, ex_tm, ex_vm = None, {}, {}
 
     if (ex_op is None or ex_op.empty) and user_pkl.exists():
         try:
@@ -1580,15 +1633,17 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                 ex = pickle.load(f)
             ex_op = ex.get('original_prices')
             ex_tm = dict(ex.get('ticker_map', {}))
+            ex_vm = dict(ex.get('valuta_map', {}))
             print(f"✓ Merge gestisci da pkl utente")
         except Exception as e:
             print(f"⚠ Merge gestisci pkl fallito: {e}")
-            ex_op, ex_tm = None, {}
+            ex_op, ex_tm, ex_vm = None, {}, {}
 
     if ex_op is None or ex_op.empty:
         with _DL_LOCK:
             ex_op = _DL_BUFFER.get('original_prices')
             ex_tm = dict(_DL_BUFFER.get('ticker_map', {}))
+            ex_vm = dict(_DL_BUFFER.get('valuta_map', {}))
         if ex_op is not None and not ex_op.empty:
             print(f"✓ Merge gestisci da _DL_BUFFER — {len(ex_op.columns)} asset esistenti")
 
@@ -1599,7 +1654,16 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
         merged_op = ex_op
         ex_tm.update(new_tm)
         merged_tm = ex_tm
+        merged_vm = {**ex_vm, **new_vm}
         print(f"✓ Merge gestisci — {len(merged_op.columns)} asset pre-filtro")
+
+    # Le valute scritte in Gestisci valgono solo per gli asset non riscaricati:
+    # per quelli appena scaricati comanda la valuta con cui sono stati convertiti
+    # (quella di Yahoo), altrimenti il file tornerebbe a dire 'EUR' su un titolo
+    # in dollari subito dopo averlo convertito dai dollari.
+    for _d, _v in (valute_file or {}).items():
+        if _d not in new_vm and dc.valuta_dichiarata(_v):
+            merged_vm[_d] = dc.valuta_dichiarata(_v)
 
     # Filtra: tieni solo le descrizioni che l'utente vuole (all_descr)
     if all_descr is not None:
@@ -1607,6 +1671,7 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
         keep = [c for c in merged_op.columns if c in want]
         merged_op = merged_op[keep]
         merged_tm = {k: v for k, v in merged_tm.items() if k in want}
+        merged_vm = {k: v for k, v in merged_vm.items() if k in want}
         print(f"✓ Filtro gestisci — {len(merged_op.columns)} asset finali")
 
     merged_cr   = merged_op.pct_change(fill_method=None)
@@ -1617,13 +1682,17 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
         'ticker_map':      merged_tm,
         'original_prices': merged_op,
         'close_returns':   merged_cr,
+        'valuta_map':      merged_vm,
     }
     _atomic_pkl_write(user_pkl, merged_data)
+    # current.json e Controllo asset PRIMA di dire 'done': il polling legge il file nuovo
+    _write_user_json(merged_cr, merged_op, merged_tm, merged_vm, username=username)
+    _controlla_dopo_download(username, problemi, 'Gestisci', azzera=azzera_controllo,
+                             riscaricati=_prima[1])
     with _DL_LOCK:
         _DL_BUFFER.update(merged_data)
         _DL_STATE['status']  = 'done'
         _DL_STATE['current'] = total
-    _write_user_json(merged_cr, merged_op, merged_tm, username=username)
     # Stato client 'done': il polling (su file personale) legge current.json aggiornato
     with _CL_LOCK:
         _CL_STATES.setdefault(username, {}).update({'status': 'done', 'current': total})
@@ -1684,6 +1753,69 @@ def _parse_weight_col(series):
     return None
 
 
+_COL_TICKER = ('TICKER', 'SIMBOLO', 'SYMBOL', 'ISIN', 'CODICE', 'CODE', 'TITOLO', 'CUSIP')
+_COL_DESCR  = ('DESCRIZIONE', 'DESCRIPTION', 'NOME', 'NAME', 'DENOMINAZIONE', 'ASSET')
+_COL_VALUTA = ('VALUTA', 'CURRENCY', 'DIVISA', 'CCY')
+
+
+def _testo_cella(x):
+    t = '' if x is None else str(x).strip()
+    return '' if t.lower() in ('nan', 'none', 'nat') else t
+
+
+def _sembra_valuta(serie):
+    """Una colonna presa per posizione e' la valuta solo se contiene codici (USD, GBp)."""
+    v = [t for t in (_testo_cella(x) for x in serie) if t]
+    return bool(v) and sum(bool(_re_isin.fullmatch(r'[A-Za-z]{3,4}', t)) for t in v) >= len(v) / 2
+
+
+def _leggi_lista_asset(df, esclusa=None):
+    """Righe di un file lista asset → (righe, problemi), righe = [(indice, ticker,
+    descrizione, valuta)].
+
+    Le colonne si cercano per intestazione (TICKER/SIMBOLO, DESCRIZIONE/NOME,
+    VALUTA/CURRENCY); dove l'intestazione manca vale la posizione classica
+    (1ª ticker, 2ª descrizione, 3ª valuta). La valuta scritta serve solo come
+    ripiego: quella buona la dice Yahoo al download, ed e' quella che poi resta.
+    Righe senza ticker e descrizioni ripetute non si caricano e diventano problemi.
+    esclusa: colonna da non prendere per posizione (i pesi)."""
+    cols = list(df.columns)
+    nomi = {}
+    for c in cols:
+        nomi.setdefault(str(c).strip().upper(), c)
+    def _cerca(chiavi):
+        return next((nomi[k] for k in chiavi if k in nomi), None)
+    c_t, c_d, c_v = _cerca(_COL_TICKER), _cerca(_COL_DESCR), _cerca(_COL_VALUTA)
+    if c_t is None:
+        c_t = cols[0]
+    usate = {c for c in (c_t, c_d, c_v, esclusa) if c is not None}
+    if c_d is None and len(cols) > 1 and cols[1] not in usate:
+        c_d = cols[1]
+        usate.add(c_d)
+    if c_v is None and len(cols) > 2 and cols[2] not in usate and _sembra_valuta(df[cols[2]]):
+        c_v = cols[2]
+
+    righe, problemi, viste = [], [], {}
+    for idx, r in df.iterrows():
+        t = _testo_cella(r[c_t])
+        d = _testo_cella(r[c_d]) if c_d is not None else ''
+        v = dc.valuta_dichiarata(_testo_cella(r[c_v])) if c_v is not None else ''
+        if not t:
+            if d:
+                problemi.append(dc.problema(d, '', 'ticker_mancante',
+                                            'Riga del file senza ticker: non caricata'))
+            continue
+        d = d or t
+        if d in viste:
+            problemi.append(dc.problema(
+                d, t, 'descrizione_duplicata',
+                f"Descrizione ripetuta nel file: caricata la riga con {viste[d]}, scartata quella con {t}"))
+            continue
+        viste[d] = t
+        righe.append((idx, t, d, v))
+    return righe, problemi
+
+
 def _detect_ticker_and_weight_cols(df):
     """Restituisce (ticker_col, weight_col, weight_series)."""
     _TICKER_H = {'ticker', 'isin', 'simbolo', 'symbol', 'codice', 'code', 'titolo', 'cusip'}
@@ -1736,16 +1868,26 @@ def _yahoo_currency(sym, fallback='EUR'):
     """Valuta reale di quotazione di un simbolo Yahoo (via fast_info), con fallback
     sul suffisso di borsa. Es. BTCW.SW→CHF, BTCW.L→USD, AAPL→USD.
     Serve perché yf.Search NON restituisce la valuta in modo affidabile."""
-    try:
-        c = yf.Ticker(sym).fast_info.get('currency')
-        if c:
-            return str(c).upper()
-    except Exception:
-        pass
+    # Codice esatto di Yahoo: 'GBp' (penny) in maiuscolo diventerebbe sterline.
+    c = dc.valuta_yahoo(sym)
+    if c:
+        return c
     for sfx, ccy in _SUFFIX_CCY.items():
         if sym.upper().endswith(sfx):
             return ccy
     return 'USD' if '.' not in sym else fallback
+
+
+def _riprova_ticker(ticker, start_date, dl_kwargs, currency='EUR'):
+    """Riscarica un solo ticker senza cercarne altri. Stesso risultato di
+    _find_working_ticker: (ticker, valuta, serie) oppure (None, None, None)."""
+    try:
+        px = dc._colonna_close(yf.download(ticker, start=start_date, **dl_kwargs), ticker)
+    except Exception:
+        return None, None, None
+    if not isinstance(px, pd.Series) or px.dropna().shape[0] <= 10:
+        return None, None, None
+    return ticker, currency, px.ffill()
 
 
 def _find_working_ticker(ticker, start_date, dl_kwargs, currency='EUR'):
@@ -2659,11 +2801,9 @@ _ROLL_VALUTE = ['EUR', 'USD', 'GBP', 'GBp', 'CHF', 'JPY', 'CAD', 'AUD', 'NZD',
                 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'HKD', 'SGD', 'CNY',
                 'KRW', 'INR', 'BRL', 'MXN', 'ZAR', 'TRY', 'ILS']
 
-# Alcune piazze quotano in centesimi: Londra in penny ('GBp'), Tel Aviv in agorot
-# ('ILA'), Johannesburg in cent ('ZAc'). Il prezzo va diviso per 100 e poi cambiato
-# con la valuta piena. Il codice si confronta COSI' COM'E', senza maiuscole:
-# 'GBp'.upper() diventa 'GBP' e i penny sparirebbero dentro le sterline.
-_ROLL_CENTESIMI = {'GBp': 'GBP', 'GBX': 'GBP', 'ILA': 'ILS', 'ZAc': 'ZAR'}
+# Piazze che quotano in centesimi (penny, agorot, cent, cent di dollaro): la
+# tabella sta in data_core, condivisa con i download del Portafoglio.
+_ROLL_CENTESIMI = dc.CENTESIMI
 
 
 def _roll_opzioni_valuta():
@@ -3101,6 +3241,17 @@ _EDITOR_SHOWN  = {
     'zIndex': '3000', 'justifyContent': 'center', 'alignItems': 'center',
 }
 
+# Pulsante del Controllo asset: verde se tutto a posto, giallo con avvisi, rosso con errori
+_CTRL_BTN = {'font-size': '11px', 'padding': '5px 12px', 'border-radius': '4px',
+             'cursor': 'pointer', 'margin-right': '4px', 'background': '#f0f4fb',
+             'border': '1px solid #c0d0e8', 'color': '#1a3a5c'}
+_CTRL_BTN_OK  = {**_CTRL_BTN, 'background': '#eafaf1', 'border': '1px solid #a5d6a7',
+                 'color': '#1b5e20'}
+_CTRL_BTN_AVV = {**_CTRL_BTN, 'background': '#fff8e1', 'border': '1px solid #ffd54f',
+                 'color': '#8d6e00'}
+_CTRL_BTN_ERR = {**_CTRL_BTN, 'background': '#fdecea', 'border': '1px solid #e57373',
+                 'color': '#b71c1c', 'font-weight': 'bold'}
+
 _FILL_LOADING = {
     'height': '100%', 'width': '0%',
     'background': 'linear-gradient(90deg,#007755,#00aa77)',
@@ -3225,6 +3376,10 @@ app.layout = html.Div([
                            'border-radius': '4px', 'cursor': 'pointer',
                            'background': '#f0f4fb', 'border': '1px solid #c0d0e8',
                            'color': '#1a3a5c', 'margin-right': '4px'}),
+        html.Button('🔎 Controllo asset', id='ctrl-asset-btn', n_clicks=0,
+                    title='Asset che Yahoo non trova o con la valuta sbagliata nel file',
+                    style=_CTRL_BTN),
+        dcc.Store(id='ctrl-asset-rev', data=0),
         html.Div(id='download-status', style={'font-size': '11px', 'margin-right': '8px'}),
     ], style={'display': 'flex', 'align-items': 'center',
               'font-size': '10px', 'position': 'relative',
@@ -3354,6 +3509,66 @@ app.layout = html.Div([
         ], style={'background': 'white', 'border-radius': '10px', 'padding': '20px 24px',
                   'width': '460px', 'box-shadow': '0 4px 24px rgba(0,0,0,0.18)',
                   'position': 'relative'}),
+    ]),
+
+    # ── Modal Controllo asset ─────────────────────────────────────────────────
+    html.Div(id='ctrl-asset-overlay', style=_EDITOR_HIDDEN, children=[
+        html.Div(style={
+            'background': 'white', 'borderRadius': '8px', 'padding': '20px',
+            'width': '920px', 'maxWidth': '94vw', 'maxHeight': '86vh', 'overflowY': 'auto',
+            'boxShadow': '0 4px 24px rgba(0,0,0,0.35)',
+        }, children=[
+            html.Div([
+                html.H4('🔎 Controllo asset',
+                        style={'margin': 0, 'fontSize': '14px', 'fontWeight': '700'}),
+                html.Button('✕', id='ctrl-asset-close', n_clicks=0,
+                            style={'background': 'none', 'border': 'none', 'fontSize': '20px',
+                                   'cursor': 'pointer', 'color': '#666', 'lineHeight': 1}),
+            ], style={'display': 'flex', 'justifyContent': 'space-between',
+                      'alignItems': 'center', 'marginBottom': '8px'}),
+            html.Div("Asset che Yahoo Finance non trova, sostituiti con un'altra quotazione "
+                     "o fermi da giorni. La valuta di ogni asset la rileva Yahoo: i prezzi "
+                     "sono convertiti in euro con quella, e con quella viene corretta da sola "
+                     "la valuta scritta nel file quando non corrisponde.",
+                     style={'fontSize': '11px', 'color': '#555', 'marginBottom': '10px'}),
+            dcc.Loading(type='circle', children=[
+                html.Div(id='ctrl-asset-info',
+                         style={'fontSize': '12px', 'fontWeight': '600', 'marginBottom': '8px'}),
+                dash_table.DataTable(
+                    id='ctrl-asset-table',
+                    columns=[{'name': 'Asset',           'id': 'asset'},
+                             {'name': 'Ticker',          'id': 'ticker'},
+                             {'name': 'Valuta nel file', 'id': 'valuta_file'},
+                             {'name': 'Valuta Yahoo',    'id': 'valuta_yahoo'},
+                             {'name': 'Problema',        'id': 'problema'}],
+                    data=[], sort_action='native',
+                    style_table={'maxHeight': '52vh', 'overflowY': 'auto', 'overflowX': 'auto'},
+                    style_header={'backgroundColor': '#f5f7fa', 'fontWeight': '700',
+                                  'fontSize': '12px', 'padding': '6px 8px'},
+                    style_cell={'fontSize': '12px', 'padding': '5px 8px', 'textAlign': 'left',
+                                'border': '1px solid #e0e4ec', 'whiteSpace': 'normal',
+                                'height': 'auto'},
+                    style_cell_conditional=[{'if': {'column_id': 'problema'},
+                                             'minWidth': '320px'}],
+                ),
+                html.Div(id='ctrl-asset-msg', style={'fontSize': '12px', 'marginTop': '8px'}),
+            ]),
+            html.Div([
+                html.Button('↻ Controlla ora', id='ctrl-asset-run', n_clicks=0,
+                            style={'fontSize': '12px', 'padding': '6px 14px', 'borderRadius': '4px', 'cursor': 'pointer',
+                                   'background': '#f0f4fb', 'border': '1px solid #c0d0e8',
+                                   'color': '#1a3a5c'}),
+                html.Button('💱 Rileggi le valute da Yahoo', id='ctrl-asset-fix', n_clicks=0,
+                            title='Rifà subito l\'allineamento delle valute, utile se '
+                                  'Yahoo non aveva risposto',
+                            style={'fontSize': '12px', 'padding': '6px 14px', 'borderRadius': '4px', 'cursor': 'pointer',
+                                   'background': '#fff3e0', 'border': '1px solid #ffb74d',
+                                   'color': '#e65100', 'fontWeight': 'bold'}),
+            ], style={'display': 'flex', 'gap': '8px', 'marginTop': '12px'}),
+            dcc.ConfirmDialog(id='ctrl-asset-fix-confirm',
+                              message="Richiedere a Yahoo la valuta di ogni asset e riallineare "
+                                      "quella scritta nel file? I prezzi in euro non cambiano."),
+        ]),
     ]),
 
     # ── Modal Gestione Lista ──────────────────────────────────────────────────
@@ -3904,7 +4119,9 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
             with _DL_LOCK:
                 _DL_BUFFER.update({'close_returns': cr, 'original_prices': op,
                                    'ticker_map': tm, 'saved_at': saved_at})
-            _write_user_json(cr, op, tm, reset_state=True, tipo='default:ETF.xlsx')
+            _write_user_json(cr, op, tm,
+                             (_data or {}).get('valuta_map') or _DL_BUFFER.get('valuta_map'),
+                             reset_state=True, tipo='default:ETF.xlsx')
             options  = [{'label': col, 'value': col} for col in cr.columns]
             # `_write_user_json` ha appena scritto current.json: il gettone è
             # ricostruibile anche qui.
@@ -3986,27 +4203,25 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
                 except Exception as e:
                     print(f"⚠ Archiviazione file cliente fallita: {e}")
 
-                tickers     = list(df[col_names[0]])
-                descrizione = (list(df[col_names[1]]) if len(col_names) > 1
-                               else [str(t) for t in tickers])
-                valuta      = (list(df[col_names[2]]) if len(col_names) > 2
-                               else ['EUR'] * len(tickers))
-                ticker_map  = {descrizione[i]: tickers[i] for i in range(len(tickers))}
+                # Colonne per intestazione (ticker, descrizione, valuta, pesi):
+                # descrizione e valuta restano quelle scritte nel file.
+                _, peso_col, peso_vals = _detect_ticker_and_weight_cols(df)
+                righe, problemi_file = _leggi_lista_asset(df, esclusa=peso_col)
+                if not righe:
+                    raise ValueError('nel file non ci sono ticker da caricare')
+                tickers     = [r[1] for r in righe]
+                descrizione = [r[2] for r in righe]
+                valuta      = [r[3] for r in righe]
+                ticker_map  = dict(zip(descrizione, tickers))
                 options     = [{'label': d, 'value': d} for d in descrizione]
                 custom      = {'tickers': tickers, 'descr': descrizione, 'valuta': valuta}
 
-                # Leggi colonna pesi se presente (col 3 o colonna con header peso/weight/%)
                 pesi_map = {}
-                _, peso_col, peso_vals = _detect_ticker_and_weight_cols(df)
                 if peso_col is not None and peso_vals is not None:
-                    for i, desc in enumerate(descrizione):
+                    for idx, _t, desc, _v in righe:
                         try:
-                            row_mask = df[col_names[0]].astype(str).str.strip() == str(tickers[i]).strip()
-                            idx_match = df[row_mask].index
-                            if not idx_match.empty and idx_match[0] in peso_vals.index:
-                                v = float(peso_vals.loc[idx_match[0]])
-                                if v > 0:
-                                    pesi_map[desc] = v
+                            if idx in peso_vals.index and float(peso_vals.loc[idx]) > 0:
+                                pesi_map[desc] = float(peso_vals.loc[idx])
                         except Exception:
                             pass
 
@@ -4017,12 +4232,15 @@ def update_output(nav_reload, pending_upload, _confirm_n, filename):
                 threading.Thread(
                     target=_do_download_client,
                     args=(tickers, descrizione, valuta, start_date),
-                    kwargs={'username': _username, 'pesi_p1': pesi_map},
+                    kwargs={'username': _username, 'pesi_p1': pesi_map,
+                            'problemi_file': problemi_file},
                     daemon=True,
                 ).start()
+                scarti = (f' — ⚠ {len(problemi_file)} righe scartate (vedi Controllo asset)'
+                          if problemi_file else '')
 
                 return (
-                    html.Div(f'⏳ Download avviato — {len(options)} asset da Yahoo Finance…',
+                    html.Div(f'⏳ Download avviato — {len(options)} asset da Yahoo Finance…{scarti}',
                              style={'color': '#e67e22', 'font-size': '11px'}),
                     options, None, None, [], ticker_map, '', custom,
                     False, 0, True, _MODAL_SHOWN, _FILL_LOADING,
@@ -4436,41 +4654,9 @@ def _roll_dd(prezzi, anni):
     return (prezzi - massimo) / massimo
 
 
-_ROLL_VALUTA_CACHE = {}
-
-
-def _roll_valuta(ticker):
-    """Valuta di quotazione secondo Yahoo, nella forma esatta che usa Yahoo
-    ('GBp' e 'GBP' non sono la stessa cosa). None se non si riesce a saperlo:
-    un fallback a EUR silenzioso lascerebbe l'asset non convertito facendolo
-    passare per gia' in euro.
-
-    E' una chiamata di rete per ticker e la valuta di quotazione non cambia nel
-    tempo, quindi le risposte buone restano in cache finche' il processo vive.
-    Gli errori no: un problema di rete momentaneo si porterebbe dietro il dubbio
-    per tutta la giornata.
-    """
-    if ticker in _ROLL_VALUTA_CACHE:
-        return _ROLL_VALUTA_CACHE[ticker]
-    try:
-        fi = yf.Ticker(ticker).fast_info
-        val = (fi.get('currency') if isinstance(fi, dict) else getattr(fi, 'currency', None))
-    except Exception:
-        return None
-    val = str(val).strip() if val else ''
-    if not val:
-        return None
-    _ROLL_VALUTA_CACHE[ticker] = val
-    return val
-
-
-def _roll_valuta_piena(codice):
-    """Da un codice Yahoo alla coppia (valuta piena, divisore): 'GBp' -> ('GBP', 100),
-    'USD' -> ('USD', 1). Il divisore riporta i centesimi all'unita' di valuta."""
-    c = (codice or '').strip()
-    if c in _ROLL_CENTESIMI:
-        return _ROLL_CENTESIMI[c], 100.0
-    return (c.upper() or 'EUR'), 1.0
+# Valuta secondo Yahoo e centesimi: la stessa logica dei download del Portafoglio.
+_roll_valuta       = dc.valuta_yahoo
+_roll_valuta_piena = dc.valuta_piena
 
 
 def _roll_scarica(tickers, data_inizio, valute_scelte=None):
@@ -4504,6 +4690,9 @@ def _roll_scarica(tickers, data_inizio, valute_scelte=None):
                 errori.append(f"{t}: Yahoo non dice la valuta, trattato come EUR "
                               f"— indicala a mano se non lo è")
         piena, divisore = _roll_valuta_piena(grezza)
+        if dc.e_cambio(t):
+            # Un tasso di cambio e' gia' un rapporto fra due monete: niente conversione.
+            piena, divisore = 'EUR', 1.0
         info[t] = {'grezza': grezza, 'valuta': piena, 'origine': origine,
                    'divisore': divisore, 'convertita': False,
                    'cambio': None if piena == 'EUR' else f'EUR{piena}=X'}
@@ -5132,8 +5321,12 @@ def toggle_file_editor(open_n, close_n, filename):
         with _CL_LOCK:
             cl_status = _CL_STATES.get(_u, {}).get('status', 'idle')
             cl_tm     = dict(_CL_BUFFERS.get(_u, {}).get('ticker_map', {}))
+            cl_vm     = {**_CL_BUFFERS.get(_u, {}).get('valuta_file', {}),
+                         **_CL_BUFFERS.get(_u, {}).get('valuta_map', {})}
         if cl_status == 'done' and cl_tm:
-            rows = [{'ticker': v, 'descrizione': k, 'valuta': 'EUR'}
+            ns_cl = _read_user_json(_u)
+            rows = [{'ticker': v, 'descrizione': k,
+                     'valuta': (ns_cl.get(k) or {}).get('currency') or cl_vm.get(k, '')}
                     for k, v in cl_tm.items()]
 
         # 2. JSON utente (source of truth — sempre coerente con i dati caricati)
@@ -5143,6 +5336,18 @@ def toggle_file_editor(open_n, close_n, filename):
                 rows = [{'ticker': v['ticker'], 'descrizione': k, 'valuta': v.get('currency', 'EUR')}
                         for k, v in ns.items()]
 
+        # Asset che Yahoo non trova: non sono in current.json ma restano nella lista,
+        # con il ticker e la valuta del file, così il ticker si corregge qui
+        if rows:
+            _visti = {r['descrizione'] for r in rows}
+            for p in dc.leggi_controllo(_u).get('problemi', []):
+                a = p.get('asset')
+                if (p.get('tipo') in ('introvabile', 'non_scaricato', 'cambio_mancante')
+                        and p.get('ticker') and a and a not in _visti):
+                    rows.append({'ticker': p['ticker'], 'descrizione': a,
+                                 'valuta': p.get('valuta_file') or cl_vm.get(a, '')})
+                    _visti.add(a)
+
         # 3. Xlsx del file selezionato (fallback diretto)
         if not rows:
             rows = _load_xlsx_rows(fn)
@@ -5150,6 +5355,106 @@ def toggle_file_editor(open_n, close_n, filename):
         stem = Path(fn).stem
         return _EDITOR_SHOWN, rows, f'Gestisci lista: {stem}', ''
     return _EDITOR_HIDDEN, no_update, no_update, no_update
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Controllo asset: pulsante con il conteggio e pannello con l'elenco
+# ─────────────────────────────────────────────────────────────────────────────
+def _controllo_o_ricalcola(username, origine):
+    """Il resoconto salvato se riguarda la lista di adesso, altrimenti lo rifà."""
+    rep = dc.controllo_attuale(username)
+    return rep if rep is not None else dc.controlla_asset(username, origine=origine, timeout=15)
+
+
+def _conta_controllo(rep):
+    probs = (rep or {}).get('problemi', [])
+    n_err = sum(p.get('gravita') == 'errore' for p in probs)
+    return n_err, len(probs) - n_err
+
+
+@app.callback(
+    Output('ctrl-asset-btn', 'children'),
+    Output('ctrl-asset-btn', 'style'),
+    Input('data-last-updated', 'children'),
+    Input('ctrl-asset-rev',    'data'),
+)
+def ctrl_asset_badge(_aggiornato, _rev):
+    _u = _get_username()
+    if not dc.read_current(_u):
+        return '🔎 Controllo asset', _CTRL_BTN
+    try:
+        rep = _controllo_o_ricalcola(_u, 'apertura pagina')
+    except Exception as e:
+        print(f"⚠ Controllo asset [{_u}]: {e}", flush=True)
+        return '🔎 Controllo asset', _CTRL_BTN
+    n_err, n_avv = _conta_controllo(rep)
+    if n_err:
+        return f"⚠ Controllo asset: {n_err} {'errore' if n_err == 1 else 'errori'}", _CTRL_BTN_ERR
+    if n_avv:
+        return f"🔎 Controllo asset: {n_avv} {'avviso' if n_avv == 1 else 'avvisi'}", _CTRL_BTN_AVV
+    return '✓ Controllo asset', _CTRL_BTN_OK
+
+
+@app.callback(
+    Output('ctrl-asset-fix-confirm', 'displayed'),
+    Input('ctrl-asset-fix',          'n_clicks'),
+    prevent_initial_call=True,
+)
+def ctrl_asset_chiedi_correzione(n):
+    return bool(n)
+
+
+@app.callback(
+    Output('ctrl-asset-overlay', 'style'),
+    Output('ctrl-asset-table',   'data'),
+    Output('ctrl-asset-info',    'children'),
+    Output('ctrl-asset-msg',     'children'),
+    Output('ctrl-asset-rev',     'data'),
+    Input('ctrl-asset-btn',      'n_clicks'),
+    Input('ctrl-asset-close',    'n_clicks'),
+    Input('ctrl-asset-run',      'n_clicks'),
+    Input('ctrl-asset-fix-confirm', 'submit_n_clicks'),
+    State('ctrl-asset-rev',      'data'),
+    prevent_initial_call=True,
+)
+def ctrl_asset_panel(_apri, _chiudi, _controlla, _correggi, rev):
+    trig = callback_context.triggered_id
+    if trig == 'ctrl-asset-close':
+        return _EDITOR_HIDDEN, no_update, no_update, no_update, no_update
+    _u = _get_username()
+    msg, nuovo_rev = '', no_update
+    try:
+        if not dc.read_current(_u):
+            rep = {}
+        elif trig == 'ctrl-asset-run':
+            rep = dc.controlla_asset(_u, origine='controllo manuale')
+            nuovo_rev = (rev or 0) + 1
+        elif trig == 'ctrl-asset-fix-confirm':
+            n = dc.correggi_valute(_u)
+            rep = dc.controlla_asset(_u, origine='valute corrette')
+            msg = (f'✓ Valuta di Yahoo scritta nel file per {n} asset' if n else
+                   'Nessuna valuta da correggere (o Yahoo non risponde, riprova più tardi)')
+            nuovo_rev = (rev or 0) + 1
+        else:
+            rep = _controllo_o_ricalcola(_u, 'apertura pannello')
+    except Exception as e:
+        return _EDITOR_SHOWN, [], '', f'⚠ Controllo non riuscito: {e}', no_update
+
+    if not rep:
+        return _EDITOR_SHOWN, [], 'Nessun asset nel file di lavoro.', msg, nuovo_rev
+    n_err, n_avv = _conta_controllo(rep)
+    esito = ('✓ nessun problema' if not (n_err or n_avv)
+             else f"{n_err} {'errore' if n_err == 1 else 'errori'}, "
+                  f"{n_avv} {'avviso' if n_avv == 1 else 'avvisi'}")
+    info = (f"{rep.get('n_asset', 0)} asset controllati il {rep.get('aggiornato', '')} "
+            f"({rep.get('origine', '')}) — {esito}")
+    righe = [{'asset':        p.get('asset', ''),
+              'ticker':       p.get('ticker', ''),
+              'valuta_file':  p.get('valuta_file', ''),
+              'valuta_yahoo': p.get('valuta_yahoo', ''),
+              'problema':     ('❌ ' if p.get('gravita') == 'errore' else '⚠ ') + str(p.get('messaggio', ''))}
+             for p in rep.get('problemi', [])]
+    return _EDITOR_SHOWN, righe, info, msg, nuovo_rev
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5201,9 +5506,12 @@ def save_file_editor(n, rows, filename):
     _active_file_store['filename'] = filename
 
     try:
-        tickers     = [r['ticker']                         for r in rows if str(r.get('ticker', '')).strip()]
-        descr       = [r.get('descrizione') or r['ticker'] for r in rows if str(r.get('ticker', '')).strip()]
-        valuta_list = [r.get('valuta', 'EUR')              for r in rows if str(r.get('ticker', '')).strip()]
+        righe       = [r for r in rows if str(r.get('ticker') or '').strip()]
+        tickers     = [str(r['ticker']).strip() for r in righe]
+        descr       = [str(r.get('descrizione') or '').strip() or t for r, t in zip(righe, tickers)]
+        # La valuta scritta nella tabella comanda (vuota → la mette Yahoo)
+        valuta_list = [dc.valuta_dichiarata(r.get('valuta')) for r in righe]
+        new_vm      = {d: v for d, v in zip(descr, valuta_list) if v}
 
         user_pkl = _user_cache_path(_u, filename)
         new_tm   = {descr[i]: tickers[i] for i in range(len(tickers))}
@@ -5245,11 +5553,29 @@ def save_file_editor(n, rows, filename):
             if not existing_descr and src_data.get('original_prices') is not None:
                 existing_descr = set(src_data['original_prices'].columns)
 
+        # Ticker attuale di ogni asset: se nella tabella è cambiato va riscaricato
+        ticker_prima = dict(src_data.get('ticker_map', {})) if src_data is not None else {}
+        ticker_prima.update({d: v['ticker'] for d, v in _read_user_json(_u).items()
+                             if v.get('ticker')})
+
         # Resetta il buffer cliente — ora il pkl utente è la fonte di verità
         _cl_clear(_u)
 
-        # ── Ticker da scaricare (quelli non già presenti nella sorgente) ──────
-        new_idx    = [i for i, d in enumerate(descr) if d not in existing_descr]
+        # ── Ticker da scaricare: nuovi, o con il ticker cambiato ─────────────
+        new_idx    = [i for i, d in enumerate(descr)
+                      if d not in existing_descr
+                      or str(ticker_prima.get(d) or tickers[i]).strip() != tickers[i]]
+        # Ticker che Yahoo già non trova e senza prezzi: restano in lista apposta, per
+        # correggerli, ma non si riscaricano (darebbero «nessun dato» e il salvataggio
+        # andrebbe perso). Il Controllo asset continua a segnalarli, con o senza download.
+        _noti       = _introvabili_attivi()
+        _con_prezzi = (set(src_data['original_prices'].columns)
+                       if src_data is not None and src_data.get('original_prices') is not None else set())
+        _senza      = {i for i, d in enumerate(descr) if tickers[i] in _noti and d not in _con_prezzi}
+        problemi_saltati = [_problema_introvabile(descr[i], tickers[i],
+                                                  nota=' (saltato, riprovo fra qualche giorno)',
+                                                  valuta=valuta_list[i]) for i in sorted(_senza)]
+        new_idx = [i for i in new_idx if i not in _senza]
         dl_tickers = [tickers[i] for i in new_idx]
         dl_descr   = [descr[i]   for i in new_idx]
         dl_valuta  = [valuta_list[i] for i in new_idx]
@@ -5267,6 +5593,8 @@ def save_file_editor(n, rows, filename):
                     else:
                         sliced[key] = val
                 sliced['ticker_map']    = new_tm
+                sliced['valuta_map']    = {**{k: v for k, v in (src_data.get('valuta_map') or {}).items()
+                                              if k in want}, **new_vm}
                 sliced['close_returns'] = sliced['original_prices'].pct_change(fill_method=None)
                 sliced['saved_at']      = datetime.now().strftime('%d/%m/%Y %H:%M')
                 _atomic_pkl_write(user_pkl, sliced)
@@ -5274,7 +5602,10 @@ def save_file_editor(n, rows, filename):
                     _DL_BUFFER.update(sliced)
                     _DL_STATE.update({'status': 'done', 'current': len(keep_cols),
                                       'total': len(keep_cols), 'errors': []})
-                _write_user_json(sliced['close_returns'], sliced['original_prices'], new_tm)
+                _write_user_json(sliced['close_returns'], sliced['original_prices'], new_tm,
+                                 sliced['valuta_map'])
+                threading.Thread(target=_controlla_dopo_download, args=(_u, problemi_saltati, 'Gestisci'),
+                                 kwargs={'azzera': True}, daemon=True).start()
             return ('✓ Lista aggiornata — nessun nuovo asset da scaricare.',
                     no_update, _list_files(),
                     False, 0, True, no_update)
@@ -5284,6 +5615,8 @@ def save_file_editor(n, rows, filename):
         t = threading.Thread(
             target=_do_gestisci_download,
             args=(dl_tickers, dl_descr, dl_valuta, start, _u, filename, descr),
+            kwargs={'valute_file': new_vm, 'azzera_controllo': True,
+                    'problemi_extra': problemi_saltati},
             daemon=True,
         )
         t.start()
@@ -5458,7 +5791,7 @@ def poll_refresh_progress(n, n_btn):
             line   = f'❌ {err}'
             if sug:
                 line += f'\n💡 Prova: {" · ".join(sug[:3])}'
-            else:
+            elif 'cambio' not in err:
                 line += '\n💡 Ticker europeo? Prova .MI .DE .L .PA .AS ecc.'
             err_lines.append(line)
         if not err_lines and sug_err:
@@ -5521,7 +5854,7 @@ def poll_refresh_progress(n, n_btn):
         line = f'❌ {err}'
         if sug:
             line += f'\n   💡 Prova: {" · ".join(sug[:3])}'
-        else:
+        elif 'cambio' not in err:
             line += '\n   💡 Ticker europeo? Prova ad aggiungere .MI .DE .L .PA ecc.'
         err_lines.append(line)
 
@@ -7916,9 +8249,11 @@ def _pkl_prezzi_utente(username):
     return paths
 
 
-def _aggiorna_current_json(username, op, cr, tm):
-    """Riscrive prezzi e rendimenti dentro current.json conservando tutto il
-    resto (pesi P1/P2/P3, checked, _tipo) e gli asset non riscaricati."""
+def _aggiorna_current_json(username, op, cr, tm, vm=None):
+    """Riscrive prezzi e rendimenti dentro current.json conservando tutto il resto
+    (pesi P1/P2/P3, checked, _tipo) e gli asset non riscaricati.
+    La valuta diventa quella con cui il download ha convertito i prezzi (la dice
+    Yahoo): i prezzi sono in euro e l'etichetta dice da dove vengono."""
     path = _user_json_path(username)
     try:
         raw = json.load(open(path))
@@ -7932,6 +8267,8 @@ def _aggiorna_current_json(username, op, cr, tm):
         if not isinstance(v, dict) or desc not in op.columns:
             continue
         v['ticker']  = tm.get(desc, v.get('ticker', desc))
+        if (vm or {}).get(desc):
+            v['currency'] = vm[desc]
         v['dates']   = dates
         v['prices']  = [round(float(x), 4) if pd.notna(x) else None for x in op[desc]]
         v['returns'] = [round(float(x), 6) if pd.notna(x) else None for x in cr[desc]]
@@ -7941,10 +8278,10 @@ def _aggiorna_current_json(username, op, cr, tm):
     return n
 
 
-def _aggiorna_pkl_prezzi(path, op, cr, tm):
-    """Sostituisce nel pkl SOLO le colonne per cui abbiamo dati freschi. Le altre
-    chiavi (stato della sessione, mappe valuta, salvataggi nominati) non si
-    toccano: questi file sono il lavoro dell'utente, non una cache di sistema."""
+def _aggiorna_pkl_prezzi(path, op, cr, tm, vm=None):
+    """Sostituisce nel pkl SOLO le colonne per cui abbiamo dati freschi (prezzi,
+    ticker e valuta). Le altre chiavi (stato della sessione, salvataggi nominati)
+    non si toccano: questi file sono il lavoro dell'utente, non una cache di sistema."""
     try:
         with open(path, 'rb') as f:
             d = pickle.load(f)
@@ -7968,6 +8305,9 @@ def _aggiorna_pkl_prezzi(path, op, cr, tm):
     d['close_returns']   = new_cr
     d['ticker_map']      = {**d.get('ticker_map', {}),
                             **{k: v for k, v in tm.items() if k in comuni}}
+    if vm:
+        d['valuta_map'] = {**d.get('valuta_map', {}),
+                           **{k: v for k, v in vm.items() if k in comuni}}
     if 'saved_at' in d and d.get('saved_at'):
         d['saved_at'] = datetime.now().strftime('%d/%m/%Y %H:%M')
     if 'date' in d:
@@ -7992,16 +8332,23 @@ def _refresh_dati_utente(username, start_date):
 
     descr   = list(asset)
     tickers = [asset[d]['ticker'] for d in descr]
-    valute  = [asset[d].get('currency') or 'EUR' for d in descr]
+    # La valuta del file: la conversione usa quella di Yahoo e questa solo se Yahoo
+    # non risponde. Nel file resta com'e' (vedi _aggiorna_current_json).
+    valute  = [asset[d].get('currency') or '' for d in descr]
 
     # File d'appoggio FUORI dalle cartelle sincronizzate, altrimenti finisce su R2.
     safe = _re_isin.sub(r'[^A-Za-z0-9_.@-]', '_', username)
     tmp  = Path(tempfile.gettempdir()) / f'refresh_{safe}.pkl'
+    problemi = []
     try:
-        _do_download(tickers, descr, valute, start_date,
-                     cache_file=tmp, update_buffer=False)
+        # Niente quotazioni alternative: di notte il ticker dell'utente non si
+        # cambia. Se non risponde tiene i vecchi prezzi e lo dice il Controllo asset.
+        problemi = _do_download(tickers, descr, valute, start_date, cache_file=tmp,
+                                update_buffer=False, cerca_alternative=False) or []
         if not tmp.exists():
             print(f"  ⚠ {username}: download fallito, dati invariati")
+            _controlla_dopo_download(username, problemi, 'aggiornamento automatico',
+                                     riscaricati=descr)
             return
         with open(tmp, 'rb') as f:
             fresh = pickle.load(f)
@@ -8013,17 +8360,21 @@ def _refresh_dati_utente(username, start_date):
 
     op, cr = fresh.get('original_prices'), fresh.get('close_returns')
     tm     = fresh.get('ticker_map', {})
+    vm     = fresh.get('valuta_map', {})
     if op is None or cr is None or op.empty:
         print(f"  ⚠ {username}: nessun prezzo scaricato, dati invariati")
+        _controlla_dopo_download(username, problemi, 'aggiornamento automatico',
+                                 riscaricati=descr)
         return
 
-    n_json = _aggiorna_current_json(username, op, cr, tm)
+    n_json = _aggiorna_current_json(username, op, cr, tm, vm)
     ultima = op.index.max().strftime('%d/%m/%Y')
     print(f"  ✓ {username}: {n_json}/{len(descr)} asset aggiornati al {ultima}")
     for p in _pkl_prezzi_utente(username):
-        n = _aggiorna_pkl_prezzi(p, op, cr, tm)
+        n = _aggiorna_pkl_prezzi(p, op, cr, tm, vm)
         if n:
             print(f"    ✓ {p.name}: {n} serie")
+    _controlla_dopo_download(username, problemi, 'aggiornamento automatico', riscaricati=descr)
 
 
 def _ultima_data_utente(username):
