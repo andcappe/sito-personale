@@ -8174,50 +8174,58 @@ def _save_arima_to_pkl(mu_series, cov_df, target_pkl=None):
 # ─────────────────────────────────────────────────────────────────────────────
 # Scheduler: dati alle 18:30 (lun-ven), ARIMA+GARCH a mezzanotte (lun-sab)
 # ─────────────────────────────────────────────────────────────────────────────
-def _scheduled_update():
-    """Aggiornamento notturno: scarica dati per tutti i file in Files/."""
+def _scheduled_update_file(filename):
+    """Aggiornamento notturno di UN dataset di Files/. Di notte ognuno ha il suo
+    job a mezz'ora dal precedente: vedi _programma_job_notturni()."""
     start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
     active_file = _active_file_store.get('filename', 'ETF.xlsx')
-    xlsx_files = _dataset_xlsx_paths() or [Path(_XLSX)]
-    for xlsx_path in xlsx_files:
-        filename = xlsx_path.name
-        try:
-            tickers, descr, valuta = _build_ticker_list(filename)
-            cache = _file_cache_path(filename)
-            is_active = (filename == active_file)
-            print(f"⏰ Aggiornamento {filename}: {len(tickers)} ticker")
-            _do_download(tickers, descr, valuta, start,
-                         cache_file=cache, update_buffer=is_active)
-        except Exception as e:
-            print(f"⚠ Aggiornamento {filename} fallito: {e}")
+    try:
+        tickers, descr, valuta = _build_ticker_list(filename)
+        cache = _file_cache_path(filename)
+        print(f"⏰ Aggiornamento {filename}: {len(tickers)} ticker")
+        _do_download(tickers, descr, valuta, start,
+                     cache_file=cache, update_buffer=(filename == active_file))
+    except Exception as e:
+        print(f"⚠ Aggiornamento {filename} fallito: {e}")
+
+
+def _scheduled_update():
+    """Tutti i dataset di fila, uno dopo l'altro. Non e' piu' quello che gira di
+    notte (Yahoo bloccava la raffica): resta per un aggiornamento a mano."""
+    for xlsx_path in _dataset_xlsx_paths() or [Path(_XLSX)]:
+        _scheduled_update_file(xlsx_path.name)
+
+
+def _scheduled_arima_file(filename):
+    """Calcolo ARIMA+GARCH notturno di UN dataset di Files/."""
+    cache_pkl = _file_cache_path(filename)
+    arima_pkl = _arima_cache_path(filename)
+    try:
+        if not Path(cache_pkl).exists():
+            print(f"⚠ ARIMA {filename}: cache non trovata, skip")
+            return
+        with open(cache_pkl, 'rb') as f:
+            cached = pickle.load(f)
+        ret = cached.get('close_returns')
+        if ret is None or (hasattr(ret, 'empty') and ret.empty):
+            print(f"⚠ ARIMA {filename}: nessun dato disponibile")
+            return
+        print(f"🌙 ARIMA+GARCH {filename} — {len(ret.columns)} asset…")
+        mu, cov = _compute_arima_garch(ret, window=250)
+        if mu is not None:
+            _save_arima_to_pkl(mu, cov, target_pkl=arima_pkl)
+            print(f"✓ ARIMA+GARCH completato: {filename}")
+        else:
+            print(f"⚠ ARIMA {filename}: calcolo non riuscito")
+    except Exception as e:
+        print(f"⚠ ARIMA notturno {filename} fallito: {e}")
 
 
 def _scheduled_arima():
-    """Calcolo ARIMA+GARCH a mezzanotte su tutti i file in Files/."""
-    xlsx_files = _dataset_xlsx_paths() or [Path(_XLSX)]
-    for xlsx_path in xlsx_files:
-        filename = xlsx_path.name
-        cache_pkl = _file_cache_path(filename)
-        arima_pkl = _arima_cache_path(filename)
-        try:
-            if not Path(cache_pkl).exists():
-                print(f"⚠ ARIMA {filename}: cache non trovata, skip")
-                continue
-            with open(cache_pkl, 'rb') as f:
-                cached = pickle.load(f)
-            ret = cached.get('close_returns')
-            if ret is None or (hasattr(ret, 'empty') and ret.empty):
-                print(f"⚠ ARIMA {filename}: nessun dato disponibile")
-                continue
-            print(f"🌙 ARIMA+GARCH {filename} — {len(ret.columns)} asset…")
-            mu, cov = _compute_arima_garch(ret, window=250)
-            if mu is not None:
-                _save_arima_to_pkl(mu, cov, target_pkl=arima_pkl)
-                print(f"✓ ARIMA+GARCH completato: {filename}")
-            else:
-                print(f"⚠ ARIMA {filename}: calcolo non riuscito")
-        except Exception as e:
-            print(f"⚠ ARIMA notturno {filename} fallito: {e}")
+    """ARIMA+GARCH su tutti i dataset, uno dopo l'altro: e' il job che gira di
+    notte quando i download hanno finito il loro giro."""
+    for xlsx_path in _dataset_xlsx_paths() or [Path(_XLSX)]:
+        _scheduled_arima_file(xlsx_path.name)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8539,19 +8547,65 @@ def restore_file_selector(nav_reload):
     return opts, val
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Orari dei job notturni
+#
+# Prima i dataset condivisi partivano tutti insieme a mezzanotte dentro un unico
+# job. Yahoo non regge la raffica: il giro si fermava dopo il primo o il secondo
+# file e, girando una sola esecuzione per volta (max_instances=1), le notti dopo
+# il job veniva saltato. Risultato: COMMODITIES e CRIPTO aggiornati, ETF e VALUTE
+# — ultimi della fila — fermi da settimane.
+# Adesso ogni dataset ha il suo job a mezz'ora dal precedente: le richieste a
+# Yahoo sono distanti fra loro e un dataset che si pianta si porta via soltanto
+# il proprio turno. ARIMA e dati utenti prendono gli slot dopo l'ultimo dataset,
+# così restano sempre in coda anche se i dataset diventano cinque o sei.
+# ─────────────────────────────────────────────────────────────────────────────
+_PASSO_JOB_MIN = 30          # distanza fra un job notturno e il successivo
+
+
+def _slot_job(indice):
+    """(ora, minuto) dello slot numero `indice`, partendo da mezzanotte."""
+    ore, minuti = divmod(indice * _PASSO_JOB_MIN, 60)
+    return ore % 24, minuti
+
+
+def _dataset_per_job():
+    """I dataset nell'ordine del menu (_FILE_ORDER): il primo prende mezzanotte."""
+    files = _dataset_xlsx_paths() or [Path(_XLSX)]
+    files.sort(key=lambda f: _FILE_ORDER.index(f.stem.upper())
+               if f.stem.upper() in _FILE_ORDER else 99)
+    return [f.name for f in files]
+
+
+def _programma_job_notturni(scheduler):
+    """Registra i job notturni (un dataset per slot, poi ARIMA, poi i dati degli
+    utenti) e restituisce gli orari veri da stampare al boot."""
+    nomi  = _dataset_per_job()
+    righe = []
+
+    def _aggiungi(func, indice, id_job, etichetta, args=None):
+        ora, minuto = _slot_job(indice)
+        scheduler.add_job(func, 'cron', args=args or [], id=id_job,
+                          hour=ora, minute=minuto, day_of_week='mon-sat',
+                          # meno di mezz'ora: dopo un riavvio si recupera al più
+                          # il job dello slot appena passato, non tutta la fila
+                          # insieme — che sarebbe di nuovo la raffica di prima
+                          misfire_grace_time=1500, coalesce=True, max_instances=1)
+        righe.append(f"{etichetta} {ora:02d}:{minuto:02d}")
+
+    for i, nome in enumerate(nomi):
+        _aggiungi(_scheduled_update_file, i, f"dati_{nome}", Path(nome).stem, [nome])
+    _aggiungi(_scheduled_arima, len(nomi), 'arima', 'ARIMA')
+    _aggiungi(_scheduled_update_utenti, len(nomi) + 1, 'dati_utenti', 'utenti')
+    return ', '.join(righe)
+
+
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     _scheduler = BackgroundScheduler(timezone='Europe/Rome')
-    _scheduler.add_job(_scheduled_update, 'cron', hour=0, minute=0,
-                       day_of_week='mon-sat', misfire_grace_time=3600)
-    _scheduler.add_job(_scheduled_arima,  'cron', hour=0, minute=30,
-                       day_of_week='mon-sat', misfire_grace_time=3600)
-    # Dopo l'ARIMA: i dati personali di ogni utente (current.json + pkl utente).
-    _scheduler.add_job(_scheduled_update_utenti, 'cron', hour=1, minute=0,
-                       day_of_week='mon-sat', misfire_grace_time=3600,
-                       coalesce=True, max_instances=1)
+    _orari_job = _programma_job_notturni(_scheduler)
     _scheduler.start()
-    print("✓ Scheduler avviato — dati mezzanotte, ARIMA 00:30, dati utenti 01:00 (lun-sab)")
+    print(f"✓ Scheduler avviato (lun-sab) — {_orari_job}")
 except ImportError:
     print("⚠ apscheduler non installato — aggiornamento automatico disabilitato")
     print("  pip install apscheduler")
