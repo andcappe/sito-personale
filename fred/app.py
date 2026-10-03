@@ -456,6 +456,11 @@ def build_dataframe(series_dict: dict, api_key: str) -> pd.DataFrame:
         if raw is not None:
             frames[label] = to_monthly(raw, freq)
             print(f"  ✓ {sid}: {len(frames[label])} obs")
+        else:
+            # Senza questa riga la serie sparisce e basta: la colonna non c'e'
+            # piu' e nessuno se ne accorge (e' cosi' che M2SL e' rimasta fuori
+            # dalla cache per settimane).
+            print(f"  ✗ {sid} ({label}): NON scaricata — la colonna manchera’")
     if not frames:
         return pd.DataFrame()
     df = pd.DataFrame(frames).sort_index()
@@ -601,11 +606,26 @@ def make_line_chart(df: pd.DataFrame, title: str,
     return fig
 
 
+def _col_moneta(cols, suffix=""):
+    """La colonna della QUANTITA' di moneta, non quella della velocita'.
+    Il vecchio criterio ("M2 " in c) pescava anche "M2 Velocity": quando M2SL
+    mancava dalla cache (un download fallito la fa sparire in silenzio) M e V
+    diventavano la stessa colonna e MV=PQ disegnava V^2 al posto di M*V, senza
+    che comparisse l'avviso "Mancano serie"."""
+    return next((c for c in cols
+                 if ("M2" in c or "Money Supply" in c) and "Velocit" not in c
+                 and c.endswith(suffix)), None)
+
+
+def _col_velocita(cols, suffix=""):
+    return next((c for c in cols if "Velocit" in c and c.endswith(suffix)), None)
+
+
 def make_mvpq_chart(df: pd.DataFrame, mode: str,
                     start: pd.Timestamp, end: pd.Timestamp,
                     mvpq_show: list = None) -> go.Figure:
-    col_m2 = next((c for c in df.columns if "M2 Money" in c or "M2 " in c), None)
-    col_v  = next((c for c in df.columns if "Velocity" in c or "Velocit" in c), None)
+    col_m2 = _col_moneta(df.columns)
+    col_v  = _col_velocita(df.columns)
     col_p  = next((c for c in df.columns if "CPI All" in c), None)
     col_q  = next((c for c in df.columns if "GDP" in c or "PIL" in c), None)
 
@@ -749,8 +769,8 @@ def make_mvpq_chart(df: pd.DataFrame, mode: str,
 
 def _extract_mvpq_components(df: pd.DataFrame, suffix: str):
     """Estrae e calcola M, V, P, Q da un df con colonne suffissate."""
-    col_m2 = next((c for c in df.columns if ("M2 Money" in c or "M2 " in c) and c.endswith(suffix)), None)
-    col_v  = next((c for c in df.columns if ("Velocity" in c or "Velocit" in c) and c.endswith(suffix)), None)
+    col_m2 = _col_moneta(df.columns, suffix)
+    col_v  = _col_velocita(df.columns, suffix)
     col_p  = next((c for c in df.columns if "CPI All" in c and c.endswith(suffix)), None)
     col_q  = next((c for c in df.columns if ("GDP" in c or "PIL" in c) and c.endswith(suffix)), None)
     missing = [n for n, c in [("M2", col_m2), ("Velocity", col_v), ("CPI", col_p), ("GDP", col_q)] if c is None]
@@ -1310,6 +1330,36 @@ def _macro_expected_keys():
     return keys
 
 
+# Le colonne che ogni dataset "a serie" deve avere. Un download fallito non
+# lascia un buco visibile — build_dataframe salta la serie e la colonna sparisce
+# — quindi la completezza si controlla anche DENTRO il dataset, non solo sulle
+# chiavi: altrimenti la cache resta "completa" con M2 mancante per settimane.
+_MACRO_COLONNE_ATTESE = {
+    'monetario_usa': lambda: DEFAULT_SERIES,
+    'pil_usa':       lambda: GDP_SERIES,
+    'adl_usa':       lambda: ADL_USA_SERIES,
+    'yields_usa':    lambda: YIELD_SERIES,
+    'shock':         lambda: SHOCK_SERIES,
+}
+
+
+def _macro_dataset_bucati():
+    """{chiave: [colonne mancanti]} per i dataset in cache a cui manca una serie.
+    Solo se fredapi c'e': senza di lui riscaricare non servirebbe a niente."""
+    buchi = {}
+    if not FRED_AVAILABLE:
+        return buchi
+    for k, dizio in _MACRO_COLONNE_ATTESE.items():
+        df = _MACRO_CACHE.get(k)
+        if df is None or df.empty:
+            continue                      # assente: ci pensa _macro_expected_keys
+        attese = {lbl for lbl, _ in dizio().values()}
+        mancanti = sorted(attese - set(df.columns))
+        if mancanti:
+            buchi[k] = mancanti
+    return buchi
+
+
 def _macro_prewarm():
     """Al boot: carica la cache (ripristinata da R2 in wsgi.pull_all, o da disco).
     Ricostruisce in background se manca, se è più vecchia di 7 giorni oppure se è
@@ -1318,6 +1368,12 @@ def _macro_prewarm():
     _macro_cache_load()
     age     = (_t.time() - _MACRO_CACHE_TS) if _MACRO_CACHE_TS else 1e18
     mancanti = _macro_expected_keys() - set(_MACRO_CACHE)
+    # Un dataset presente ma con una colonna in meno va rifatto come se mancasse:
+    # e' l'unico modo per rimediare a un download andato male una settimana fa.
+    for _k, _cols in _macro_dataset_bucati().items():
+        print(f"⚠ [macro-cache] {_k}: manca la serie {', '.join(_cols)} "
+              f"(download fallito in un build precedente) — lo riscarico", flush=True)
+        mancanti.add(_k)
     # Senza fredapi i dataset USA non sono nemmeno "attesi" (il download non può
     # riuscire): senza questo avviso la cache risulterebbe "completa" mentre
     # Analisi Monetaria e Curva dei Tassi restano senza dati, in silenzio.
