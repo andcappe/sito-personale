@@ -862,7 +862,7 @@ def _register_auth(flask_server, add_login_routes: bool = False):
                 protect = 'disabled' if uname == u else ''
                 rows += f"""
                 <tr>
-                  <td><b>{uname}</b></td>
+                  <td><a href="/admin/dati/{urllib.parse.quote(uname, safe='')}"><b>{uname}</b></a></td>
                   <td>{email}</td>
                   <td><span class="badge {badge_cls}">{status}</span></td>
                   <td>{plan}</td>
@@ -892,6 +892,8 @@ def _register_auth(flask_server, add_login_routes: bool = False):
   <div class="topbar">
     <h1>A·C Dashboard — Admin Panel</h1>
     <div>
+      <a href="/admin/dati">Dati utenti</a>
+      &nbsp;&nbsp;
       <a href="/">← Dashboard</a>
       &nbsp;&nbsp;
       <a href="/logout">Esci ({u})</a>
@@ -919,6 +921,15 @@ def _register_auth(flask_server, add_login_routes: bool = False):
 </body>
 </html>"""
             return html
+
+        # Pagine di sola lettura sui dati salvati dagli utenti: stanno in un
+        # modulo a parte (wsgi.py e' gia' lungo) e si montano qui, insieme a
+        # /admin, perche' questo e' il server che serve la radice.
+        try:
+            import admin_dati
+            admin_dati.registra_rotte(flask_server, _ADMIN_HTML_HEAD)
+        except Exception as _e_ad:
+            print(f"\u26a0 [admin] pagine dati utenti non montate: {_e_ad}", flush=True)
 
     @flask_server.before_request
     def _require_login():
