@@ -23,6 +23,7 @@ if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
 from navbar import make_navbar                       # noqa: E402
 from settings.browser_css import SITE_CSS            # noqa: E402
+import pianificazione                                  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dati COVIP — parsing dei 3 elenchi rendimenti
@@ -436,6 +437,7 @@ def _tab_fondi_pensione():
 # restano sempre agganciate.
 _TABS_CLIENTI = [
     ('tab-fondi-pensione', '🏦 Fondi Pensione', _tab_fondi_pensione),
+    ('tab-pianificazione', '🎯 Indipendenza Finanziaria', pianificazione.layout),
 ]
 
 
@@ -496,6 +498,10 @@ def _update(orizzonte, tipologie, categorie, search):
 )
 def _ai_answer(_n_clicks, question):
     return _ask_ai(question)
+
+
+# Callback della tab Indipendenza Finanziaria (definite nel modulo condiviso)
+pianificazione.register_callbacks(app)
 
 
 if __name__ == '__main__':
