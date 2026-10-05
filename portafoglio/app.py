@@ -124,6 +124,15 @@ def _dataset_xlsx_paths():
         return []
     return sorted(f for f in _FILES_DIR.glob('*.xlsx') if not f.name.startswith('~$'))
 
+def _dataset_ordinati():
+    """I dataset di Files/ nell'ordine del menu (_FILE_ORDER), ETF per primo.
+    Lo usano il prewarm al boot e i job notturni: devono partire dal dataset piu'
+    guardato, non dall'ordine alfabetico di _dataset_xlsx_paths()."""
+    files = _dataset_xlsx_paths() or [Path(_XLSX)]
+    files.sort(key=lambda f: _FILE_ORDER.index(f.stem.upper())
+               if f.stem.upper() in _FILE_ORDER else 99)
+    return files
+
 def _list_files():
     """Restituisce lista di opzioni dcc.Dropdown dai .xlsx in Files/."""
     files = _dataset_xlsx_paths()
@@ -7988,6 +7997,56 @@ def mark_session_dirty(p1, p2, p3):
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup: carica tutti i pkl esistenti, scarica in background quelli mancanti
 # ─────────────────────────────────────────────────────────────────────────────
+# Al boot i dataset condivisi si rifanno solo se serve. Finche' il controllo era
+# "il pkl esiste?", una cache vecchia restava vecchia per sempre: nessun deploy la
+# rimetteva in pari e i prezzi sul sito sono rimasti indietro di settimane, anche
+# se il job notturno non girava. Qui si guardano eta' e completezza, come fa
+# _prewarm_dati_utenti con i dati personali.
+_DATASET_GIORNI_VECCHIO = 5    # soglia: assorbe weekend e festivi
+_PAUSA_DATASET_BOOT     = 60   # secondi fra due dataset: Yahoo blocca le raffiche
+
+
+def _dataset_da_rifare(filename, cache_pkl, giorni=_DATASET_GIORNI_VECCHIO):
+    """(serve, motivo) per un dataset condiviso di Files/.
+
+    Si riscarica se il pkl manca o e' illeggibile, se l'ultimo prezzo e' indietro
+    di piu' di `giorni`, oppure se in Files/ c'e' un ticker che la cache non ha
+    ancora (un ETF appena aggiunto al file). I ticker che Yahoo non trova restano
+    fuori dal confronto: altrimenti uno di quelli farebbe ripartire il download a
+    ogni riavvio.
+    """
+    if not Path(cache_pkl).exists():
+        return True, 'cache assente'
+    try:
+        with open(cache_pkl, 'rb') as f:
+            d = pickle.load(f)
+    except Exception as e:
+        return True, f'cache illeggibile ({e})'
+    op = d.get('original_prices')
+    if op is None or getattr(op, 'empty', True):
+        return True, 'cache senza prezzi'
+
+    ultima   = pd.Timestamp(op.index.max()).normalize()
+    indietro = (pd.Timestamp.today().normalize() - ultima).days
+    if indietro > giorni:
+        return True, f"ultimo prezzo {ultima:%d/%m/%Y}, {indietro} giorni indietro"
+
+    try:
+        tickers, descr, _valuta = _build_ticker_list(filename)
+    except Exception:
+        return False, ''        # xlsx illeggibile: non e' un motivo per scaricare
+    noti     = _introvabili_attivi()
+    presenti = (set(str(v) for v in d.get('ticker_map', {}).values())
+                | set(str(c) for c in op.columns))
+    nuovi    = [str(t) for t, ds in zip(tickers, descr)
+                if str(t) not in presenti and str(ds) not in presenti
+                and str(t) not in noti]
+    if nuovi:
+        return True, (f"{len(nuovi)} ticker non ancora in cache: "
+                      + ', '.join(nuovi[:4]) + (' ...' if len(nuovi) > 4 else ''))
+    return False, ''
+
+
 def _startup_load():
     global _DL_STATE, _DL_BUFFER
 
@@ -8024,25 +8083,30 @@ def _startup_load():
         except Exception as e:
             print(f"⚠ Lettura {_arima_pkl.name} fallita: {e}")
 
-    # Scarica in background tutti i file xlsx per cui manca il pkl
+    # Scarica in background i dataset che mancano, sono vecchi o incompleti
     def _bg_all():
         start = (pd.Timestamp.today() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
-        xlsx_files = _dataset_xlsx_paths() or [Path(_XLSX)]
-        for xlsx_path in xlsx_files:
+        primo = True
+        for xlsx_path in _dataset_ordinati():
             filename  = xlsx_path.name
             cache_pkl = _file_cache_path(filename)
-            if Path(cache_pkl).exists():
-                print(f"✓ Cache {filename} già presente — skip download")
+            serve, motivo = _dataset_da_rifare(filename, cache_pkl)
+            if not serve:
+                print(f"✓ Cache {filename} aggiornata — nessun download al boot")
                 continue
+            if not primo:
+                # Mezzo minuto fra un dataset e l'altro: quattro download di fila
+                # senza pause erano la raffica che Yahoo bloccava.
+                time.sleep(_PAUSA_DATASET_BOOT)
+            primo = False
             try:
-                print(f"▶ Download iniziale {filename}…")
+                print(f"▶ Download {filename} — {motivo}")
                 tickers, descr, valuta = _build_ticker_list(filename)
-                is_etf = (filename == 'ETF.xlsx')
-                _do_download(tickers, descr, valuta, start,
-                             cache_file=cache_pkl, update_buffer=is_etf)
+                _do_download(tickers, descr, valuta, start, cache_file=cache_pkl,
+                             update_buffer=(filename == 'ETF.xlsx'))
                 print(f"✓ Download completato: {filename}")
             except Exception as e:
-                print(f"⚠ Download iniziale {filename} fallito: {e}")
+                print(f"⚠ Download {filename} fallito: {e}")
 
     threading.Thread(target=_bg_all, daemon=True).start()
 
@@ -8600,10 +8664,7 @@ def _slot_job(indice):
 
 def _dataset_per_job():
     """I dataset nell'ordine del menu (_FILE_ORDER): il primo prende mezzanotte."""
-    files = _dataset_xlsx_paths() or [Path(_XLSX)]
-    files.sort(key=lambda f: _FILE_ORDER.index(f.stem.upper())
-               if f.stem.upper() in _FILE_ORDER else 99)
-    return [f.name for f in files]
+    return [f.name for f in _dataset_ordinati()]
 
 
 def _programma_job_notturni(scheduler):
