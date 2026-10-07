@@ -1435,9 +1435,17 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
         _CL_STATES[username]['current'] = total
     # Scrivi JSON e pesi P1 PRIMA di segnalare 'done' al poll
     _write_user_json(close_returns, original_prices, ticker_map, valuta_map, username=username, reset_state=True)
-    if pesi_p1:
-        _update_user_json(weights={'P1': pesi_p1, 'P2': {}, 'P3': {}}, username=username)
-        print(f"✓ Pesi P1 impostati: {len(pesi_p1)} asset")
+    # `_write_user_json(reset_state=True)` qui sopra azzera anche 'checked', e
+    # nessuno lo rimetteva: il file caricato finiva in current.json con i prezzi e
+    # con i pesi, ma con zero asset selezionati, e la pagina restava vuota a
+    # download finito — sembrava che il sito si fosse bloccato. Si selezionano
+    # tutti gli asset scaricati: i pesi restano quelli del file e definiscono P1,
+    # la spunta serve solo a farli comparire nell'analisi.
+    _update_user_json(checked=list(all_prices),
+                      weights=({'P1': pesi_p1, 'P2': {}, 'P3': {}} if pesi_p1 else None),
+                      username=username)
+    print(f"✓ Selezionati {len(all_prices)} asset"
+          + (f", pesi P1 su {len(pesi_p1)}" if pesi_p1 else " (il file non porta pesi)"))
     # Auto-save nella sessione di lavoro condivisa
     _sm.save_working(username, {
         'close_returns':   close_returns,
