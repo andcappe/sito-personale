@@ -213,9 +213,21 @@ def serve_profilo():
 def serve_foto():
     return flask_send_file(_FOTO_PNG, mimetype='image/png')
 
+def _solo_admin():
+    """Redirect alla home se l'utente in sessione non è admin, altrimenti None."""
+    from flask import redirect
+    from auth import get_user
+    u = _get_username()
+    user = get_user(u) if u != 'anon' else None
+    if not user or user.get('role') != 'admin':
+        return redirect('/')
+    return None
+
 @app.server.route('/clienti')
 def pagina_clienti():
     from flask import Response
+    if (r := _solo_admin()) is not None:
+        return r
     files = sorted(SESSIONS_DIR.glob('tickers_*.xlsx'))
     righe = ''
     for i, f in enumerate(files, 1):
@@ -275,6 +287,8 @@ def pagina_clienti():
 @app.server.route('/clienti/download/<filename>')
 def download_client_file(filename):
     from flask import abort
+    if (r := _solo_admin()) is not None:
+        return r
     if not filename.startswith('tickers_') or not filename.endswith('.xlsx'):
         abort(404)
     filepath = SESSIONS_DIR / filename
