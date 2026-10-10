@@ -929,6 +929,45 @@ def _get_username() -> str:
         return 'anon'
 
 
+# ─── Memoria delle serie spente in legenda ──────────────────────────────────
+# Un click su una voce di legenda spegne la serie (visible='legendonly'), ma Plotly
+# lo ricorda solo finché la uirevision non cambia: aggiungere/togliere una serie o
+# cambiare file ridisegnava tutto acceso. Qui lo stato vive per utente in
+# sessions/<user>/grafici_nascosti.json ({id_grafico: [nomi serie]}), sincronizzato
+# su R2, e viene riapplicato a ogni figura prima di restituirla. Chiave = nome della
+# serie, così vale anche per serie che ricompaiono dopo essere state tolte.
+_GRAFICI_CON_MEMORIA = ('controls-and-graph', 'rolling-corr-chart',
+                        'roll-chart-returns', 'roll-chart-diff', 'roll-chart-summary')
+_NASCOSTI_LOCK = threading.Lock()
+
+
+def _nascosti_path(username: str) -> Path:
+    return Path(dc.ROOT) / 'sessions' / username / 'grafici_nascosti.json'
+
+
+def _leggi_nascosti(username: str) -> dict:
+    try:
+        with open(_nascosti_path(username)) as f:
+            raw = json.load(f)
+        return {k: list(v) for k, v in raw.items() if isinstance(v, list)}
+    except Exception:
+        return {}
+
+
+def _applica_nascosti(fig, graph_id: str):
+    """Spegne (legendonly) le serie che l'utente aveva spento in legenda."""
+    try:
+        nascosti = set(_leggi_nascosti(_get_username()).get(graph_id, []))
+        if not nascosti:
+            return fig
+        for tr in fig.data:
+            if tr.name in nascosti:
+                tr.visible = 'legendonly'
+    except Exception as e:
+        print(f"⚠ [legenda] {graph_id}: {e}", flush=True)
+    return fig
+
+
 def _cl_buf(username: str) -> dict:
     with _CL_LOCK:
         if username not in _CL_BUFFERS:
@@ -3694,6 +3733,11 @@ app.layout = html.Div([
     dcc.Store(id='custom-tickers-store',    data=None),
     dcc.Store(id='upload-done-ts',          data=None),
     dcc.Store(id='nav-reload',              storage_type='memory', data=None),
+    dcc.Store(id='legenda-controls-and-graph', data=None),
+    dcc.Store(id='legenda-rolling-corr-chart', data=None),
+    dcc.Store(id='legenda-roll-chart-returns', data=None),
+    dcc.Store(id='legenda-roll-chart-diff', data=None),
+    dcc.Store(id='legenda-roll-chart-summary', data=None),
     dcc.Download(id='download-data'),
     dcc.Download(id='download-template'),
     dcc.Download(id='isin-download-data'),
@@ -4645,6 +4689,7 @@ def update_rolling_corr(ml_vals, benchmark, stock_data, date_start, date_end, wi
         legend=dict(orientation='v', yanchor='top', y=1, xanchor='left', x=1.01, font=dict(size=10)),
         margin=dict(l=50, r=190, t=50, b=40), hovermode='x unified',
         paper_bgcolor='white', plot_bgcolor='#f9f9f9')
+    _applica_nascosti(fig, 'rolling-corr-chart')
     return fig
 
 
@@ -5089,6 +5134,9 @@ def calcola_rolling(n_clicks, bm_scelto, bm, cmp1, extra1, extra2,
         pezzi.append('⚠ ' + ' · '.join(errori[:3]))
     stato = html.Div([html.Div(' | '.join(pezzi)),
                       _roll_riga_valute(info_val, nomi)])
+    _applica_nascosti(fig_ret, 'roll-chart-returns')
+    _applica_nascosti(fig_diff, 'roll-chart-diff')
+    _applica_nascosti(fig_sum, 'roll-chart-summary')
     return fig_ret, fig_diff, fig_sum, tabella, stato
 
 
@@ -6984,6 +7032,75 @@ def update_portfolio_weights(all_input_values, all_input_ids, p1_data, p2_data, 
             p1, p2, p3)
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legenda: ricorda le serie spente/riaccese dall'utente (vedi _applica_nascosti)
+# ─────────────────────────────────────────────────────────────────────────────
+# Lato client si traducono gli indici di restyleData in nomi di serie (la figura
+# è già nel browser: niente round-trip del grafico intero); lato server si
+# aggiorna il file dell'utente.
+for _gid in _GRAFICI_CON_MEMORIA:
+    app.clientside_callback(
+        """
+        function(rd, fig) {
+            var nu = window.dash_clientside.no_update;
+            if (!rd || !fig || !fig.data) return nu;
+            var ch = rd[0] || {};
+            if (!('visible' in ch)) return nu;
+            var vis = ch.visible;
+            var idx = rd[1];
+            if (!idx) { idx = fig.data.map(function(_, i) { return i; }); }
+            var stato = {};
+            idx.forEach(function(i, k) {
+                var v = Array.isArray(vis) ? vis[k] : vis;
+                var t = fig.data[i];
+                if (!t || !t.name) return;
+                stato[t.name] = !(v === 'legendonly' || v === false);
+            });
+            return {stato: stato, t: Date.now()};
+        }
+        """,
+        Output(f'legenda-{_gid}', 'data'),
+        Input(_gid, 'restyleData'),
+        State(_gid, 'figure'),
+        prevent_initial_call=True,
+    )
+
+
+@app.callback(
+    [Input(f'legenda-{g}', 'data') for g in _GRAFICI_CON_MEMORIA],
+    prevent_initial_call=True,
+)
+def salva_legenda(*modifiche):
+    gid = callback_context.triggered_id
+    if not isinstance(gid, str) or not gid.startswith('legenda-'):
+        raise PreventUpdate
+    gid = gid[len('legenda-'):]
+    dato = modifiche[_GRAFICI_CON_MEMORIA.index(gid)] or {}
+    stato = dato.get('stato') or {}
+    if not stato:
+        raise PreventUpdate
+    username = _get_username()
+    path = _nascosti_path(username)
+    with _NASCOSTI_LOCK:
+        tutti = _leggi_nascosti(username)
+        nascosti = set(tutti.get(gid, []))
+        for nome, visibile in stato.items():
+            if visibile:
+                nascosti.discard(nome)
+            else:
+                nascosti.add(nome)
+        tutti[gid] = sorted(nascosti)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = str(path) + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(tutti, f)
+            os.replace(tmp, path)
+            dc.cloud_push(path)
+        except Exception as e:
+            print(f"⚠ [legenda] salvataggio fallito: {e}", flush=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Callback: seleziona colonna dal click sul grafico
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7539,6 +7656,7 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
     insuff_text = (f"Ticker con dati insufficienti: {', '.join(insufficient_data)}"
                    if insufficient_data else "")
 
+    _applica_nascosti(fig, 'controls-and-graph')
     return fig, date_values, insuff_text
 
 
