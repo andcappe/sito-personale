@@ -30,6 +30,11 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# ─── yfinance: un solo yf.download alla volta in tutto il processo (vedi
+#     yf_seriale.py). Prima di montare le app, così vale per tutte.
+import yf_seriale
+yf_seriale.installa()
+
 # ─── Storage persistente (S3/R2): scarica i dati dal bucket PRIMA di montare le
 #     app, così sopravvivono ai deploy/restart del filesystem effimero di DO.
 #     No-op se le env vars S3_* non sono presenti (es. sviluppo locale).

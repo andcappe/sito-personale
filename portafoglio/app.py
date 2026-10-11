@@ -29,6 +29,7 @@ from style_analysis import get_style_analysis_tab, register_style_analysis_callb
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import yf_seriale; yf_seriale.installa()   # un yf.download alla volta (anche standalone)
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -569,11 +570,20 @@ def _introvabili_leggi() -> dict:
         return {}
 
 
+# Giorni in cui la lista si è riempita di falsi "introvabili": l'11/10/2026 due
+# yf.download in parallelo si sono mescolati i risultati (vedi yf_seriale.py) e
+# hanno marcato titoli buoni come EIMI.MI e SGLD.MI. Quelle voci si ignorano: al
+# peggio un titolo davvero introvabile viene riprovato una volta in più.
+_INTROVABILI_GIORNI_INQUINATI = {'2026-10-11'}
+
+
 def _introvabili_attivi() -> set:
     """I ticker da saltare adesso (falliti da meno di _INTROVABILI_GIORNI)."""
     limite = datetime.now() - timedelta(days=_INTROVABILI_GIORNI)
     fuori  = set()
     for tk, quando in _introvabili_leggi().items():
+        if quando in _INTROVABILI_GIORNI_INQUINATI:
+            continue
         try:
             if datetime.strptime(quando, '%Y-%m-%d') >= limite:
                 fuori.add(tk)
