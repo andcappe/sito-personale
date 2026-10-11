@@ -978,6 +978,30 @@ def _applica_nascosti(fig, graph_id: str):
     return fig
 
 
+def _scrivi_nascosti(username: str, tutti: dict):
+    """Scrittura atomica + push su R2. Va chiamata con _NASCOSTI_LOCK preso."""
+    path = _nascosti_path(username)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(path) + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(tutti, f)
+    os.replace(tmp, path)
+    dc.cloud_push(path)
+
+
+def _dimentica_nascosti(graph_id: str, nomi: set):
+    """Toglie `nomi` dalle serie spente di `graph_id` (se c'erano)."""
+    username = _get_username()
+    with _NASCOSTI_LOCK:
+        tutti = _leggi_nascosti(username)
+        prima = set(tutti.get(graph_id, []))
+        dopo = prima - set(nomi)
+        if dopo == prima:
+            return
+        tutti[graph_id] = sorted(dopo)
+        _scrivi_nascosti(username, tutti)
+
+
 def _cl_buf(username: str) -> dict:
     with _CL_LOCK:
         if username not in _CL_BUFFERS:
@@ -3748,6 +3772,7 @@ app.layout = html.Div([
     dcc.Store(id='legenda-roll-chart-returns', data=None),
     dcc.Store(id='legenda-roll-chart-diff', data=None),
     dcc.Store(id='legenda-roll-chart-summary', data=None),
+    dcc.Store(id='legenda-pulizia', data=None),
     dcc.Download(id='download-data'),
     dcc.Download(id='download-template'),
     dcc.Download(id='isin-download-data'),
@@ -6886,6 +6911,17 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
 )
 def collect_selected_assets(all_values):
     selected = [v[0] for v in all_values if v]
+    # Un asset tolto dalla selezione esce anche dalla memoria della legenda:
+    # rimesso più avanti, ricompare acceso invece che ancora spento.
+    try:
+        prima = {d for d, v in _read_user_json().items()
+                 if isinstance(v, dict) and v.get('checked')}
+        tolti = prima - set(selected)
+        if tolti:
+            _dimentica_nascosti('controls-and-graph',
+                                {f'{a} Cum. Returns' for a in tolti})
+    except Exception as e:
+        print(f"⚠ [legenda] pulizia asset tolti: {e}", flush=True)
     _update_user_json(checked=selected)
     return selected
 
@@ -7065,8 +7101,12 @@ for _gid in _GRAFICI_CON_MEMORIA:
                 var v = Array.isArray(vis) ? vis[k] : vis;
                 var t = fig.data[i];
                 if (!t || !t.name) return;
-                stato[t.name] = !(v === 'legendonly' || v === false);
+                // visible=false arriva solo dalla rimozione di un asset tolto
+                // dalla selezione (callback sotto), non da un click in legenda.
+                if (v === false) return;
+                stato[t.name] = (v !== 'legendonly');
             });
+            if (!Object.keys(stato).length) return nu;
             return {stato: stato, t: Date.now()};
         }
         """,
@@ -7075,6 +7115,37 @@ for _gid in _GRAFICI_CON_MEMORIA:
         State(_gid, 'figure'),
         prevent_initial_call=True,
     )
+
+
+# Asset tolto dalla selezione → la sua curva esce subito dal grafico e dalla
+# legenda, senza aspettare Update (che ridisegnerebbe comunque senza). Si spegne
+# con visible=false invece di cancellare la traccia: così gli indici di
+# restyleData restano allineati alla figura che il callback qui sopra legge.
+app.clientside_callback(
+    """
+    function(sel, ids) {
+        var nu = window.dash_clientside.no_update;
+        var gd = document.querySelector('#controls-and-graph .js-plotly-plot');
+        if (!gd || !gd.data || !ids) return nu;
+        var scelti = {};
+        (sel || []).forEach(function(a) { scelti[a] = true; });
+        var togliere = {};
+        ids.forEach(function(id) {
+            if (id && !scelti[id.index]) togliere[id.index + ' Cum. Returns'] = true;
+        });
+        var idx = [];
+        gd.data.forEach(function(t, i) {
+            if (t.name && togliere[t.name] && t.visible !== false) idx.push(i);
+        });
+        if (idx.length) window.Plotly.restyle(gd, {visible: false}, idx);
+        return nu;
+    }
+    """,
+    Output('legenda-pulizia', 'data'),
+    Input('global-assets-selected', 'data'),
+    State({'type': 'graph-select-checkbox', 'index': ALL}, 'id'),
+    prevent_initial_call=True,
+)
 
 
 @app.callback(
@@ -7091,7 +7162,6 @@ def salva_legenda(*modifiche):
     if not stato:
         raise PreventUpdate
     username = _get_username()
-    path = _nascosti_path(username)
     with _NASCOSTI_LOCK:
         tutti = _leggi_nascosti(username)
         nascosti = set(tutti.get(gid, []))
@@ -7102,12 +7172,7 @@ def salva_legenda(*modifiche):
                 nascosti.add(nome)
         tutti[gid] = sorted(nascosti)
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = str(path) + '.tmp'
-            with open(tmp, 'w') as f:
-                json.dump(tutti, f)
-            os.replace(tmp, path)
-            dc.cloud_push(path)
+            _scrivi_nascosti(username, tutti)
         except Exception as e:
             print(f"⚠ [legenda] salvataggio fallito: {e}", flush=True)
 
