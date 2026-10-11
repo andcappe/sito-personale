@@ -30,6 +30,12 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# ─── Memoria: arene malloc limitate + malloc_trim periodico (vedi memoria.py).
+#     Prima di qualunque thread (scheduler, prewarm), altrimenti il limite alle
+#     arene arriva tardi.
+import memoria
+memoria.installa()
+
 # ─── yfinance: un solo yf.download alla volta in tutto il processo (vedi
 #     yf_seriale.py). Prima di montare le app, così vale per tutte.
 import yf_seriale
