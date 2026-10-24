@@ -185,6 +185,15 @@ def pull_all() -> int:
                     try:
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         cli.download_file(bkt, key, str(dest))
+                        # Data del file = ultimo caricamento sul bucket, non
+                        # l'ora del boot: chi misura l'età di una cache dalla
+                        # data del file (bilanci Alpha Vantage) altrimenti la
+                        # vedrebbe ringiovanire a ogni deploy.
+                        try:
+                            ts = obj['LastModified'].timestamp()
+                            os.utime(dest, (ts, ts))
+                        except Exception:
+                            pass
                         n += 1
                     except Exception as e:
                         print(f"⚠ [cloud] download fallito {key}: {e}", flush=True)

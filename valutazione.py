@@ -21,6 +21,7 @@ Uso da un'app Dash:
     ...  valutazione.layout()              # contenuto del tab
     valutazione.register_callbacks(app)    # callback (una volta sola)
 """
+import datetime
 import json
 import os
 import time
@@ -41,7 +42,20 @@ _AV_URL   = "https://www.alphavantage.co/query"
 _AV_KEY   = os.environ.get("ALPHA_VANTAGE_API_KEY", "ZX9YB88WV3EYUBTT")
 _AV_DIR   = Path(__file__).resolve().parent / "sessions" / "_alphavantage"
 _AV_TTL   = 30 * 24 * 3600          # 30 giorni
-_AV_MEM   = {}                      # (ticker, prospetto) → payload: gli slider non riscaricano
+# Oltre ai 30 giorni la cache scade anche quando dovrebbero essere usciti conti
+# nuovi: un trimestre dura ~91 giorni e le società pubblicano da circa due
+# settimane dopo la chiusura, quindi passati 105 giorni dalla fine dell'ultimo
+# trimestre in cache si va a vedere. Senza questo META, con i conti usciti il
+# 21/10/2026, restava al trimestre di giugno fino alla scadenza dei 30 giorni.
+# Il controllo si ripete al massimo ogni 2 giorni per titolo, per non consumare
+# le 25 richieste quando Alpha Vantage è in ritardo sul titolo.
+_AV_CONTI_TRIM = 105                # giorni dalla fine dell'ultimo trimestre
+_AV_CONTI_ANNO = 365 + 75           # idem per i titoli con soli dati annuali
+_AV_RIPROVA = 2 * 24 * 3600         # 2 giorni fra due controlli dello stesso prospetto
+# (ticker, prospetto) → (payload, scaricato, controllato): gli slider non
+# riscaricano. `scaricato` è quando il dato è arrivato da Alpha Vantage,
+# `controllato` l'ultimo tentativo (anche fallito) di aggiornarlo.
+_AV_MEM   = {}
 _AV_ERR   = {}                      # (ticker, prospetto) → (messaggio, quando): vedi sotto
 _AV_ERR_TTL = 15 * 60               # 15 minuti
 _AV_PAUSA  = 1.2                    # secondi fra due chiamate: il limite è 1/s
@@ -80,6 +94,38 @@ def _av_num(v):
         return None
 
 
+def _av_ultimo_periodo(payload):
+    """(data di chiusura dell'ultimo periodo, è trimestrale?) o (None, False)."""
+    for chiave, trim in (("quarterlyReports", True), ("annualReports", False)):
+        fini = [r.get("fiscalDateEnding") for r in (payload or {}).get(chiave) or []]
+        fini = [d for d in fini if d]
+        if fini:
+            try:
+                return datetime.date.fromisoformat(max(fini)[:10]), trim
+            except ValueError:
+                pass
+    return None, False
+
+
+def _av_scaduto(payload, scaricato, controllato):
+    """True se il prospetto in cache va riscaricato (30 giorni o conti nuovi attesi)."""
+    ora = time.time()
+    if ora - controllato < _AV_RIPROVA:
+        return False
+    if ora - scaricato >= _AV_TTL:
+        return True
+    fine, trim = _av_ultimo_periodo(payload)
+    if fine is None:
+        return False
+    soglia = _AV_CONTI_TRIM if trim else _AV_CONTI_ANNO
+    return (datetime.date.today() - fine).days > soglia
+
+
+def _av_eta(scaricato):
+    giorni = (time.time() - scaricato) / 86400
+    return f"scaricato {giorni:.0f} giorni fa" if giorni >= 1 else "scaricato oggi"
+
+
 def av_prospetto(ticker, prospetto="ce", forza=False):
     """Un prospetto di bilancio (annuale + trimestrale) da Alpha Vantage.
 
@@ -95,8 +141,14 @@ def av_prospetto(ticker, prospetto="ce", forza=False):
         return None, "nessun ticker"
     ch = (ticker, prospetto)
 
+    # Cache scaduta ma ancora buona come riserva: se l'aggiornamento fallisce
+    # (limite di 25 al giorno, rete) si mostra quella invece di un errore.
+    vecchio = None                      # (payload, scaricato)
     if not forza and ch in _AV_MEM:
-        return _AV_MEM[ch], "memoria"
+        payload, scaricato, controllato = _AV_MEM[ch]
+        if not _av_scaduto(payload, scaricato, controllato):
+            return payload, "memoria"
+        vecchio = (payload, scaricato)
 
     # Anche i fallimenti restano in memoria per un quarto d'ora: il tab si
     # ridisegna a ogni slider e senza questo un titolo non coperto brucerebbe
@@ -108,17 +160,25 @@ def av_prospetto(ticker, prospetto="ce", forza=False):
         del _AV_ERR[ch]
 
     def _fallito(msg):
+        if vecchio:
+            # Il prossimo tentativo fra _AV_RIPROVA, non al prossimo slider.
+            _AV_MEM[ch] = (vecchio[0], vecchio[1], time.time())
+            return vecchio[0], (f"{_av_eta(vecchio[1])}, aggiornamento non "
+                                f"riuscito: {msg[:120]}")
         _AV_ERR[ch] = (msg, time.time())
         return None, msg
 
+    # La data del file è quella dello scarico: pull_all la riporta da R2,
+    # altrimenti a ogni riavvio la cache sembrerebbe appena scaricata.
     f = _AV_DIR / f"{ticker}{suffisso}.json"
-    if not forza and f.exists() and (time.time() - f.stat().st_mtime) < _AV_TTL:
+    if not forza and vecchio is None and f.exists():
         try:
             payload = json.loads(f.read_text())
-            _AV_MEM[ch] = payload
-            giorni = (time.time() - f.stat().st_mtime) / 86400
-            return payload, (f"scaricato {giorni:.0f} giorni fa"
-                             if giorni >= 1 else "scaricato oggi")
+            scaricato = f.stat().st_mtime
+            if not _av_scaduto(payload, scaricato, scaricato):
+                _AV_MEM[ch] = (payload, scaricato, scaricato)
+                return payload, _av_eta(scaricato)
+            vecchio = (payload, scaricato)
         except Exception:
             pass
 
@@ -171,7 +231,7 @@ def av_prospetto(ticker, prospetto="ce", forza=False):
     except Exception:
         pass
 
-    _AV_MEM[ch] = payload
+    _AV_MEM[ch] = (payload, time.time(), time.time())
     return payload, "appena scaricato"
 
 
