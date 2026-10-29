@@ -632,6 +632,400 @@ def _ricl_rendiconto(periodi):
     ]
 
 
+# ── Bilanci per periodo ──────────────────────────────────────────────────────
+# Seconda vista sui tre prospetti riclassificati, accanto al tab Bilanci (che
+# resta com'è): qui si sceglie cosa vedere — quali prospetti, esercizi annuali
+# e/o trimestri singoli, la colonna TTM accanto agli annuali — e sotto ogni
+# prospetto ci sono i grafici delle voci chiave con la variazione anno su anno
+# e trimestre su trimestre. Stessi builder `_ricl_*`, stessa grafica.
+# Quanti periodi entrano nei grafici: Alpha Vantage ha storia dal 2007, ma su
+# venti esercizi le barre dei primi anni sono schiacciate sullo zero e le loro
+# variazioni (da basi minuscole) dettano la scala dell'asse di destra.
+_BP_GRAF_ANNI, _BP_GRAF_TRIM = 10, 20
+_BP_TBL = {"width": "100%", "border-collapse": "collapse", "font-size": "12px",
+           "border": "1px solid #ddd"}
+_BP_TH  = {"background": "#f0f0f0", "font-size": "12px", "padding": "6px 8px",
+           "text-align": "left"}
+_BP_TD  = {"padding": "5px 8px", "border-bottom": "1px solid #eee"}
+
+# chiave → (titolo, flusso, builder, colonna extra)
+_BP_PROSPETTI = {
+    "sp": ("🏛 Stato patrimoniale riclassificato (criterio funzionale)",
+           False, _ricl_stato_patrimoniale, ""),
+    "ce": ("📑 Conto economico riclassificato (a costo del venduto)",
+           True, _ricl_conto_economico, "% ricavi"),
+    "cf": ("💧 Rendiconto finanziario riclassificato",
+           True, _ricl_rendiconto, ""),
+}
+
+# Voci disegnate per ogni prospetto: (etichetta della riga nel builder, titolo
+# del grafico, colore, segno). Il capex il builder lo porta negativo: col segno
+# rovesciato la variazione si legge sull'importo investito, altrimenti la base
+# sarebbe sempre negativa e la linea non comparirebbe mai.
+_BP_GRAFICI = {
+    "sp": [("CAPITALE INVESTITO NETTO (CIN)", "Capitale investito netto", "#1f77b4", 1),
+           ("Capitale circolante netto (CCN)", "Capitale circolante netto", "#17becf", 1),
+           ("Posizione finanziaria netta (PFN)", "Posizione finanziaria netta",
+            "#8c564b", 1),
+           ("Patrimonio netto", "Patrimonio netto", "#2ca02c", 1)],
+    "ce": [("Ricavi", "Ricavi", "#1f77b4", 1),
+           ("Margine lordo", "Margine lordo", "#9467bd", 1),
+           ("Risultato operativo (EBIT)", "Risultato operativo (EBIT)", "#ff7f0e", 1),
+           ("UTILE NETTO", "Utile netto", "#2ca02c", 1)],
+    "cf": [("Flusso di cassa operativo (CFO)", "Flusso di cassa operativo",
+            "#1f77b4", 1),
+           ("Investimenti in immobilizzazioni (capex)", "Investimenti (capex)",
+            "#8c564b", -1),
+           ("FREE CASH FLOW (CFO − capex)", "Free cash flow", "#2ca02c", 1)],
+}
+
+
+def _bp_var(y, passo):
+    """Variazione % su `passo` periodi prima (y dal più vecchio). Da una base
+    negativa o nulla la percentuale non vuol dire niente: resta un buco, come
+    nel tab Bilanci."""
+    out = []
+    for i, v in enumerate(y):
+        prec = y[i - passo] if i >= passo else None
+        out.append((v / prec - 1) * 100
+                   if (v is not None and prec is not None and prec > 0) else None)
+    return out
+
+
+def _bp_riga_stile(stile):
+    if stile == "sez":
+        return ({**_BP_TD, "background": "#eaf4fb", "font-weight": "bold",
+                 "color": "#1a5276", "font-size": "11px", "padding": "5px 8px"}, None)
+    if stile == "nota":
+        return ({**_BP_TD, "color": "#8a6d3b", "font-size": "10px",
+                 "font-style": "italic", "background": "#fdf7e6",
+                 "line-height": "1.5"}, None)
+    if stile == "totf":
+        return ({**_BP_TD, "background": "#eaf4fb", "font-weight": "bold",
+                 "color": "#1a3a5c", "border-top": "2px solid #1a3a5c"},
+                {"font-weight": "bold", "color": "#1a3a5c"})
+    if stile == "tot":
+        return ({**_BP_TD, "background": "#fafafa", "font-weight": "bold",
+                 "border-top": "1px solid #bbb"}, {"font-weight": "bold"})
+    if stile == "sub":
+        return ({**_BP_TD, "padding-left": "26px", "color": "#888",
+                 "font-size": "11px", "font-style": "italic"},
+                {"color": "#888", "font-size": "11px"})
+    if stile == "memo":
+        return ({**_BP_TD, "color": "#888", "font-style": "italic"},
+                {"color": "#888", "font-style": "italic"})
+    return ({**_BP_TD, "color": "#444"}, {})
+
+
+def _bp_tabella(righe, intest, extra_tit, scala, valuta, evidenzia=0):
+    """Tabella riclassificata, identica a quella del tab Bilanci. `evidenzia`
+    colora di sfondo le prime colonne (la TTM, che non è un esercizio)."""
+    div, um, dec = scala
+    n_col = len(intest) + (1 if extra_tit else 0)
+    corpo = []
+    for stile, etichetta, valori, extra in righe:
+        st_lbl, st_val = _bp_riga_stile(stile)
+        if st_val is None:
+            corpo.append(html.Tr([html.Td(etichetta, colSpan=n_col + 1, style=st_lbl)]))
+            continue
+        celle = []
+        for j, v in enumerate(valori):
+            col = dict(st_val)
+            if v is not None and v < 0 and stile in ("tot", "totf"):
+                col["color"] = "#b0413e"
+            if j < evidenzia:
+                col["background"] = "#fff8e6"
+            celle.append(html.Td("—" if v is None else f"{v / div:,.{dec}f}",
+                                 style={**_BP_TD, "text-align": "right",
+                                        "font-variant-numeric": "tabular-nums", **col}))
+        if extra_tit:
+            celle.append(html.Td(extra, style={
+                **_BP_TD, "text-align": "right", "color": "#777", "font-size": "11px",
+                **({"font-weight": "bold"} if stile in ("tot", "totf") else {})}))
+        corpo.append(html.Tr([html.Td(etichetta, style=st_lbl)] + celle))
+    testata = [html.Th(f"valori in {um} {valuta}", style=_BP_TH)] + \
+              [html.Th(t, style={**_BP_TH, "text-align": "right",
+                                 **({"background": "#fbecc4"} if j < evidenzia else {})})
+               for j, t in enumerate(intest)]
+    if extra_tit:
+        testata.append(html.Th(extra_tit, style={**_BP_TH, "text-align": "right"}))
+    return html.Table([html.Thead(html.Tr(testata)), html.Tbody(corpo)],
+                      style=_BP_TBL)
+
+
+def _bp_grafico(x, y, titolo, colore, unita, linee, ttm=None):
+    """Barre del valore e, sull'asse destro, le linee di variazione.
+    `linee` = [(nome, valori, colore, tratteggio)]; `ttm` = (etichetta,
+    valore, variazione su un anno prima) aggiunge in coda la barra TTM,
+    tratteggiata perché non è un esercizio."""
+    x = list(x)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=x, y=y, marker_color=colore, name=titolo,
+                         hovertemplate=f"%{{y:,.2f}} {unita}<extra></extra>"))
+    if ttm is not None:
+        fig.add_trace(go.Bar(x=[ttm[0]], y=[ttm[1]], name=ttm[0],
+                             marker=dict(color=colore, opacity=0.5,
+                                         pattern=dict(shape="/")),
+                             hovertemplate=f"%{{y:,.2f}} {unita}<extra></extra>"))
+    for nome, valori, c, dash in linee:
+        xs, ys = x, list(valori)
+        if ttm is not None and nome.startswith("Anno"):
+            xs, ys = x + [ttm[0]], ys + [ttm[2]]
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines+markers", yaxis="y2",
+                                 line=dict(color=c, width=1.8, dash=dash),
+                                 marker=dict(size=4), name=nome, connectgaps=False,
+                                 hovertemplate="%{y:+.1f}%<extra></extra>"))
+    if linee:
+        fig.add_hline(y=0, line_color="#d62728", line_width=1, line_dash="dot",
+                      opacity=0.45, yref="y2")
+    fig.update_layout(
+        title=dict(text=titolo, font=dict(size=11)),
+        xaxis=dict(type="category", tickfont=dict(size=9)),
+        yaxis=dict(title=unita),
+        margin=dict(t=40, b=30, l=55, r=52 if linee else 18),
+        paper_bgcolor="white", plot_bgcolor="#f8f8f8", barmode="overlay",
+        showlegend=bool(linee) or ttm is not None, hovermode="x unified",
+        legend=dict(orientation="h", y=1.02, x=0, font=dict(size=9)))
+    if linee:
+        fig.update_layout(yaxis2=dict(
+            title=dict(text="var. %", font=dict(color="#d62728")),
+            overlaying="y", side="right", showgrid=False,
+            tickfont=dict(color="#d62728"), ticksuffix="%"))
+    return dcc.Graph(figure=fig, style={"height": "290px"},
+                     config={"displayModeBar": False})
+
+
+def _bp_riga(righe, etichetta):
+    return next((v for _, et, v, _ in righe if et == etichetta), None)
+
+
+def bilanci_per_periodo(ticker, name, prospetti, periodi, opzioni, n_col):
+    """Contenuto della vista «Bilanci per periodo» (vedi sopra)."""
+    prospetti = [k for k in ("sp", "ce", "cf") if k in (prospetti or [])]
+    periodi   = [k for k in ("annuale", "trimestrale") if k in (periodi or [])]
+    opzioni   = set(opzioni or [])
+    n_col     = int(n_col or 5)
+    avviso = lambda t: html.P(t, style={"font-size": "12px", "color": "#888",
+                                        "padding": "20px 0"})
+    if not prospetti or not periodi:
+        return avviso("Spunta almeno un prospetto e un tipo di periodo.")
+
+    # Il conto economico per primo, come nel tab Bilanci: se manca (titolo non
+    # coperto, limite giornaliero) gli altri due non si chiedono neanche.
+    pay_ce, fonte_ce = av_prospetto(ticker, "ce")
+    if not pay_ce:
+        return html.Div([
+            html.P(f"⚠ {fonte_ce}", style={"font-size": "12px", "color": "#b0413e"}),
+            html.P("Alpha Vantage copre i titoli quotati negli USA con il simbolo "
+                   "senza suffisso (MSFT, AAPL, KO).",
+                   style={"font-size": "11px", "color": "#888"}),
+        ], style={"padding": "12px 0"})
+    dati = {"ce": (pay_ce, fonte_ce)}
+    for k in prospetti:
+        if k not in dati:
+            dati[k] = av_prospetto(ticker, k)
+    valuta = av_periodi(pay_ce, "annuale", n=1)[1]
+
+    # Prima si preparano tutte le tabelle, poi si sceglie un'unica unità di
+    # misura per tutte: lo stesso titolo non deve finire in miliardi in una
+    # tabella e in milioni in quella accanto.
+    sezioni = []
+    for per in periodi:
+        annuale = per == "annuale"
+        blocchi = []
+        for k in prospetti:
+            titolo, flusso, builder, extra = _BP_PROSPETTI[k]
+            pay, fonte = dati[k]
+            b = dict(k=k, titolo=titolo, extra=extra, errore=fonte, righe=None,
+                     intest=[], evid=0, nota="", grafici=[])
+            if not pay:
+                blocchi.append(b)
+                continue
+            if annuale:
+                tab = av_periodi(pay, "annuale", flusso=flusso, n=n_col)[0]
+                intest = [d for d, _ in tab]
+                nota = ("situazione alla chiusura di ciascun esercizio" if not flusso
+                        else "esercizi come pubblicati")
+                ttm_ok = False
+                if "ttm" in opzioni and tab:
+                    ult = av_periodi(pay, "ttm", flusso=flusso, n=1)[0]
+                    if ult and ult[0][0] > tab[0][0]:
+                        ttm_ok = True
+                        tab = ult + tab
+                        intest = [("ult. trim. " if not flusso else "TTM ") +
+                                  ult[0][0]] + intest
+                        nota += (" · prima colonna: l'ultimo trimestre pubblicato "
+                                 "(un patrimonio non si somma su 12 mesi)"
+                                 if not flusso else
+                                 " · prima colonna TTM: somma degli ultimi 4 "
+                                 "trimestri pubblicati")
+                    elif ult:
+                        nota += (" · l'ultimo trimestre pubblicato chiude "
+                                 "l'esercizio: il TTM coincide con l'ultimo anno")
+                b.update(evid=1 if ttm_ok else 0)
+            else:
+                # Trimestri singoli: per il conto economico e il rendiconto
+                # Alpha Vantage pubblica il trimestre da solo, non il cumulato
+                # da inizio anno, quindi si prende così com'è.
+                tab = av_periodi(pay, "ttm", flusso=False, n=n_col)[0]
+                intest = [d for d, _ in tab]
+                nota = ("fotografia alla fine di ciascun trimestre" if not flusso
+                        else "trimestre singolo (tre mesi), non cumulato")
+                ttm_ok = False
+            if not tab:
+                b["errore"] = "nessun periodo disponibile"
+                blocchi.append(b)
+                continue
+            b.update(righe=builder(tab), intest=intest, nota=nota)
+
+            # Grafici: tutta la storia disponibile, dal più vecchio.
+            if annuale:
+                st = av_periodi(pay, "annuale", flusso=flusso, n=1000)[0][::-1]
+            else:
+                st = av_periodi(pay, "ttm", flusso=False, n=1000)[0][::-1]
+            r_st = builder(st)
+            x = [d[:4] if annuale else d[:7] for d, _ in st]
+            ttm_r = None
+            if annuale and ttm_ok:
+                # Il TTM confrontato con il TTM di un anno prima (4 trimestri
+                # indietro), non con l'ultimo esercizio, che lo ricopre in parte.
+                tt = (av_periodi(pay, "ttm", flusso=flusso, n=5)[0])
+                ttm_r = ("ult. trim." if not flusso else "TTM", builder(tt))
+            b["grafici"] = [(et, tit, col, segno, x, _bp_riga(r_st, et),
+                             None if ttm_r is None else (ttm_r[0], _bp_riga(ttm_r[1], et)))
+                            for et, tit, col, segno in _BP_GRAFICI[k]]
+            blocchi.append(b)
+        sezioni.append((per, blocchi))
+
+    scala = av_scala([r for _, bl in sezioni for b in bl if b["righe"]
+                      for r in b["righe"]])
+    div, um, _ = scala
+    unita = f"{um} {valuta}"
+
+    def _sez(per, blocchi):
+        annuale = per == "annuale"
+        figli = [html.H5("📅 Esercizi annuali" if annuale else "🗓 Trimestri singoli",
+                         style={"font-size": "13px", "margin": "16px 0 8px",
+                                "color": "#1a3a5c",
+                                "border-bottom": "1px solid #1a3a5c",
+                                "padding-bottom": "4px"})]
+        for b in blocchi:
+            figli.append(html.H5(b["titolo"], style={"font-size": "12px",
+                                                     "margin": "12px 0 3px",
+                                                     "color": "#1a3a5c"}))
+            if b["righe"] is None:
+                figli.append(html.P(f"⚠ non disponibile — {b['errore']}",
+                                    style={"font-size": "11px", "color": "#b0413e"}))
+                continue
+            figli.append(html.P(b["nota"], style={"font-size": "10px", "color": "#888",
+                                                  "margin": "0 0 6px"}))
+            figli.append(_bp_tabella(b["righe"], b["intest"], b["extra"], scala,
+                                     valuta, evidenzia=b["evid"]))
+            graf = []
+            for et, tit, col, segno, x, val, ttm in b["grafici"]:
+                if not val or all(v is None for v in val):
+                    continue
+                y = [None if v is None else segno * v for v in val]
+                # Le variazioni si calcolano sull'intera storia e poi si taglia:
+                # così anche il primo punto disegnato ha la sua variazione.
+                ultimi = -(_BP_GRAF_ANNI if annuale else _BP_GRAF_TRIM)
+                linee = []
+                if "yoy" in opzioni:
+                    linee.append(("Anno su anno",
+                                  _bp_var(y, 1 if annuale else 4)[ultimi:],
+                                  "#d62728", "solid"))
+                if "qoq" in opzioni and not annuale:
+                    linee.append(("Trimestre su trimestre", _bp_var(y, 1)[ultimi:],
+                                  "#ff7f0e", "dot"))
+                ttm_g = None
+                if ttm is not None and ttm[1]:
+                    tv = ttm[1]
+                    v0 = None if tv[0] is None else segno * tv[0]
+                    v4 = (None if len(tv) < 5 or tv[4] is None else segno * tv[4])
+                    var = (v0 / v4 - 1) * 100 if (v0 is not None and v4 and v4 > 0) else None
+                    ttm_g = (ttm[0], None if v0 is None else v0 / div, var)
+                graf.append(_bp_grafico(
+                    x[ultimi:], [None if v is None else v / div for v in y][ultimi:],
+                    tit, col, unita, linee, ttm=ttm_g))
+            if graf:
+                figli.append(html.Div(
+                    [html.Div(g, style={"flex": "1 1 46%", "min-width": "320px"})
+                     for g in graf],
+                    style={"display": "flex", "flex-wrap": "wrap", "gap": "10px",
+                           "margin": "10px 0 6px"}))
+        return html.Div(figli)
+
+    nomi  = {"sp": "stato patrimoniale", "ce": "conto economico", "cf": "rendiconto"}
+    fonti = ", ".join(f"{nomi[k]} {dati[k][1]}" for k in prospetti)
+    spiegazione = []
+    if "yoy" in opzioni:
+        spiegazione.append("linea rossa = variazione su un anno prima "
+                           "(trimestri: stesso trimestre dell'anno prima)")
+    if "qoq" in opzioni and "trimestrale" in periodi:
+        spiegazione.append("linea arancio tratteggiata = variazione sul trimestre "
+                           "precedente")
+    if spiegazione:
+        spiegazione.append("la variazione non si calcola da una base negativa o nulla")
+    return html.Div([
+        html.P(f"Alpha Vantage ({fonti}) · valuta di bilancio {valuta}",
+               style={"font-size": "11px", "color": "#666", "margin": "0"}),
+        html.P(" · ".join(spiegazione),
+               style={"font-size": "11px", "color": "#666", "margin": "2px 0 0"})
+        if spiegazione else None,
+    ] + [_sez(per, bl) for per, bl in sezioni])
+
+
+def bilanci_per_periodo_controlli(name, ticker):
+    """Intestazione e caselle della vista. `persistence` perché il tab si
+    ridisegna a ogni movimento di slider: senza, le spunte tornerebbero ai
+    valori di partenza."""
+    lbl = {"font-size": "11px", "font-weight": "bold", "color": "#1a3a5c",
+           "margin-bottom": "4px"}
+    chk = {"display": "inline-block", "font-size": "11px", "color": "#333",
+           "margin-right": "12px"}
+    pers = dict(persistence=True, persistence_type="session")
+    return html.Div([
+        html.H4(f"Bilanci per periodo — {name} ({ticker})",
+                style={"font-size": "14px", "margin": "0 0 8px", "color": "#1a3a5c",
+                       "border-bottom": "2px solid #1a3a5c", "padding-bottom": "6px"}),
+        html.Div([
+            html.Div([html.Div("Prospetti", style=lbl),
+                      dcc.Checklist(id="val-bp-prospetti", value=["sp", "ce", "cf"],
+                                    options=[{"label": " Stato patrimoniale", "value": "sp"},
+                                             {"label": " Conto economico", "value": "ce"},
+                                             {"label": " Rendiconto finanziario",
+                                              "value": "cf"}],
+                                    labelStyle=chk, **pers)]),
+            html.Div([html.Div("Periodi", style=lbl),
+                      dcc.Checklist(id="val-bp-periodi", value=["annuale"],
+                                    options=[{"label": " Annuali", "value": "annuale"},
+                                             {"label": " Trimestrali", "value": "trimestrale"}],
+                                    labelStyle=chk, **pers)]),
+            html.Div([html.Div("Mostra", style=lbl),
+                      dcc.Checklist(id="val-bp-opzioni", value=["ttm", "yoy", "qoq"],
+                                    options=[{"label": " TTM negli annuali", "value": "ttm"},
+                                             {"label": " Variazione anno su anno",
+                                              "value": "yoy"},
+                                             {"label": " Variazione trimestre su trimestre",
+                                              "value": "qoq"}],
+                                    labelStyle=chk, **pers)]),
+            html.Div([html.Div("Colonne in tabella", style=lbl),
+                      dcc.Dropdown(id="val-bp-ncol", value=5, clearable=False,
+                                   searchable=False,
+                                   options=[{"label": str(n), "value": n}
+                                            for n in (4, 5, 8, 12)],
+                                   style={"width": "80px", "font-size": "11px"},
+                                   **pers)]),
+        ], style={"display": "flex", "flex-wrap": "wrap", "gap": "22px",
+                  "background": "#f7f9fc", "border": "1px solid #dbe4f0",
+                  "border-radius": "6px", "padding": "10px 12px"}),
+        dcc.Loading(type="circle", color="#1a3a5c",
+                    children=html.Div(id="val-bp-out",
+                                      style={"min-height": "120px",
+                                             "margin-top": "10px"})),
+    ], style={"padding": "14px 16px 30px"})
+
+
 # ── Valori consigliati per gli slider ────────────────────────────────────────
 # Ogni slider parte da un numero ricavato dai conti del titolo, non da un
 # default buono per tutti: con parametri arbitrari la stessa schermata dice
@@ -1579,6 +1973,7 @@ def layout():
                      dcc.Tab(label="📊 Riepilogo",       value="val-tab-summary"),
                      dcc.Tab(label="🎯 Parametri",        value="val-tab-parametri"),
                      dcc.Tab(label="🏢 Bilanci",          value="val-tab-bilanci"),
+                     dcc.Tab(label="📚 Bilanci per periodo", value="val-tab-bilanci-periodi"),
                      dcc.Tab(label="📉 DCF",              value="val-tab-dcf"),
                      dcc.Tab(label="💰 DDM",              value="val-tab-ddm"),
                      dcc.Tab(label="📐 Graham",           value="val-tab-graham"),
@@ -1865,6 +2260,31 @@ def register_callbacks(app):
         # prima che un default che finge di essere un dato del titolo.
         return [(sugg.get(s) or {}).get("v", None) if (sugg.get(s) or {}).get("v") is not None
                 else no_update for s in _SLIDER_ORDINE]
+
+    # ── Bilanci per periodo: le spunte ridisegnano solo il contenuto ─────────
+    @app.callback(
+        Output("val-bp-out",       "children"),
+        Input("val-bp-prospetti",  "value"),
+        Input("val-bp-periodi",    "value"),
+        Input("val-bp-opzioni",    "value"),
+        Input("val-bp-ncol",       "value"),
+        State("store-valuation",   "data"),
+    )
+    def _val_bp_render(prospetti, periodi, opzioni, n_col, stored):
+        import json
+        try:
+            d = json.loads(stored) if isinstance(stored, str) else (stored or {})
+            ticker = d.get("ticker", "")
+            if not ticker:
+                return no_update
+            return bilanci_per_periodo(ticker, d.get("name", ticker), prospetti,
+                                       periodi, opzioni, n_col)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return html.Div(f"Vista non costruita — {type(e).__name__}: {e}",
+                            style={"font-size": "12px", "color": "#8a1f11",
+                                   "padding": "16px"})
 
     # ── ricalcolo: ogni slider rifà i conti sul dato già in memoria ───────────
     @app.callback(
@@ -3138,6 +3558,11 @@ def register_callbacks(app):
                     ], style={"flex": "1", "min-width": "320px"}),
                 ], style={"display": "flex", "flex-wrap": "wrap", "gap": "16px"}),
             ], style={"padding": "14px 16px 30px"})
+
+        # Le caselle e il contenuto: il contenuto lo disegna `_val_bp_render`,
+        # così una spunta non ricostruisce tutto il tab.
+        elif active_tab == "val-tab-bilanci-periodi":
+            return bilanci_per_periodo_controlli(name, d.get("ticker", ""))
 
         # ── TAB PARAMETRI ─────────────────────────────────────────────────────
         # Da dove viene ogni slider. Serve a poter dire di no al consiglio
