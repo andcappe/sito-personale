@@ -1,5 +1,8 @@
 """Calendario economico — i principali dati macro USA che precedono le riunioni FED.
 
+Due sotto-tab: questo calendario macro e quello delle trimestrali delle società
+(`trimestrali.py`, con il suo aggiornamento ogni 3 mesi).
+
 Aggrega su un'unica linea temporale:
   • Riunioni FOMC (Federal Reserve) + periodo di blackout comunicazioni intorno a ognuna;
   • Sussidi di disoccupazione settimanali (Department of Labor);
@@ -18,7 +21,7 @@ from datetime import date, datetime, timedelta
 
 import plotly.graph_objects as go
 import requests
-from dash import Dash, html, dcc, Input, Output
+from dash import Dash, html, dcc, Input, Output, State, ctx, no_update
 
 # La cartella superiore ospita navbar.py e settings/ (import condivisi del sito)
 _PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -26,6 +29,7 @@ if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
 from navbar import make_navbar                       # noqa: E402
 from settings.browser_css import SITE_CSS            # noqa: E402
+from calendario import trimestrali as tr            # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Enti emittenti (uffici) → colore per leggere le cadenze
@@ -575,6 +579,19 @@ def serve_layout():
     return html.Div([
         make_navbar('Calendario'),
         html.Div([
+            dcc.Tabs(id='cal-sezione', value='macro', children=[
+                dcc.Tab(label='🏛 Calendario economico — riunioni FED', value='macro'),
+                dcc.Tab(label='📊 Trimestrali delle società', value='trimestrali'),
+            ], style={'marginBottom': '14px'}),
+            html.Div(id='cal-sez-macro', children=_sezione_macro()),
+            html.Div(id='cal-sez-trimestrali', children=_sezione_trimestrali(),
+                     style={'display': 'none'}),
+        ], style={'padding': '112px 5% 32px', 'fontFamily': 'Inter, sans-serif'}),
+    ])
+
+
+def _sezione_macro():
+    return html.Div([
             html.H2('Calendario economico — dati chiave prima delle riunioni FED',
                     style={'color': '#1a3a6b', 'fontSize': '20px', 'margin': '0 0 4px'}),
             html.Div('Riunioni FOMC e blackout della Federal Reserve, sussidi di '
@@ -631,7 +648,6 @@ def serve_layout():
 
             # ── Grafici storici delle serie ────────────────────────────────────
             _grafici_storici(),
-        ], style={'padding': '112px 5% 32px', 'fontFamily': 'Inter, sans-serif'}),
     ])
 
 
@@ -648,6 +664,261 @@ app.layout = serve_layout
 def _update(period, enti):
     enti = enti or list(_OFFICES)
     return timeline_fig(enti, period or '6m'), build_table(enti, period or '6m')
+
+
+# Le sezioni si nascondono invece di smontarsi: tornando indietro filtri e
+# finestra restano dove li si era lasciati.
+@app.callback(
+    Output('cal-sez-macro', 'style'),
+    Output('cal-sez-trimestrali', 'style'),
+    Input('cal-sezione', 'value'),
+)
+def _cambia_sezione(sezione):
+    nascosto = {'display': 'none'}
+    return (nascosto, {}) if sezione == 'trimestrali' else ({}, nascosto)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sotto-tab «Trimestrali delle società»
+# ─────────────────────────────────────────────────────────────────────────────
+_FINESTRE = [('sett', 'Settimana'), ('2sett', 'Due settimane'), ('mese', 'Mese')]
+_FONTE = {   # fonte → (etichetta, colore)
+    'confermata': ('Confermata', '#1a3a6b'),
+    'yahoo':      ('Prevista (Yahoo)', '#2e86c1'),
+    'stimata':    ('Stimata +13 sett.', '#aab7c4'),
+    'pubblicata': ('Già pubblicata', '#1e8449'),
+}
+_MERCATO_COL = {'USA': '#1a3a6b', 'Italia': '#1e8449', 'Europa': '#d97706'}
+_MESI = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 'luglio',
+         'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre']
+
+
+def _finestra_trim(tipo, scarto):
+    """(inizio, fine, etichetta) della finestra `scarto` passi avanti/indietro da oggi."""
+    oggi = date.today()
+    if tipo == 'mese':
+        m = oggi.month - 1 + scarto
+        w0 = date(oggi.year + m // 12, m % 12 + 1, 1)
+        w1 = (date(w0.year + (w0.month == 12), w0.month % 12 + 1, 1) - timedelta(days=1))
+        return w0, w1, f'{_MESI[w0.month - 1]} {w0.year}'
+    giorni = 14 if tipo == '2sett' else 7
+    w0 = oggi - timedelta(days=oggi.weekday()) + timedelta(days=giorni * scarto)
+    w1 = w0 + timedelta(days=giorni - 1)
+    return w0, w1, f'{_fmt(w0)} → {_fmt(w1)}'
+
+
+def _sezione_trimestrali():
+    lbl = {'fontSize': '11px', 'fontWeight': '700', 'color': '#1a3a6b', 'marginRight': '8px'}
+    radio = dict(inline=True, inputStyle={'marginRight': '3px'},
+                 labelStyle={'marginRight': '12px', 'fontSize': '11px', 'cursor': 'pointer'})
+    bottone = {'border': '1px solid #1a3a6b', 'background': 'white', 'color': '#1a3a6b',
+               'borderRadius': '6px', 'padding': '3px 10px', 'fontSize': '12px',
+               'cursor': 'pointer', 'marginRight': '4px'}
+    return html.Div([
+        html.H2('Trimestrali in arrivo', style={'color': '#1a3a6b', 'fontSize': '20px',
+                                                'margin': '0 0 4px'}),
+        html.Div('Le date di pubblicazione dei conti trimestrali, per finestra di una '
+                 'settimana, due settimane o un mese. Le società principali di USA, Italia '
+                 'ed Europa hanno sempre la prossima data (annunciata o stimata); con '
+                 '«Tutte le società USA» si aggiungono le date già annunciate da tutto il '
+                 'mercato americano.',
+                 style={'color': '#666', 'fontSize': '12px', 'marginBottom': '14px'}),
+        html.Div([
+            html.Label('Finestra:', style=lbl),
+            dcc.RadioItems(id='tr-finestra', value='sett',
+                           options=[{'label': f' {t}', 'value': v} for v, t in _FINESTRE],
+                           **radio),
+            html.Button('◀', id='tr-prec', n_clicks=0, style=bottone),
+            html.Button('Oggi', id='tr-oggi', n_clicks=0, style=bottone),
+            html.Button('▶', id='tr-succ', n_clicks=0, style=bottone),
+            html.B(id='tr-etichetta', style={'fontSize': '13px', 'color': '#1a3a6b',
+                                             'marginLeft': '10px'}),
+        ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap',
+                  'gap': '4px', 'marginBottom': '8px'}),
+        html.Div([
+            html.Label('Società:', style=lbl),
+            dcc.RadioItems(id='tr-universo', value='principali', options=[
+                {'label': f' Principali USA, Italia, Europa ({len(tr._UNIVERSO)})',
+                 'value': 'principali'},
+                {'label': ' Tutte le società USA (date annunciate)', 'value': 'tutte'},
+            ], **radio),
+            dcc.Checklist(id='tr-stimate', value=['si'],
+                          options=[{'label': ' mostra le date stimate', 'value': 'si'}],
+                          **radio),
+            dcc.Input(id='tr-cerca', type='text', debounce=True, value='',
+                      placeholder='Cerca ticker o società…',
+                      style={'fontSize': '12px', 'padding': '4px 8px', 'width': '200px',
+                             'border': '1px solid #ccd', 'borderRadius': '6px'}),
+        ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap',
+                  'gap': '6px', 'marginBottom': '12px', 'paddingTop': '6px',
+                  'borderTop': '1px solid #eee'}),
+        dcc.Store(id='tr-scarto', data=0),
+        dcc.Interval(id='tr-attesa', interval=15000, disabled=True),
+        # responsive=True: la sezione nasce nascosta e senza questo Plotly
+        # fissa la larghezza misurata in quel momento.
+        dcc.Graph(id='tr-grafico', config={'displayModeBar': False}, responsive=True,
+                  style={'height': '230px'}),
+        html.Div(id='tr-tabella', style={'maxHeight': '620px', 'overflowY': 'auto',
+                                         'border': '1px solid #e8edf5',
+                                         'borderRadius': '10px', 'marginTop': '8px'}),
+        html.Div(id='tr-nota', style={'color': '#999', 'fontSize': '10.5px',
+                                      'marginTop': '10px'}),
+    ])
+
+
+@app.callback(
+    Output('tr-scarto', 'data'),
+    Input('tr-prec', 'n_clicks'),
+    Input('tr-oggi', 'n_clicks'),
+    Input('tr-succ', 'n_clicks'),
+    Input('tr-finestra', 'value'),
+    State('tr-scarto', 'data'),
+    prevent_initial_call=True,
+)
+def _sposta_finestra(_p, _o, _s, _f, scarto):
+    tid = ctx.triggered_id
+    if tid == 'tr-prec':
+        return (scarto or 0) - 1
+    if tid == 'tr-succ':
+        return (scarto or 0) + 1
+    return 0                                # Oggi, o cambio di finestra
+
+
+_GIORNI_BREVI = ['lun', 'mar', 'mer', 'gio', 'ven', 'sab', 'dom']
+
+
+def _grafico_trim(ev, w0, w1):
+    fig = go.Figure()
+    giorni = [w0 + timedelta(days=i) for i in range((w1 - w0).days + 1)]
+    for fonte, (nome, colore) in _FONTE.items():
+        conta = {g: 0 for g in giorni}
+        for e in ev:
+            if e['fonte'] == fonte:
+                conta[e['d']] += 1
+        if any(conta.values()):
+            fig.add_trace(go.Bar(x=giorni, y=[conta[g] for g in giorni], name=nome,
+                                 marker_color=colore,
+                                 hovertemplate='%{x|%d/%m}: %{y}<extra>' + nome + '</extra>'))
+    oggi = date.today()
+    if w0 <= oggi <= w1:
+        # Traccia e non add_vline: la shape, ridisegnata mentre la sezione è
+        # nascosta (larghezza 0), finisce in un path "MNaN" e sporca la console.
+        alto = max([sum(1 for e in ev if e['d'] == g) for g in giorni] + [1])
+        fig.add_trace(go.Scatter(x=[oggi, oggi], y=[0, alto * 1.05], mode='lines',
+                                 line=dict(color='#16a34a', width=1.5, dash='dot'),
+                                 showlegend=False, hoverinfo='skip'))
+    # Etichette in italiano (Plotly scriverebbe Mon/Tue); sul mese una ogni 7 giorni.
+    tick = giorni if len(giorni) <= 14 else giorni[::7]
+    fig.update_layout(
+        barmode='stack', height=230, paper_bgcolor='white', plot_bgcolor='#f8f9fb',
+        margin=dict(l=10, r=16, t=30, b=30), bargap=0.25,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0,
+                    font=dict(size=10)),
+        xaxis=dict(range=[w0 - timedelta(hours=14), w1 + timedelta(hours=14)],
+                   tickvals=tick, ticktext=[f"{_GIORNI_BREVI[g.weekday()]} {g:%d/%m}"
+                                            for g in tick],
+                   tickfont=dict(size=10), showgrid=False),
+        yaxis=dict(title=dict(text='società', font=dict(size=11, color='#555')),
+                   showgrid=True, gridcolor='#eef1f5', tickfont=dict(size=10)),
+    )
+    if not ev:
+        fig.add_annotation(text='Nessuna trimestrale in questa finestra', showarrow=False,
+                           font=dict(size=13, color='#888'))
+    return fig
+
+
+def _tabella_trim(ev):
+    th = {'textAlign': 'left', 'padding': '7px 10px'}
+    testa = html.Tr([html.Th(t, style=th) for t in
+                     ('Momento', 'Ticker', 'Società', 'Mercato', 'Trimestre', 'EPS stimato',
+                      'Fonte')],
+                    style={'background': '#1a3a6b', 'color': 'white', 'fontSize': '11px',
+                           'textTransform': 'uppercase', 'letterSpacing': '0.04em',
+                           'position': 'sticky', 'top': '0'})
+    td = {'padding': '5px 10px', 'fontSize': '12px', 'color': '#222'}
+    righe, giorno = [], None
+    for e in ev[:tr._MAX_RIGHE]:
+        if e['d'] != giorno:
+            giorno = e['d']
+            n = sum(1 for x in ev if x['d'] == giorno)
+            righe.append(html.Tr(html.Td(f"{_fmt(giorno)} — {n} società",
+                                         colSpan=7, style={
+                'padding': '6px 10px', 'fontSize': '12px', 'fontWeight': '700',
+                'color': '#1a3a6b', 'background': '#eef3fb'})))
+        nome_f, col_f = _FONTE[e['fonte']]
+        momento = {'pre-market': 'prima dell’apertura',
+                   'post-market': 'dopo la chiusura'}.get(e['momento'], '')
+        eps = '' if e['eps'] is None else f"{e['eps']:.2f} {e['valuta']}".strip()
+        stimata = e['fonte'] == 'stimata'
+        righe.append(html.Tr([
+            html.Td(momento, style={**td, 'color': '#777', 'fontSize': '11px'}),
+            html.Td(e['ticker'], style={**td, 'fontWeight': '700'}),
+            html.Td(e['nome'], style=td),
+            html.Td(html.Span(e['mercato'], style={
+                'background': _MERCATO_COL[e['mercato']], 'color': 'white',
+                'padding': '1px 8px', 'borderRadius': '10px', 'fontSize': '10.5px'}),
+                style=td),
+            html.Td(e['trimestre'] and f"chiuso il {e['trimestre'][8:10]}/"
+                    f"{e['trimestre'][5:7]}/{e['trimestre'][:4]}", style={**td, 'color': '#555'}),
+            html.Td(eps, style={**td, 'textAlign': 'right'}),
+            html.Td(html.Span(nome_f, style={'color': col_f, 'fontWeight': '600',
+                                             'fontSize': '11px'}), style=td),
+        ], style={'borderBottom': '1px solid #eef1f5',
+                  'fontStyle': 'italic' if stimata else 'normal'}))
+    if not righe:
+        righe = [html.Tr(html.Td('Nessuna trimestrale in questa finestra', colSpan=7,
+                                 style={'padding': '18px', 'textAlign': 'center',
+                                        'color': '#888', 'fontSize': '13px'}))]
+    return html.Table([html.Thead(testa), html.Tbody(righe)], style={
+        'width': '100%', 'borderCollapse': 'collapse', 'fontFamily': 'Inter, sans-serif'})
+
+
+@app.callback(
+    Output('tr-grafico', 'figure'),
+    Output('tr-tabella', 'children'),
+    Output('tr-etichetta', 'children'),
+    Output('tr-nota', 'children'),
+    Output('tr-attesa', 'disabled'),
+    Input('tr-finestra', 'value'),
+    Input('tr-scarto', 'data'),
+    Input('tr-universo', 'value'),
+    Input('tr-stimate', 'value'),
+    Input('tr-cerca', 'value'),
+    Input('tr-attesa', 'n_intervals'),
+)
+def _aggiorna_trimestrali(finestra, scarto, universo, stimate, cerca, _n):
+    w0, w1, etichetta = _finestra_trim(finestra or 'sett', scarto or 0)
+    ev = tr.eventi(w0, w1, universo or 'principali', cerca)
+    if 'si' not in (stimate or []):
+        ev = [e for e in ev if e['fonte'] != 'stimata']
+    dati_ = tr.dati()
+    attesa = tr.in_corso()
+
+    nota = []
+    if dati_:
+        agg = datetime.fromisoformat(dati_['aggiornato'])
+        nota.append(f"Dati aggiornati il {agg.strftime('%d/%m/%Y')}; prossimo "
+                    f"aggiornamento automatico il "
+                    f"{tr.prossimo_aggiornamento(dati_).strftime('%d/%m/%Y')}. ")
+        if dati_.get('av_errore'):
+            nota.append(f"⚠ Alpha Vantage non ha risposto all'ultimo aggiornamento "
+                        f"({dati_['av_errore'][:90]}): restano le date precedenti. ")
+    if attesa:
+        nota.append('⏳ Aggiornamento del calendario in corso (circa un minuto): '
+                    'la pagina si completa da sola. ')
+    if len(ev) > tr._MAX_RIGHE:
+        nota.append(f"Mostrate le prime {tr._MAX_RIGHE} righe su {len(ev)}: restringi "
+                    "la finestra o usa la ricerca. ")
+    nota.append('«Confermata» = data annunciata dalla società (Alpha Vantage); «Prevista» = '
+                'prossima data secondo Yahoo; «Stimata» = ultima data nota + 13 settimane, '
+                'in corsivo. Le date possono cambiare fino all’annuncio.')
+    return (_grafico_trim(ev, w0, w1), _tabella_trim(ev), etichetta, ''.join(nota),
+            not attesa)
+
+
+# Job trimestrale: parte all'import, come lo scheduler di portafoglio
+# (gunicorn ha un solo worker, quindi un solo job).
+_SCHEDULER_TRIM = tr.avvia_scheduler()
 
 
 if __name__ == '__main__':
