@@ -52,6 +52,10 @@ _AV_TTL   = 30 * 24 * 3600          # 30 giorni
 _AV_CONTI_TRIM = 105                # giorni dalla fine dell'ultimo trimestre
 _AV_CONTI_ANNO = 365 + 75           # idem per i titoli con soli dati annuali
 _AV_RIPROVA = 2 * 24 * 3600         # 2 giorni fra due controlli dello stesso prospetto
+# ⟳ Aggiorna bilanci salta la cache, ma ogni clic costa 3 delle 25 richieste
+# giornaliere: lo stesso titolo si può forzare al massimo una volta ogni 6 ore.
+_AV_FORZA_OGNI = 6 * 3600
+_AV_FORZATO = {}                    # ticker → istante dell'ultimo aggiornamento forzato
 # (ticker, prospetto) → (payload, scaricato, controllato): gli slider non
 # riscaricano. `scaricato` è quando il dato è arrivato da Alpha Vantage,
 # `controllato` l'ultimo tentativo (anche fallito) di aggiornarlo.
@@ -143,10 +147,12 @@ def av_prospetto(ticker, prospetto="ce", forza=False):
 
     # Cache scaduta ma ancora buona come riserva: se l'aggiornamento fallisce
     # (limite di 25 al giorno, rete) si mostra quella invece di un errore.
+    # Con `forza` la cache non si usa ma resta la riserva: un aggiornamento
+    # forzato che fallisce non deve far sparire i bilanci che c'erano.
     vecchio = None                      # (payload, scaricato)
-    if not forza and ch in _AV_MEM:
+    if ch in _AV_MEM:
         payload, scaricato, controllato = _AV_MEM[ch]
-        if not _av_scaduto(payload, scaricato, controllato):
+        if not forza and not _av_scaduto(payload, scaricato, controllato):
             return payload, "memoria"
         vecchio = (payload, scaricato)
 
@@ -171,11 +177,11 @@ def av_prospetto(ticker, prospetto="ce", forza=False):
     # La data del file è quella dello scarico: pull_all la riporta da R2,
     # altrimenti a ogni riavvio la cache sembrerebbe appena scaricata.
     f = _AV_DIR / f"{ticker}{suffisso}.json"
-    if not forza and vecchio is None and f.exists():
+    if vecchio is None and f.exists():
         try:
             payload = json.loads(f.read_text())
             scaricato = f.stat().st_mtime
-            if not _av_scaduto(payload, scaricato, scaricato):
+            if not forza and not _av_scaduto(payload, scaricato, scaricato):
                 _AV_MEM[ch] = (payload, scaricato, scaricato)
                 return payload, _av_eta(scaricato)
             vecchio = (payload, scaricato)
@@ -232,6 +238,7 @@ def av_prospetto(ticker, prospetto="ce", forza=False):
         pass
 
     _AV_MEM[ch] = (payload, time.time(), time.time())
+    _AV_ERR.pop(ch, None)
     return payload, "appena scaricato"
 
 
@@ -1884,6 +1891,23 @@ def layout():
                  style={"font-size": "10px", "color": "#555",
                         "margin-top": "6px", "white-space": "pre-wrap"}),
 
+        html.Button("⟳ Aggiorna bilanci", id="btn-val-av-aggiorna", n_clicks=0,
+                    title="Riscarica da Alpha Vantage i tre prospetti del titolo "
+                          "caricato, senza aspettare la scadenza della cache",
+                    style={"width": "100%", "margin-top": "6px",
+                           "background": "white", "color": "#1a3a5c",
+                           "border": "1px solid #1a3a5c", "border-radius": "6px",
+                           "padding": "6px", "font-size": "11px",
+                           "cursor": "pointer"}),
+        dcc.Loading(type="dot", color="#1a3a5c",
+                    children=html.Div(id="val-av-status",
+                                      style={"font-size": "9px", "color": "#888",
+                                             "margin-top": "4px", "line-height": "1.45",
+                                             "white-space": "pre-wrap"},
+                                      children="Solo dopo una trimestrale appena uscita: "
+                                               "costa 3 delle 25 richieste giornaliere.")),
+        dcc.Store(id="val-av-agg"),
+
         html.Button("🎯 Applica valori consigliati", id="btn-val-consigli",
                     n_clicks=0,
                     style={"width": "100%", "margin-top": "6px",
@@ -2261,6 +2285,55 @@ def register_callbacks(app):
         return [(sugg.get(s) or {}).get("v", None) if (sugg.get(s) or {}).get("v") is not None
                 else no_update for s in _SLIDER_ORDINE]
 
+    # ── ⟳ Aggiorna bilanci: riscarica Alpha Vantage saltando la cache ────────
+    # Non scrive `store-valuation`: quello rimetterebbe gli slider sui valori
+    # consigliati. Scrive `val-av-agg`, che fa solo ridisegnare il tab aperto.
+    @app.callback(
+        Output("val-av-status", "children"),
+        Output("val-av-agg",    "data"),
+        Input("btn-val-av-aggiorna", "n_clicks"),
+        State("store-valuation",     "data"),
+        prevent_initial_call=True,
+    )
+    def _val_av_aggiorna(n_clicks, stored):
+        import json
+        try:
+            d = json.loads(stored) if isinstance(stored, str) else (stored or {})
+        except Exception:
+            d = {}
+        ticker = (d.get("ticker") or "").strip().upper()
+        if not ticker:
+            return "⚠ Prima carica un titolo con ▶ Carica & Valuta.", no_update
+
+        trascorso = time.time() - _AV_FORZATO.get(ticker, 0)
+        if trascorso < _AV_FORZA_OGNI:
+            ore = (_AV_FORZA_OGNI - trascorso) / 3600
+            return (f"⏳ {ticker} è già stato aggiornato da meno di "
+                    f"{_AV_FORZA_OGNI // 3600} ore: riprova fra {ore:.1f} h.",
+                    no_update)
+        _AV_FORZATO[ticker] = time.time()
+
+        righe, nuovo = [], False
+        for k in ("ce", "sp", "cf"):
+            payload, fonte = av_prospetto(ticker, k, forza=True)
+            nome = _AV_PROSPETTI[k][2]
+            if fonte == "appena scaricato":
+                fine, _trim = _av_ultimo_periodo(payload)
+                nuovo = True
+                righe.append(f"✓ {nome}: ultimo periodo "
+                             f"{fine.strftime('%d/%m/%Y') if fine else 'n/d'}")
+            else:
+                righe.append(f"✗ {nome}: {fonte}")
+                # Senza conto economico gli altri due non servono a nessun
+                # tab: non si spendono altre due richieste.
+                if k == "ce" and payload is None:
+                    break
+        if not nuovo:
+            # Nessuna richiesta andata a buon fine: il blocco non deve
+            # impedire di riprovare subito (rete, limite al secondo).
+            _AV_FORZATO.pop(ticker, None)
+        return "\n".join([f"{ticker} — {time.strftime('%H:%M')}"] + righe), time.time()
+
     # ── Bilanci per periodo: le spunte ridisegnano solo il contenuto ─────────
     @app.callback(
         Output("val-bp-out",       "children"),
@@ -2268,9 +2341,10 @@ def register_callbacks(app):
         Input("val-bp-periodi",    "value"),
         Input("val-bp-opzioni",    "value"),
         Input("val-bp-ncol",       "value"),
+        Input("val-av-agg",        "data"),
         State("store-valuation",   "data"),
     )
-    def _val_bp_render(prospetti, periodi, opzioni, n_col, stored):
+    def _val_bp_render(prospetti, periodi, opzioni, n_col, _agg, stored):
         import json
         try:
             d = json.loads(stored) if isinstance(stored, str) else (stored or {})
@@ -2303,10 +2377,11 @@ def register_callbacks(app):
         Input("val-graham-g",     "value"),
         Input("val-bond-yield",   "value"),
         Input("val-bilanci-modo", "value"),
+        Input("val-av-agg",       "data"),
     )
     def _val_render(stored, active_tab, wacc, g1, g2, gterm, fcf_margin,
                     pe_sector, ev_ebitda_mult, ke, ddm_g, graham_g, bond_yield,
-                    bilanci_modo):
+                    bilanci_modo, _agg):
         import json
 
         if not stored:
