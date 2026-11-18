@@ -64,6 +64,13 @@ def _load(module_name, folder):
     sys.modules[module_name] = mod
     spec.loader.exec_module(mod)
     sys.path.pop(0)
+    # CSS della navbar per il cellulare: le dashboard hanno index_string diversi,
+    # così si aggiunge in un punto solo invece che in nove.
+    try:
+        import navbar
+        navbar.installa_css(mod.app)
+    except Exception as _e:
+        print(f"⚠ [navbar] CSS cellulare non installato su {folder}: {_e}", flush=True)
     return mod.app.server
 
 

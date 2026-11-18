@@ -711,6 +711,10 @@ app.index_string = (
     'padding:6px 10px;border-radius:6px;min-width:68px;margin:3px}'
     '.signal-card{border-radius:6px;padding:8px 12px;margin-bottom:6px;'
     'border-left:4px solid #ccc}'
+    # Cellulare: builder e payoff uno sotto l'altro invece di 32% | 68%
+    '@media (max-width:900px){.op-corpo{flex-direction:column}'
+    '.op-sx,.op-dx{width:100%!important}'
+    '.op-sx{padding-right:0!important;max-height:none!important;margin-bottom:12px}}'
     '</style></head><body>{%app_entry%}'
     '<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>'
 )
@@ -1440,7 +1444,7 @@ app.layout = html.Div([
                 # Riepilogo
                 html.Div(id='opt-summary-card', style=_CARD),
 
-            ], style={'width': '32%', 'paddingRight': '16px',
+            ], className='op-sx', style={'width': '32%', 'paddingRight': '16px',
                       'overflowY': 'auto', 'maxHeight': '78vh'}),
 
             # Pannello destro — payoff
@@ -1467,9 +1471,9 @@ app.layout = html.Div([
                     dcc.Graph(id='opt-payoff-chart', style={'height': '360px'},
                               config={'displayModeBar': False}),
                 ]),
-            ], style={'width': '68%'}),
+            ], className='op-dx', style={'width': '68%'}),
 
-        ], style={'display': 'flex', 'marginBottom': '16px'}),
+        ], className='op-corpo', style={'display': 'flex', 'marginBottom': '16px'}),
 
         # ── Tabs inferiori ─────────────────────────────────────────────────────
         dcc.Tabs(id='opt-tabs', value='sensitivity', children=[
