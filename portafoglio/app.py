@@ -1065,6 +1065,49 @@ def _clean_prices(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Quota minima di titoli con un prezzo VERO perche' una data in coda resti nel file.
+_CODA_MIN_REALI = 0.5
+
+
+def _taglia_coda_vuota(prezzi: pd.DataFrame, reali: dict) -> pd.DataFrame:
+    """Toglie in coda le date in cui la maggior parte dei titoli non ha un prezzo vero.
+
+    Di notte (job 00:00-02:30) Yahoo restituisce gia' la riga del giorno appena chiuso
+    ma senza i prezzi di quasi tutti i titoli europei e americani; il ffill la riempiva
+    col giorno prima e, sui titoli esteri, la divideva per il cambio NUOVO. Risultato:
+    l'ultima data del file era sempre falsa (0% sui titoli in euro, solo il movimento
+    del cambio sugli altri) e si correggeva da sola la notte dopo, quando ne arrivava
+    un'altra falsa. Meglio un file che finisce il giorno prima, con dati veri.
+
+    reali: {descrizione: Serie bool, True dove Yahoo ha dato un prezzo (prima del
+    ffill)}. Votano solo i titoli che hanno quotato nelle ultime 10 date: uno sospeso
+    da mesi non deve tenere bassa la quota. Le date in mezzo non si toccano mai."""
+    if prezzi is None or prezzi.empty or not reali:
+        return prezzi
+    try:
+        m = pd.DataFrame({k: v.astype(float) for k, v in reali.items()})
+        m.index = pd.to_datetime(m.index)
+        m = m.reindex(prezzi.index).fillna(0) > 0
+        attivi = m.tail(10).any()
+        m = m.loc[:, attivi[attivi].index]
+        if m.shape[1] == 0:
+            return prezzi
+        quota = m.mean(axis=1)
+        buone = quota[quota >= _CODA_MIN_REALI]
+        if buone.empty:
+            return prezzi
+        ultima = buone.index.max()
+        tolte = prezzi.index[prezzi.index > ultima]
+        if len(tolte):
+            print(f"  ✂ tolte {len(tolte)} date in coda senza prezzi veri "
+                  f"({', '.join(d.strftime('%d/%m') for d in tolte)}): "
+                  f"il file finisce al {ultima:%d/%m/%Y}")
+            return prezzi.loc[:ultima]
+    except Exception as e:
+        print(f"  ⚠ controllo date in coda non riuscito: {e}")
+    return prezzi
+
+
 def _atomic_pkl_write(path: Path, data: dict):
     """Scrive il pkl in modo atomico: prima su .tmp, poi os.replace."""
     tmp = path.with_suffix('.tmp')
@@ -1231,6 +1274,7 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
     _resolved   = {}   # {descrizione: ticker_risolto} per aggiornare ticker_map
     valuta_map  = {}   # {descrizione: valuta con cui i prezzi sono stati convertiti}
     senza_cambio = set()
+    reali       = {}   # {descrizione: dove Yahoo ha dato un prezzo} → _taglia_coda_vuota
 
     def _in_euro(px, desc, t, curr, dichiarata):
         """Mette in all_prices la serie in euro. Senza cambio l'asset resta fuori,
@@ -1281,7 +1325,8 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
                 try:
                     px = (raw[(t, 'Close')].copy() if isinstance(raw.columns, pd.MultiIndex)
                           else raw['Close'].copy())
-                    _in_euro(px.ffill(), desc, t, curr, curr)
+                    if _in_euro(px.ffill(), desc, t, curr, curr):
+                        reali[desc] = px.notna()
                 except Exception:
                     _ripiega(t, desc, curr)
         except Exception:
@@ -1318,6 +1363,7 @@ def _do_download(tickers, descrizione, valuta, start_date, cache_file=None, upda
 
     original_prices = pd.DataFrame(all_prices)
     original_prices.index = pd.to_datetime(original_prices.index)
+    original_prices = _taglia_coda_vuota(original_prices, reali)
     original_prices = original_prices.ffill()
     original_prices = _clean_prices(original_prices)
     close_returns   = original_prices.pct_change(fill_method=None).clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)
@@ -1426,6 +1472,7 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
     valuta_map = {}
     esclusi_fx = set()   # senza cambio: NON sono ticker introvabili
     non_trovati = {}     # {descrizione: ticker} senza nessun prezzo su Yahoo
+    reali      = {}      # {descrizione: dove Yahoo ha dato un prezzo} → _taglia_coda_vuota
 
     for i in range(0, total, DOWNLOAD_BATCH_SIZE):
         bt = tickers[i:i + DOWNLOAD_BATCH_SIZE]
@@ -1466,6 +1513,7 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
                         problemi.append(dc.problema(desc, t, 'cambio_mancante', errore))
                     else:
                         all_prices[desc] = px_eur
+                        reali[desc]      = px.notna()
                         # la valuta di Yahoo: quella con cui si converte e' anche
                         # quella che finisce nel file
                         valuta_map[desc] = dc.valuta_da_salvare(curr, codice)
@@ -1503,6 +1551,7 @@ def _do_download_client_impl(tickers, descrizione, valuta, start_date, username=
 
     original_prices = pd.DataFrame(all_prices)
     original_prices.index = pd.to_datetime(original_prices.index)
+    original_prices = _taglia_coda_vuota(original_prices, reali)
     original_prices = original_prices.ffill()
     original_prices = _clean_prices(original_prices)
     close_returns   = original_prices.pct_change(fill_method=None).clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)
@@ -1603,6 +1652,7 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     _gestisci_failed = []   # ticker falliti → usati per suggerimenti
     _resolved_g = {}        # {descrizione: ticker_risolto} per aggiornare ticker_map
     new_vm      = {}        # {descrizione: valuta con cui i prezzi sono stati convertiti}
+    reali_g     = {}        # {descrizione: dove Yahoo ha dato un prezzo} → _taglia_coda_vuota
 
     def _in_euro(px, desc, t, curr, dichiarata):
         """Serie in euro in all_prices; senza cambio l'asset resta fuori con un errore.
@@ -1635,7 +1685,8 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
                 try:
                     px = (raw[(t, 'Close')].copy() if isinstance(raw.columns, pd.MultiIndex)
                           else raw['Close'].copy())
-                    _in_euro(px.ffill(), desc, t, curr, curr)
+                    if _in_euro(px.ffill(), desc, t, curr, curr):
+                        reali_g[desc] = px.notna()
                 except Exception:
                     # Nessun dato: scegli la quotazione con più storico (ticker + valuta)
                     t_ok, curr_ok, px_ok = _find_working_ticker(t, start_date, _dl_kwargs, curr)
@@ -1708,6 +1759,7 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
 
     new_prices = pd.DataFrame(all_prices)
     new_prices.index = pd.to_datetime(new_prices.index)
+    new_prices = _taglia_coda_vuota(new_prices, reali_g)
     new_prices = new_prices.ffill()
     new_prices = _clean_prices(new_prices)
 
@@ -8611,6 +8663,30 @@ def _aggiorna_pkl_prezzi(path, op, cr, tm, vm=None):
     return len(comuni)
 
 
+def _asset_solo_nei_pkl(username, gia):
+    """{descrizione: (ticker, valuta)} degli asset che stanno nei pkl dell'utente ma
+    non in current.json (gia'). Ticker da 'ticker_map', valuta da 'valuta_map' (vuota
+    → la decide Yahoo, e la serie viene finalmente riportata in euro: prima un titolo
+    come TSMN.MX restava in pesos). Il primo pkl che nomina un asset vince."""
+    extra = {}
+    for p in _pkl_prezzi_utente(username):
+        try:
+            with open(p, 'rb') as f:
+                d = pickle.load(f)
+        except Exception:
+            continue
+        op = d.get('original_prices')
+        if op is None or getattr(op, 'empty', True):
+            continue
+        tm, vm = d.get('ticker_map') or {}, d.get('valuta_map') or {}
+        for c in op.columns:
+            t = str(tm.get(c) or '').strip()
+            if c in gia or c in extra or not t:
+                continue
+            extra[c] = (t, vm.get(c) or '')
+    return extra
+
+
 def _refresh_dati_utente(username, start_date):
     """Riscarica i ticker di un utente (ticker e valuta li dà current.json) e
     propaga i prezzi nuovi a current.json, alle cache personali e alla sessione."""
@@ -8633,25 +8709,31 @@ def _refresh_dati_utente(username, start_date):
 
     # File d'appoggio FUORI dalle cartelle sincronizzate, altrimenti finisce su R2.
     safe = _re_isin.sub(r'[^A-Za-z0-9_.@-]', '_', username)
-    tmp  = Path(tempfile.gettempdir()) / f'refresh_{safe}.pkl'
-    problemi = []
-    try:
-        # Niente quotazioni alternative: di notte il ticker dell'utente non si
-        # cambia. Se non risponde tiene i vecchi prezzi e lo dice il Controllo asset.
-        problemi = _do_download(tickers, descr, valute, start_date, cache_file=tmp,
-                                update_buffer=False, cerca_alternative=False) or []
-        if not tmp.exists():
-            print(f"  ⚠ {username}: download fallito, dati invariati")
-            _controlla_dopo_download(username, problemi, 'aggiornamento automatico',
-                                     riscaricati=descr)
-            return
-        with open(tmp, 'rb') as f:
-            fresh = pickle.load(f)
-    finally:
+
+    def _scarica(tk, ds, vl, nome):
+        """_do_download in un pkl temporaneo → (dati o None, problemi)."""
+        tmp = Path(tempfile.gettempdir()) / f'{nome}_{safe}.pkl'
         try:
-            tmp.unlink()
-        except Exception:
-            pass
+            # Niente quotazioni alternative: di notte il ticker dell'utente non si
+            # cambia. Se non risponde tiene i vecchi prezzi e lo dice il Controllo asset.
+            pr = _do_download(tk, ds, vl, start_date, cache_file=tmp,
+                              update_buffer=False, cerca_alternative=False) or []
+            if not tmp.exists():
+                return None, pr
+            with open(tmp, 'rb') as f:
+                return pickle.load(f), pr
+        finally:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+    fresh, problemi = _scarica(tickers, descr, valute, 'refresh')
+    if fresh is None:
+        print(f"  ⚠ {username}: download fallito, dati invariati")
+        _controlla_dopo_download(username, problemi, 'aggiornamento automatico',
+                                 riscaricati=descr)
+        return
 
     op, cr = fresh.get('original_prices'), fresh.get('close_returns')
     tm     = fresh.get('ticker_map', {})
@@ -8665,6 +8747,31 @@ def _refresh_dati_utente(username, start_date):
     n_json = _aggiorna_current_json(username, op, cr, tm, vm)
     ultima = op.index.max().strftime('%d/%m/%Y')
     print(f"  ✓ {username}: {n_json}/{len(descr)} asset aggiornati al {ultima}")
+
+    # Anche i titoli che stanno SOLO nei pkl dell'utente (es. un portafoglio
+    # precedente salvato come market_data_CRIPTO_user_<u>.pkl). Prima restavano
+    # fermi all'ultimo download a mano mentre 'saved_at' diceva «stanotte», e
+    # Gestisci li riprende da li' come sorgente: prezzi vecchi di mesi spacciati
+    # per freschi. Download A PARTE e poi riportati sulle date del portafoglio:
+    # scaricati insieme, un titolo che quota nel weekend aggiungeva sabati e
+    # domeniche (rendimento 0) a current.json. Non entrano in current.json, e i
+    # loro problemi non vanno nel Controllo asset (che parla del portafoglio in uso).
+    extra = _asset_solo_nei_pkl(username, set(descr))
+    if extra:
+        print(f"  · {username}: {len(extra)} asset presenti solo nei pkl")
+        fx_, _ = _scarica([t for t, _ in extra.values()], list(extra),
+                          [v for _, v in extra.values()], 'refresh_extra')
+        opx = (fx_ or {}).get('original_prices')
+        if opx is not None and not opx.empty:
+            opx = opx.drop(columns=[c for c in opx.columns if c in op.columns])
+            opx = opx.reindex(opx.index.union(op.index)).ffill().reindex(op.index)
+            crx = opx.pct_change(fill_method=None).clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)
+            op, cr = op.join(opx), cr.join(crx)
+            tm = {**tm, **{k: v for k, v in fx_.get('ticker_map', {}).items() if k in opx}}
+            vm = {**vm, **{k: v for k, v in fx_.get('valuta_map', {}).items() if k in opx}}
+        else:
+            print(f"  ⚠ {username}: asset dei soli pkl non scaricati, restano com'erano")
+
     for p in _pkl_prezzi_utente(username):
         n = _aggiorna_pkl_prezzi(p, op, cr, tm, vm)
         if n:
