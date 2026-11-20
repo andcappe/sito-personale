@@ -22,7 +22,7 @@ _sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _sys_path not in sys.path:
     sys.path.insert(0, _sys_path)
 from settings.browser_css import BROWSER_RESET_CSS
-from navbar import make_navbar
+from navbar import make_navbar, ETICHETTA_PERSONALE
 
 # ─── App ─────────────────────────────────────────────────────────────────────
 _EXT = [
@@ -1257,7 +1257,7 @@ def rend_live_sync(_, sig):
     label = html.Span([
         html.I(className='fa-solid fa-circle-info',
                style={'marginRight': '6px', 'color': '#1a3a6b'}),
-        html.Span('👤 Personale', style={'fontWeight': '700', 'color': '#1a5c1a',
+        html.Span(ETICHETTA_PERSONALE, style={'fontWeight': '700', 'color': '#1a5c1a',
                                           'marginRight': '8px'}),
         f'{n} asset',
     ])

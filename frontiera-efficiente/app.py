@@ -3283,7 +3283,8 @@ def fe_live_sync(_, sig):
         old_asset_sig = ''
 
     n = len(op.columns)
-    lbl = f'👤 Personale ({n} asset)'
+    from navbar import ETICHETTA_PERSONALE
+    lbl = f'{ETICHETTA_PERSONALE} ({n} asset)'
 
     if asset_sig != old_asset_sig:
         # Lista asset cambiata: aggiorna fe-stock-data → _clear_stale_frontier fa il reset
