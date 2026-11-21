@@ -22,6 +22,7 @@ _sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _sys_path not in sys.path:
     sys.path.insert(0, _sys_path)
 from settings.browser_css import BROWSER_RESET_CSS
+from settings.caratteri import NOME_ASSET
 from navbar import make_navbar, ETICHETTA_PERSONALE
 
 # ─── App ─────────────────────────────────────────────────────────────────────
@@ -256,6 +257,9 @@ app.index_string = '''<!DOCTYPE html><html>
 <head>{%metas%}<title>Rendimenti Storici — Andrea Cappelletti</title>{%favicon%}{%css%}
 <style>
 ''' + BROWSER_RESET_CSS + '''
+/* Dentro il Portafoglio (?embed=1, classe nb-embed da NAVBAR_JS): niente spazio per
+   la navbar e stessi margini della Frontiera incorporata */
+html.nb-embed .rend-corpo { padding: 8px 8px 16px !important; }
 </style>
 </head>
 <body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer>
@@ -437,7 +441,7 @@ app.layout = html.Div([
 
         ], style={'display': 'flex'}),
 
-    ], style={
+    ], className='rend-corpo', style={
         'paddingTop': '112px',
         'padding': '112px 5% 32px',
         'fontFamily': 'Inter, sans-serif',
@@ -489,8 +493,8 @@ def load_default_data(_):
 
 # Stile base del nome asset nella griglia di selezione (sinistra)
 _RASSET_BASE = {
-    'fontWeight': 'bold', 'overflow': 'hidden', 'whiteSpace': 'nowrap',
-    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
+    **NOME_ASSET, 'overflow': 'hidden', 'whiteSpace': 'nowrap',
+    'textOverflow': 'ellipsis', 'maxWidth': '100%',
     'fontFamily': 'Inter, sans-serif',
 }
 
@@ -637,9 +641,9 @@ def build_asset_grid(stock_json, selected, p1, p2, p3):
         port_row = html.Div([
             html.Div(
                 html.Span(p_name, style={
-                    'color': p_color, 'fontWeight': 'bold',
+                    'color': p_color, **NOME_ASSET,
                     'overflow': 'hidden', 'whiteSpace': 'nowrap',
-                    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
+                    'textOverflow': 'ellipsis', 'maxWidth': '100%',
                     'fontFamily': 'Inter, sans-serif',
                 }),
                 style={'width': '35%', 'height': '22px', 'display': 'flex',

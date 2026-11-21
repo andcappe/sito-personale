@@ -71,6 +71,12 @@ def _load(module_name, folder):
         navbar.installa_css(mod.app)
     except Exception as _e:
         print(f"⚠ [navbar] CSS cellulare non installato su {folder}: {_e}", flush=True)
+    # Caratteri del sito: un solo file, settings/caratteri.py.
+    try:
+        from settings import caratteri
+        caratteri.installa(mod.app)
+    except Exception as _e:
+        print(f"⚠ [caratteri] non installati su {folder}: {_e}", flush=True)
     return mod.app.server
 
 
@@ -145,7 +151,7 @@ _PUBLIC_PREFIXES = (
 _BASE_STYLE = """\
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: 'Segoe UI', Arial, sans-serif;
+      font-family: __CARATTERE__;
       background: linear-gradient(135deg, #1a3a5c 0%, #0d2137 100%);
       min-height: 100vh;
       display: flex; align-items: center; justify-content: center;
@@ -390,7 +396,7 @@ _ADMIN_HTML_HEAD = """\
   <title>Admin – Dashboard Finanziaria</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Segoe UI', Arial, sans-serif;
+    body { font-family: __CARATTERE__;
            background: #0d2137; color: #e0e8f0; min-height: 100vh; }
     .topbar {
       background: #1a3a5c; padding: 12px 24px;
@@ -449,6 +455,18 @@ def _is_public(path: str) -> bool:
             or path.startswith(_PUBLIC_RESET_PREFIX)
             or path.startswith(_PUBLIC_VERIFY_PREFIX)
             or any(path.startswith(p) for p in _PUBLIC_PREFIXES))
+
+
+# ─── Caratteri delle pagine di login / registrazione / admin ──────────────────
+# Gli stessi delle dashboard, da settings/caratteri.py (le email restano in Arial:
+# i programmi di posta non caricano i caratteri web).
+from settings import caratteri as _caratteri  # noqa: E402
+_caratteri.imposta_plotly()   # carattere predefinito dei grafici di tutte le dashboard
+_BASE_STYLE = _BASE_STYLE.replace('__CARATTERE__', _caratteri.CARATTERE)
+_LOGIN_HTML, _REGISTER_HTML, _FORGOT_HTML, _RESET_HTML, _SUSPENDED_HTML, _ADMIN_HTML_HEAD = (
+    _caratteri.in_html(h.replace('__CARATTERE__', _caratteri.CARATTERE))
+    for h in (_LOGIN_HTML, _REGISTER_HTML, _FORGOT_HTML, _RESET_HTML, _SUSPENDED_HTML,
+              _ADMIN_HTML_HEAD))
 
 
 # ─── Invio email ───────────────────────────────────────────────────────────────
@@ -549,6 +567,11 @@ def _register_auth(flask_server, add_login_routes: bool = False):
         def _home():
             with open(os.path.join(_PROFILO_DIR, 'index.html'), 'r', encoding='utf-8') as f:
                 content = f.read()
+            try:
+                from settings import caratteri
+                content = caratteri.in_homepage(content)
+            except Exception:
+                pass
             return content, 200, {
                 'Content-Type': 'text/html; charset=utf-8',
                 'Cache-Control': 'no-store',

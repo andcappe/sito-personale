@@ -154,6 +154,7 @@ _FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
 
 _FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES', 'VALUTE']
 from navbar import ETICHETTA_PERSONALE
+from settings.caratteri import NOME_ASSET
 _PERSONALE_OPT = {'label': ETICHETTA_PERSONALE, 'value': '__personale__'}
 
 def _dataset_xlsx_paths():
@@ -247,7 +248,15 @@ def health_check():
 @app.server.route('/')
 @app.server.route('/sito')
 def serve_profilo():
-    return flask_send_file(_PROFILO_HTML)
+    # È questa la rotta che serve la homepage (registrata prima di quella in wsgi.py):
+    # i caratteri vengono da settings/caratteri.py
+    try:
+        from settings import caratteri
+        with open(_PROFILO_HTML, 'r', encoding='utf-8') as f:
+            return caratteri.in_homepage(f.read()), 200, {
+                'Content-Type': 'text/html; charset=utf-8'}
+    except Exception:
+        return flask_send_file(_PROFILO_HTML)
 
 @app.server.route('/foto.png')
 def serve_foto():
@@ -4735,7 +4744,7 @@ def build_corr_grid(stock_data):
             html.Div(html.Span(a, **{'data-tooltip': a},
                                style={'overflow': 'hidden', 'whiteSpace': 'nowrap',
                                       'textOverflow': 'ellipsis', 'maxWidth': '100%',
-                                      'fontSize': '10px', 'color': '#1a3a5c'}),
+                                      **NOME_ASSET, 'color': '#1a3a5c'}),
                      style={'flex': '1', 'overflow': 'hidden', 'paddingRight': '4px', 'minWidth': '0'}),
             _chk('corr-mt', a, a in mt_default, '#1a3a5c'),
             _chk('corr-ml', a, False, '#e6550d'),
@@ -7035,9 +7044,9 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
         row_content = html.Div([
             html.Div(
                 html.Span(asset, style={
-                    'color': _label_color, 'fontWeight': 'bold',
+                    'color': _label_color, **NOME_ASSET,
                     'overflow': 'hidden', 'whiteSpace': 'nowrap',
-                    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
+                    'textOverflow': 'ellipsis', 'maxWidth': '100%',
                 }),
                 **{'data-tooltip': asset, 'data-tooltip-color': _label_color},
                 style={'width': _LARG_NOME, 'height': '28px', 'display': 'flex',
@@ -7077,9 +7086,9 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
         portfolio_row = html.Div([
             html.Div(
                 html.Span(portfolio_name, style={
-                    'color': '#0066cc', 'fontWeight': 'bold',
+                    'color': '#0066cc', **NOME_ASSET,
                     'overflow': 'hidden', 'whiteSpace': 'nowrap',
-                    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
+                    'textOverflow': 'ellipsis', 'maxWidth': '100%',
                 }),
                 **{'data-tooltip': portfolio_name, 'data-tooltip-color': '#0066cc'},
                 style={'width': _LARG_NOME, 'height': '28px', 'display': 'flex',

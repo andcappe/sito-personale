@@ -5,16 +5,8 @@ Importa le costanti tipografiche per font-size uniformi su tutti i browser.
 """
 
 # ─── Font-size uniformi (px) ────────────────────────────────────────────────
-# Modificare qui per aggiornare tutta la UI del sito
-FONT = {
-    'xs':   '11px',   # etichette griglia, badge
-    'sm':   '12px',   # testo secondario, descrizioni
-    'md':   '13px',   # testo corpo standard
-    'lg':   '14px',   # bottoni, label principali
-    'xl':   '16px',   # titoli sezione
-    'xxl':  '20px',   # titoli pagina
-    'icon': '12px',   # icone/emoji nelle celle
-}
+# Caratteri e dimensioni del sito stanno in settings/caratteri.py: modificarli lì.
+from settings.caratteri import FONT, CARATTERE  # noqa: E402,F401
 
 # ─── CSS reset cross-browser ─────────────────────────────────────────────────
 # Corregge le differenze di rendering tra Chrome, Firefox e Safari.
@@ -31,7 +23,7 @@ BROWSER_RESET_CSS = f"""
   }}
   body {{
     margin: 0;
-    font-family: 'Inter', sans-serif;
+    font-family: {CARATTERE};
     background: #f5f8fe;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -61,7 +53,7 @@ SITE_CSS = BROWSER_RESET_CSS + """
                 background: linear-gradient(90deg, #f0f4fb 0%, #ffffff 100%);
                 margin-bottom: 10px; }
   .page-head h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #1a3a6b;
-                  font-family: 'Playfair Display', serif; letter-spacing: 0.02em; }
+                  letter-spacing: 0.02em; }
   .page-head .sub { font-size: 1.1rem; font-weight: 400; color: #4a5d7a; }
   @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 """
