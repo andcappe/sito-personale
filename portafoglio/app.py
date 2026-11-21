@@ -63,6 +63,17 @@ _PF_BTN_PRINCIPALE = {'background-color': '#1a3a6b', 'color': 'white', 'border':
                       'font-weight': '600', 'font-size': '12px', 'line-height': '18px',
                       'display': 'inline-block', 'user-select': 'none'}
 
+# Menu «Descrizione dati tabella» (pulsante con l'ingranaggio accanto a Opzioni):
+# una riga etichetta | valore.
+def _pf_info_riga(etichetta, valore, colore='#1a3a5c'):
+    return html.Div([
+        html.Span(etichetta, style={'color': '#5a6b85', 'font-size': '12px'}),
+        html.Span(valore, style={'color': colore, 'font-size': '12px', 'font-weight': '600',
+                                 'white-space': 'nowrap'}),
+    ], style={'display': 'flex', 'justify-content': 'space-between', 'gap': '16px',
+              'padding': '3px 0', 'border-bottom': '1px dotted #e2e8f0'})
+
+
 app.index_string = '''
 <!DOCTYPE html>
 <html>
@@ -88,6 +99,27 @@ app.index_string = '''
     box-shadow: 0 6px 20px rgba(26,58,107,0.18); min-width: 240px;
     display: flex; flex-direction: column; gap: 2px; }
   .pf-strumenti-menu > * { width: 100%; }
+  /* Cellulare: Parametri, Range temporale, Asset e Grafici sono quattro schede
+     uguali (sfondo chiaro, bordo sottile); via le righe blu e l'<hr> fra loro. */
+  @media (max-width: 900px) {
+    .pf-sez { background: #f8fafc !important; border: 1px solid #e2e8f0 !important;
+      border-radius: 6px !important; padding: 5px 14px 5px 8px !important;
+      margin: 0 0 8px 0 !important; width: 100% !important; box-sizing: border-box; }
+    .pf-sez > .nb-espandi-btn { font-size: 12px !important; font-weight: 700 !important;
+      color: #1a3a5c !important; padding: 4px 0 !important; border-bottom: none !important; }
+    .pf-fascia { background: transparent !important; border: none !important; }
+    .pf-hr { display: none !important; }
+    .pf-corpo { border-bottom: none !important; }
+  }
+  /* Range temporale: date compatte come nel riquadro «Periodo» della Frontiera. */
+  .pf-date .SingleDatePickerInput { border: 1px solid #ccd9ee; border-radius: 4px; }
+  .pf-date .DateInput { width: 104px; }
+  .pf-date .DateInput_input { font-size: 13px; padding: 4px 8px; height: 28px; line-height: 20px; }
+  /* Descrizione dati tabella: sul cellulare il pulsante sta a destra e il menu
+     uscirebbe dallo schermo, quindi prende tutta la larghezza. */
+  @media (max-width: 900px) {
+    .pf-info > .pf-strumenti-menu { position: fixed; top: auto; left: 16px; right: 16px; min-width: 0 !important; }
+  }
   .pf-voce:hover { background: #eef3fb !important; }
   @keyframes spin {
     0%   { transform: rotate(0deg); }
@@ -2869,45 +2901,47 @@ def get_date_range_bar(suffix):
     # Sul cellulare è una sezione espandibile (chiusa all'apertura) e le due date
     # stanno in una griglia 2×2 (etichetta | data); sul computer resta la riga unica di sempre.
     _riga = {'display': 'flex', 'align-items': 'center', 'gap': '4px'}
+    # Sul computer: etichetta piccola sopra la data, come in Frontiera (sul
+    # cellulare nb-riga-data è display: contents, quindi questo non conta).
+    _campo = {'display': 'flex', 'flex-direction': 'column', 'gap': '2px'}
+    _etic = {'font-size': '11px', 'color': '#6b7a99', 'font-weight': '600', 'white-space': 'nowrap'}
     return html.Div(className='nb-piena', children=[
-        html.Div(className='nb-espandi nb-a-capo', children=[
+        html.Div(className='nb-espandi nb-a-capo pf-sez', children=[
             html.Div(className='nb-espandi-btn', children=[
-                html.Span('📅 ', className='nb-nascondi-cell'), 'Range temporale:',
+                html.Span('📅 ', className='nb-nascondi-cell'), 'Range temporale',
+                html.Span(':', className='nb-nascondi-cell'),
                 html.I(className='fa-solid fa-chevron-down nb-espandi-ico'),
             ], style={'font-size': '11px', 'font-weight': 'bold',
                       'color': '#1a3a5c', 'white-space': 'nowrap',
-                      'margin-right': '10px', 'align-self': 'center'}),
-            html.Div(className='nb-espandi-corpo nb-griglia-date', style=_riga, children=[
+                      'margin-right': '10px', 'padding-bottom': '8px'}),
+            html.Div(className='nb-espandi-corpo nb-griglia-date pf-date', style={**_riga, 'gap': '10px'}, children=[
                 html.Div([
-                    html.Div([html.Span('da:', className='nb-nascondi-cell'),
+                    html.Div([html.Span('Da', className='nb-nascondi-cell'),
                               html.Span('Finestra temporale Inizio:', className='nb-solo-cell')],
                              className='nb-etic-data',
-                             style={'font-size': '11px', 'color': '#555',
-                                    'white-space': 'nowrap', 'min-width': '18px'}),
+                             style=_etic),
                     dcc.DatePickerSingle(id=f'dr-start-{suffix}', display_format='DD/MM/YYYY',
                                          first_day_of_week=1, date=_ten_years_ago,
-                                         clearable=False, style={'width': '135px'}),
-                ], className='nb-riga-data', style=_riga),
+                                         clearable=False),
+                ], className='nb-riga-data', style=_campo),
                 html.Div([
-                    html.Div([html.Span('a:', className='nb-nascondi-cell'),
+                    html.Div([html.Span('A', className='nb-nascondi-cell'),
                               html.Span('Finestra temporale Fine:', className='nb-solo-cell')],
                              className='nb-etic-data',
-                             style={'font-size': '11px', 'color': '#555',
-                                    'white-space': 'nowrap', 'min-width': '18px',
-                                    'text-align': 'right'}),
+                             style=_etic),
                     dcc.DatePickerSingle(id=f'dr-end-{suffix}', display_format='DD/MM/YYYY',
                                          first_day_of_week=1, date=_today_str,
-                                         clearable=False, style={'width': '135px'}),
-                ], className='nb-riga-data', style=_riga),
-                # Il periodo effettivo dei dati: solo sul computer.
-                html.Div(id=f'dr-label-{suffix}', className='nb-nascondi-cell',
+                                         clearable=False),
+                ], className='nb-riga-data', style=_campo),
+                # Il periodo effettivo dei dati: solo sul computer. In Analisi
+                # Portafoglio (tab1) sta nel menu «Descrizione dati tabella».
+                *([] if suffix == 'tab1' else [html.Div(id=f'dr-label-{suffix}', className='nb-nascondi-cell',
                          style={'font-size': '10px', 'color': '#888', 'white-space': 'nowrap',
-                                'align-self': 'center', 'margin-left': '10px',
-                                'min-width': '200px'}),
+                                'align-self': 'flex-end', 'padding-bottom': '8px',
+                                'margin-left': '10px', 'min-width': '200px'})]),
             ]),
-        ], style={'display': 'flex', 'align-items': 'center', 'padding': '6px 12px',
-                  'background': '#f0f4fa', 'border': '1px solid #d0d8e8',
-                  'border-radius': '6px', 'margin-bottom': '8px', 'gap': '4px'}),
+        ], style={'display': 'flex', 'align-items': 'flex-end', 'padding': '4px 0',
+                  'gap': '4px'}),
     ])
 
 
@@ -3195,49 +3229,40 @@ def get_rolling_analysis_tab():
 # colonna di spunte: update_graph li disegna tutti per ogni titolo spuntato in CH.
 _LARG_NOME, _LARG_CH, _LARG_PESO = '34%', '6%', '17%'
 _COLONNE_ASSET = [   # larghezza, etichetta, colore, tooltip, id del pulsante ☑
-    (_LARG_CH,   'CH', '#1a3a5c', 'Deseleziona grafici', 'deselect-all-tickers'),
-    (_LARG_PESO, 'P1', '#e6194b', 'Azzera pesi P1',      'reset-p1-tab1'),
-    (_LARG_PESO, 'P2', '#3cb44b', 'Azzera pesi P2',      'reset-p2-tab1'),
-    (_LARG_PESO, 'P3', '#4363d8', 'Azzera pesi P3',      'reset-p3-tab1'),
+    (_LARG_CH,   'CH', '#1a3a5c', 'Deseleziona tutti (o seleziona tutti se nessuno è spuntato)', 'deselect-all-tickers'),
+    (_LARG_PESO, 'P1', '#e6194b', 'Azzera pesi P1 (se già a zero: pesi uguali sugli asset spuntati in CH)', 'reset-p1-tab1'),
+    (_LARG_PESO, 'P2', '#3cb44b', 'Azzera pesi P2 (se già a zero: pesi uguali sugli asset spuntati in CH)', 'reset-p2-tab1'),
+    (_LARG_PESO, 'P3', '#4363d8', 'Azzera pesi P3 (se già a zero: pesi uguali sugli asset spuntati in CH)', 'reset-p3-tab1'),
 ]
 
 
-def _etichette_colonne(cell=False):
-    """Riga delle etichette sopra la griglia asset, con i pulsanti ☑.
-    cell=False: quella vera (pulsanti con id), nella fascia blu col range date;
-    sul cellulare è nascosta. cell=True: la copia che sta dentro la sezione
-    «Asset» del cellulare, così si chiude con la tabella; i suoi ☑ non hanno id
-    e cliccano quelli veri (nb-clicca + data-bersaglio, delega in navbar.NAVBAR_JS)."""
-    def bottone(col, tip, btn_id):
-        stile = {'fontSize': '7px', 'border': 'none', 'background': 'none',
-                 'cursor': 'pointer', 'color': col,
-                 'padding': '0', 'margin': '0', 'lineHeight': '1'}
-        if cell:
-            return html.Button('☑', title=tip, className='nb-clicca',
-                               **{'data-bersaglio': btn_id}, style=stile)
-        return html.Button('☑', id=btn_id, n_clicks=0, title=tip, style=stile)
+def _etichette_colonne():
+    """Riga delle etichette (Asset, CH, P1, P2, P3) direttamente sopra la griglia
+    asset, con le stesse larghezze delle righe; i ☑ azzerano la colonna. Sta dentro
+    la sezione «Asset», quindi vale per computer e cellulare (prima stava nella fascia
+    blu del range date e il cellulare ne aveva una copia)."""
     return html.Div([
         html.Div('Asset', **{'data-tooltip': 'Nome dell\'asset'}, style={
-            'width': _LARG_NOME, 'fontWeight': 'bold', 'fontSize': '6px',
+            'width': _LARG_NOME, 'fontWeight': '700', 'fontSize': '11px',
             'paddingLeft': '4px', 'color': '#1a3a5c',
-            'display': 'flex', 'alignItems': 'center',
-            'overflow': 'hidden',
+            'display': 'flex', 'alignItems': 'center', 'overflow': 'hidden',
         }),
         *[html.Div([
-            html.Span(lbl, style={
-                'fontWeight': 'bold', 'fontSize': '7px', 'color': col,
-                'lineHeight': '1', 'whiteSpace': 'nowrap',
-            }),
-            bottone(col, tip, btn_id),
+            html.Span(lbl, style={'fontWeight': '700', 'fontSize': '11px', 'color': col,
+                                  'lineHeight': '1', 'whiteSpace': 'nowrap'}),
+            html.Button('☑', id=btn_id, n_clicks=0, title=tip, style={
+                'fontSize': '10px', 'border': 'none', 'background': 'none',
+                'cursor': 'pointer', 'color': col,
+                'padding': '0', 'margin': '0', 'lineHeight': '1'}),
         ], className='col-header-cell', style={
             'width': w, 'display': 'flex', 'flexDirection': 'column',
-            'alignItems': 'center', 'justifyContent': 'center',
-            'overflow': 'hidden', 'gap': '0px',
+            'alignItems': 'center', 'justifyContent': 'center', 'gap': '1px',
+            'overflow': 'hidden',
         }) for w, lbl, col, tip, btn_id in _COLONNE_ASSET],
-    ], className='nb-solo-flex' if cell else 'nb-piena nb-nascondi-cell', style={
-        'width': '100%' if cell else '35%', 'display': 'flex', 'alignItems': 'center',
-        'minHeight': '18px', 'padding': '0', 'overflow': 'hidden',
-        **({'background': '#eaf4fb', 'borderBottom': '1px solid #aed6f1'} if cell else {}),
+    ], style={
+        'display': 'flex', 'alignItems': 'center', 'minHeight': '30px',
+        'background': '#eaf4fb', 'borderBottom': '1px solid #aed6f1',
+        'position': 'sticky', 'top': '0', 'zIndex': '2',
     })
 
 
@@ -3258,9 +3283,9 @@ def get_portfolio_analysis_tab(options_tickers):
             # ── Riga controlli ────────────────────────────────────────────
             # Sul cellulare è una sezione espandibile, chiusa all'apertura
             # (nb-espandi / nb-espandi-btn / nb-espandi-corpo, CSS e JS in navbar.py).
-            html.Div(className='nb-espandi', children=[
+            html.Div(className='nb-espandi pf-sez', children=[
                 html.Span(className='nb-espandi-btn', children=[
-                    'Parametri indicatori di rischio:',
+                    'Parametri indicatori di rischio', html.Span(':', className='nb-nascondi-cell'),
                     html.I(className='fa-solid fa-chevron-down nb-espandi-ico'),
                 ], style={'margin-right': '10px', 'white-space': 'nowrap',
                           'font-size': '12px', 'font-weight': '700',
@@ -3282,22 +3307,22 @@ def get_portfolio_analysis_tab(options_tickers):
                         html.Label('AK-SH-TV W:',
                                    style={'margin-right': '4px', 'white-space': 'nowrap',
                                           'font-size': '10px'}),
-                        dcc.Input(id='ir-window-input', type='number', value=30, min=1,
-                                  placeholder='30', style={'width': '45px', 'font-size': '10px'}),
+                        dcc.Input(id='ir-window-input', type='number', value=100, min=1,
+                                  placeholder='100', style={'width': '45px', 'font-size': '10px'}),
                     ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '8px'}),
                     html.Div([
                         html.Label('MA:',
                                    style={'margin-right': '4px', 'white-space': 'nowrap',
                                           'font-size': '10px'}),
-                        dcc.Input(id='ak-ma-input', type='number', value=1, min=1,
-                                  placeholder='1', style={'width': '40px', 'font-size': '10px'}),
+                        dcc.Input(id='ak-ma-input', type='number', value=10, min=1,
+                                  placeholder='10', style={'width': '40px', 'font-size': '10px'}),
                     ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '8px'}),
                     html.Div([
                         html.Label('VOL-cVAR W:',
                                    style={'margin-right': '4px', 'white-space': 'nowrap',
                                           'font-size': '10px'}),
-                        dcc.Input(id='vol-window-input', type='number', value=30, min=1,
-                                  placeholder='30', style={'width': '45px', 'font-size': '10px'}),
+                        dcc.Input(id='vol-window-input', type='number', value=100, min=1,
+                                  placeholder='100', style={'width': '45px', 'font-size': '10px'}),
                     ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '8px'}),
                     html.Button('Update', id='update-portfolio-button', n_clicks=0,
                                 className='nb-nascondi-cell',
@@ -3342,27 +3367,38 @@ def get_portfolio_analysis_tab(options_tickers):
                             ]),
                         ]),
                     ]),
+                    # Descrizione dati tabella: numero asset e periodo, tolti dallo schermo.
+                    # Gli id asset-count-display e dr-label-tab1 sono gli stessi di prima.
+                    html.Details(className='pf-strumenti pf-info', style={'margin-left': '4px'}, children=[
+                        html.Summary(html.I(className='fa-solid fa-gear'),
+                                     title='Descrizione dati tabella',
+                                     style={**_PF_BTN_PRINCIPALE, 'padding': '6px 9px'}),
+                        html.Div(className='pf-strumenti-menu',
+                                 style={'padding': '10px 12px', 'gap': '0', 'min-width': '260px'},
+                                 children=[
+                            html.Div('Descrizione dati tabella', style=_PF_OPZ_TITOLO),
+                            html.Div(id='asset-count-display'),
+                            html.Div(id='dr-label-tab1'),
+                        ]),
+                    ]),
                 ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap', 'gap': '0px'}),
             ], style={'margin-bottom': '8px', 'display': 'flex', 'align-items': 'center',
                       'flex-wrap': 'wrap', 'padding': '5px 8px',
                       'background': '#f8fafc', 'border': '1px solid #e2e8f0',
                       'border-radius': '6px'}),
 
-            html.Hr(),
+            html.Hr(className='pf-hr'),
 
             # ── Intestazione full-width: etichette colonne (sx) + range date (dx) ──
             html.Div([
-                # Sx 35%: etichette colonne con pulsanti ☑ integrati. Sul cellulare
-                # sono nascoste qui e la copia sta dentro la sezione «Asset».
-                _etichette_colonne(),
-                # Dx 65%: range temporale — allineato a destra
+                # Range temporale, allineato a destra. Le etichette delle colonne
+                # (Asset, CH, P1…P3) stanno sopra la griglia, in _etichette_colonne().
                 html.Div(
                     get_date_range_bar('tab1'), className='nb-piena',
-                    style={'width': '65%', 'display': 'flex', 'align-items': 'center',
+                    style={'width': '100%', 'display': 'flex', 'align-items': 'center',
                            'justify-content': 'flex-end'},
                 ),
-            # Sul cellulare (nb-impila-inv): range date sopra, etichette sotto.
-            ], className='nb-impila-inv', style={
+            ], className='nb-impila-inv pf-fascia', style={
                 'display': 'flex', 'background': '#eaf4fb',
                 'border-top': '2px solid #2e6da4', 'border-bottom': '1px solid #aed6f1',
             }),
@@ -3374,10 +3410,6 @@ def get_portfolio_analysis_tab(options_tickers):
                 html.Div([
                   _testa_cell('Asset'),
                   html.Div(className='nb-espandi-corpo', children=[
-                    _etichette_colonne(cell=True),
-                    html.Div(id='asset-count-display',
-                             style={'font-size': '10px', 'color': '#555',
-                                    'padding': '3px 5px 5px 5px', 'margin-bottom': '2px'}),
                     html.Div(
                         '▶ Dati caricati — clicca UPDATE per aggiornare i grafici',
                         id='update-hint',
@@ -3386,6 +3418,7 @@ def get_portfolio_analysis_tab(options_tickers):
                                'background': '#fdf2f0', 'border-left': '3px solid #c0392b',
                                'margin-bottom': '4px', 'border-radius': '0 4px 4px 0'}
                     ),
+                    _etichette_colonne(),
                     html.Div(id='weights-grid-container', style={'display': 'block'}),
                     html.Div([
                         dcc.Input(id='inline-ticker-input', placeholder='Ticker (es. AAPL)',
@@ -3436,7 +3469,7 @@ def get_portfolio_analysis_tab(options_tickers):
                         ], style={'display': 'flex', 'align-items': 'center'}),
                     ], style={'margin-top': '10px'}),
                   ]),
-                ], className='nb-piena nb-espandi nb-aperto',
+                ], className='nb-piena nb-espandi nb-aperto pf-sez',
                    style={'width': '35%', 'vertical-align': 'top'}),
 
                 # Colonna destra: grafico (sul cellulare sezione «Grafici», aperta all'avvio)
@@ -3478,10 +3511,10 @@ def get_portfolio_analysis_tab(options_tickers):
                     dcc.Textarea(id='selected-column',           value='', style={'display': 'none'}),
                     dcc.Textarea(id='insufficient-data-tickers', value='', style={'display': 'none'}),
                   ]),
-                ], className='nb-piena nb-espandi nb-aperto',
+                ], className='nb-piena nb-espandi nb-aperto pf-sez',
                    style={'width': '65%', 'vertical-align': 'top'}),
             # Sul cellulare (nb-impila): griglia asset sopra, grafico sotto a tutta larghezza.
-            ], className='nb-impila', style={'display': 'flex', 'border-bottom': '2px solid #2e6da4'}),
+            ], className='nb-impila pf-corpo', style={'display': 'flex', 'border-bottom': '2px solid #2e6da4'}),
         ]),
     ])
 
@@ -4244,6 +4277,22 @@ app.clientside_callback(
             var r = g ? Math.round(g.getBoundingClientRect().width) : 0;
             if (r > 0) { try { window.dash_clientside.set_props('pf-larg-grafico', {data: r}); } catch (e) {} }
         }
+        // Sul computer il grafico si ridisegna solo passando i 900 px: restringendo
+        // la finestra (pannello laterale, devtools, zoom) Plotly stringeva il grafico ma
+        // le voci della legenda restavano larghe quanto calcolato prima, due non ci
+        // stavano più e la legenda passava a una colonna. Qui si ricalcola la larghezza
+        // della voce come _pf_legenda_unica (area = figura − 80 − 20; voce = (area − 92) / 2)
+        // e la si passa a Plotly, senza ridisegnare dal server.
+        function adattaLegenda() {
+            if (window.innerWidth <= MAX) { return; }
+            var gd = document.querySelector('#controls-and-graph .js-plotly-plot');
+            var lg = gd && gd.layout && gd.layout.legend;
+            if (!lg || lg.entrywidthmode !== 'pixels' || !window.Plotly) { return; }
+            var area = Math.max(150, gd.getBoundingClientRect().width - 100);
+            var voce = Math.max(60, Math.floor((area - 92) / 2));
+            if (Math.abs((lg.entrywidth || 0) - voce) < 2) { return; }
+            try { window.Plotly.relayout(gd, {'legend.entrywidth': voce}); } catch (e) {}
+        }
         function serve(w, p) {
             if (!p) { return true; }
             if ((w <= MAX) !== (p <= MAX)) { return true; }
@@ -4257,6 +4306,7 @@ app.clientside_callback(
                 clearTimeout(t);
                 t = setTimeout(function () {
                     misuraGrafico();
+                    adattaLegenda();
                     var w = window.innerWidth;
                     if (serve(w, window._pfLarg)) {   // dcc.Store non ha un elemento nel DOM
                         window._pfLarg = w;
@@ -6862,6 +6912,18 @@ def download_template(n_clicks):
 # ─────────────────────────────────────────────────────────────────────────────
 # Callback: benchmark dropdown popolato dopo caricamento dati
 # ─────────────────────────────────────────────────────────────────────────────
+# Benchmark scelto all'apertura di Analisi Portafoglio, uno per file: vale il primo
+# nome (DESCRIZIONE dell'xlsx) presente nel file. Confronto per inizio del nome,
+# così «Crude Oil» (WTI, CL=F) regge al cambio di mese del contratto; il Brent si
+# chiama «Brent Crude Oil…» e non viene preso. Nessuna corrispondenza: primo asset.
+_PF_BENCH_PREDEFINITI = (
+    'Az. ACWI',      # ETF
+    'Bitcoin USD',   # CRIPTO
+    'EUR/USD',       # VALUTE
+    'Crude Oil',     # COMMODITIES (petrolio WTI)
+)
+
+
 @app.callback(
     Output('benchmark-selector', 'options'),
     Output('benchmark-selector', 'value'),
@@ -6879,6 +6941,11 @@ def update_benchmark_options(options_tickers, current_value):
     all_options = portfolio_opts + options_tickers
     if current_value and any(opt['value'] == current_value for opt in all_options):
         return all_options, current_value
+    # Predefinito: quello del file (ACWI, Bitcoin, EUR/USD, WTI); altrimenti il primo asset.
+    for nome in _PF_BENCH_PREDEFINITI:
+        for opt in options_tickers:
+            if str(opt['value']).startswith(nome):
+                return all_options, opt['value']
     return all_options, options_tickers[0]['value'] if options_tickers else None
 
 
@@ -7002,15 +7069,11 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
     if ir_filter and ir_filter != 'all':
         label = '> 0' if ir_filter == 'gt_0' else '> −1'
         count_text = [
-            html.Span(f'{n_above}', style={'font-weight': 'bold', 'color': '#c0392b', 'font-size': '12px'}),
-            html.Span(f' / {n_total} asset', style={'color': '#555'}),
-            html.Span(f'  in rosso (AKRatio {label})', style={'color': '#c0392b', 'font-style': 'italic'}),
+            _pf_info_riga('Numero asset:', f'{n_total}'),
+            _pf_info_riga(f'In rosso (AKRatio {label}):', f'{n_above}', '#c0392b'),
         ]
     else:
-        count_text = [
-            html.Span(f'{n_total}', style={'font-weight': 'bold', 'color': '#1a3a5c', 'font-size': '12px'}),
-            html.Span(f' / {n_total} asset', style={'color': '#555'}),
-        ]
+        count_text = [_pf_info_riga('Numero asset:', f'{n_total}')]
 
     rows = []
 
@@ -7043,8 +7106,10 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
 
         row_content = html.Div([
             html.Div(
-                html.Span(asset, style={
-                    'color': _label_color, **NOME_ASSET,
+                # id per _pf_storia_corta, che lo colora di rosso se l'asset non
+                # copre il range date; '--pf-base' ricorda il colore di partenza.
+                html.Span(asset, id={'type': 'pf-nome-asset', 'index': asset}, style={
+                    'color': _label_color, '--pf-base': _label_color, **NOME_ASSET,
                     'overflow': 'hidden', 'whiteSpace': 'nowrap',
                     'textOverflow': 'ellipsis', 'maxWidth': '100%',
                 }),
@@ -7133,15 +7198,88 @@ def collect_selected_assets(all_values):
 # ─────────────────────────────────────────────────────────────────────────────
 # Callbacks: pulsanti cancella colonna
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: in rosso gli asset che non coprono tutto il range date scelto
+# ─────────────────────────────────────────────────────────────────────────────
+_PF_ROSSO = '#c0392b'
+_PF_STORIA_TOLLERANZA = pd.Timedelta(days=7)   # weekend, festivi, date di inizio non di borsa
+
+
+@app.callback(
+    Output({'type': 'pf-nome-asset', 'index': ALL}, 'style'),
+    Output({'type': 'pf-nome-asset', 'index': ALL}, 'title'),
+    Input('dr-start-tab1', 'date'),
+    Input('dr-end-tab1',   'date'),
+    Input('weights-grid-container', 'children'),
+    State('stock-data', 'data'),
+    State({'type': 'pf-nome-asset', 'index': ALL}, 'id'),
+    State({'type': 'pf-nome-asset', 'index': ALL}, 'style'),
+    prevent_initial_call=True,
+)
+def _pf_storia_corta(start, end, _griglia, stock_data, ids, stili):
+    """Nome in rosso (e spiegazione al passaggio del mouse) per l'asset che ha
+    dati solo da dopo l'inizio del range o si ferma prima della fine. Senza
+    questo gli anni mancanti contano come rendimento 0 senza alcun avviso."""
+    if not ids:
+        raise PreventUpdate
+    df = _get_df(stock_data)
+    if df is None or df.empty:
+        with _DL_LOCK:
+            df = _DL_BUFFER.get('close_returns')
+    if df is None or df.empty or not start or not end:
+        raise PreventUpdate
+    ini = max(pd.Timestamp(start[:10]), df.index.min())
+    fin = min(pd.Timestamp(end[:10]), df.index.max())
+    g = lambda t: t.strftime('%d/%m/%Y')
+    nuovi, titoli = [], []
+    for i, st in zip(ids, stili):
+        st = dict(st or {})
+        base = st.get('--pf-base', st.get('color'))
+        a = i['index']
+        titolo = None
+        if a in df.columns:
+            serie = df[a].loc[ini:fin].dropna()
+            if serie.empty:
+                titolo = f'Nessun dato fra il {g(ini)} e il {g(fin)}'
+            else:
+                if serie.index[0] > ini + _PF_STORIA_TOLLERANZA:
+                    titolo = f'Dati solo dal {g(serie.index[0])}: il range parte dal {g(ini)}'
+                if serie.index[-1] < fin - _PF_STORIA_TOLLERANZA:
+                    titolo = ((titolo + '; ') if titolo else '') + \
+                             f'dati fermi al {g(serie.index[-1])}: il range finisce il {g(fin)}'
+        st['color'] = _PF_ROSSO if titolo else base
+        nuovi.append(st)
+        titoli.append(titolo)
+    return nuovi, titoli
+
+
+# Righe dei portafogli nella griglia (hanno la spunta CH ma non sono asset).
+_PF_RIGHE_PORTAFOGLIO = {'Port1', 'Port2', 'Port3'}
+
+
 @app.callback(
     Output({'type': 'graph-select-checkbox', 'index': ALL}, 'value'),
     Input('deselect-all-tickers', 'n_clicks'),
+    State({'type': 'graph-select-checkbox', 'index': ALL}, 'id'),
     State({'type': 'graph-select-checkbox', 'index': ALL}, 'value'),
     prevent_initial_call=True,
 )
-def deselect_all_tickers(n, vals):
+def deselect_all_tickers(n, ids, vals):
+    """☑ di CH: se qualcosa è spuntato toglie tutto; se non c'è niente spunta tutti
+    gli asset (le righe Port1–3 no: senza pesi non avrebbero una curva)."""
     if not n: raise PreventUpdate
-    return [[] for _ in vals]
+    if any(v for v in vals):
+        return [[] for _ in vals]
+    return [[] if i['index'] in _PF_RIGHE_PORTAFOGLIO else [i['index']] for i in ids]
+
+
+def _pf_equipesa(n):
+    """n pesi uguali che sommano esattamente 100 (passo 0,1 dei campi): lo scarto
+    dell'arrotondamento si distribuisce un decimo per asset sui primi (42 asset:
+    34 al 2,4% e 8 al 2,3%)."""
+    q, r = divmod(1000, n)
+    return [(q + 1) / 10 if k < r else q / 10 for k in range(n)]
+
 
 @app.callback(
     Output({'type': 'weight-input', 'index': ALL}, 'value'),
@@ -7150,16 +7288,29 @@ def deselect_all_tickers(n, vals):
     Input('reset-p3-tab1', 'n_clicks'),
     State({'type': 'weight-input', 'index': ALL}, 'id'),
     State({'type': 'weight-input', 'index': ALL}, 'value'),
+    State({'type': 'graph-select-checkbox', 'index': ALL}, 'value'),
     prevent_initial_call=True,
 )
-def reset_portfolio_weights(n1, n2, n3, all_ids, all_vals):
-    ctx = callback_context
-    triggered = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ''
-    prefix = {'reset-p1-tab1': 'P1-', 'reset-p2-tab1': 'P2-', 'reset-p3-tab1': 'P3-'}.get(triggered)
+def reset_portfolio_weights(n1, n2, n3, all_ids, all_vals, ch_vals):
+    """☑ di P1/P2/P3: se la colonna ha pesi li azzera; se è già tutta a zero dà
+    pesi uguali agli asset spuntati in CH."""
+    prefix = {'reset-p1-tab1': 'P1-', 'reset-p2-tab1': 'P2-',
+              'reset-p3-tab1': 'P3-'}.get(callback_context.triggered_id)
     if not prefix:
         raise PreventUpdate
-    return [0 if inp_id['index'].startswith(prefix) else val
-            for inp_id, val in zip(all_ids, all_vals)]
+    colonna = [k for k, i in enumerate(all_ids) if i['index'].startswith(prefix)]
+    nuovi = list(all_vals)
+    if any((all_vals[k] or 0) != 0 for k in colonna):
+        for k in colonna:
+            nuovi[k] = 0
+        return nuovi
+    spuntati = {v[0] for v in (ch_vals or []) if v} - _PF_RIGHE_PORTAFOGLIO
+    scelti = [k for k in colonna if all_ids[k]['index'][len(prefix):] in spuntati]
+    if not scelti:
+        raise PreventUpdate
+    for k, peso in zip(scelti, _pf_equipesa(len(scelti))):
+        nuovi[k] = peso
+    return nuovi
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7336,6 +7487,14 @@ def update_selected_column(update_clicks, delete_clicks, clickData, figure):
 # ─────────────────────────────────────────────────────────────────────────────
 # Callback: date picker → tab1-slider-store (grafico reagisce al cambio date)
 # ─────────────────────────────────────────────────────────────────────────────
+def _pf_info_periodo(s, e, ts_min, ts_max):
+    """Righe del periodo nel menu «Descrizione dati tabella» (timestamp in secondi)."""
+    g = lambda t: pd.Timestamp(t, unit='s').strftime('%d/%m/%Y')
+    return [_pf_info_riga('Data iniziale:', g(s)),
+            _pf_info_riga('Data finale:', g(e)),
+            _pf_info_riga('Dati disponibili:', f'{g(ts_min)} — {g(ts_max)}', '#5a6b85')]
+
+
 @app.callback(
     Output('dr-start-tab1',     'date'),
     Output('dr-end-tab1',       'date'),
@@ -7368,9 +7527,7 @@ def sync_date_range(stock_data, start_date, end_date):
         e = min(ts_max, int(today.timestamp()))
         d_start = pd.Timestamp(s, unit='s').strftime('%Y-%m-%d')
         d_end   = pd.Timestamp(e, unit='s').strftime('%Y-%m-%d')
-        label   = (f"{pd.Timestamp(s, unit='s').strftime('%d/%m/%Y')} — "
-                   f"{pd.Timestamp(e, unit='s').strftime('%d/%m/%Y')}")
-        return d_start, d_end, label, [s, e]
+        return d_start, d_end, _pf_info_periodo(s, e, ts_min, ts_max), [s, e]
 
     # L'utente ha cambiato una delle due date: non riscrivere i picker (evita loop)
     try:
@@ -7382,10 +7539,7 @@ def sync_date_range(stock_data, start_date, end_date):
     s = max(ts_min, min(s, ts_max))
     e = max(ts_min, min(e, ts_max))
 
-    label = (f"{pd.Timestamp(s, unit='s').strftime('%d/%m/%Y')} — "
-             f"{pd.Timestamp(e, unit='s').strftime('%d/%m/%Y')}")
-
-    return no_update, no_update, label, [s, e]
+    return no_update, no_update, _pf_info_periodo(s, e, ts_min, ts_max), [s, e]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

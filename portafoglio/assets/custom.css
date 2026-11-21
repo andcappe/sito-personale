@@ -1,22 +1,10 @@
 /* ── Intestazione colonne griglia asset ─────────────────────────────────────
-   Safari e iOS applicano un font minimo (~9px) ignorando valori più piccoli.
-   transform: scale() bypassa questo limite perché agisce sul rendering,
-   non sul font-size computato. */
+   Dal 21/11/2026 le etichette (Asset, CH, P1…P3) stanno sopra la griglia a 11 px,
+   misura scritta in portafoglio/app.py (_etichette_colonne): qui solo il reset
+   del pulsante ☑. Prima c'era scale(0.75) a 7px per farle minuscole. */
 
 .col-header-cell {
     overflow: hidden;
-}
-
-.col-header-cell span,
-.col-header-cell button {
-    font-size: 7px !important;
-    -webkit-text-size-adjust: none;
-    transform: scale(0.75);
-    -webkit-transform: scale(0.75);
-    transform-origin: center;
-    -webkit-transform-origin: center;
-    display: inline-block;
-    line-height: 1;
 }
 
 .col-header-cell button {
@@ -29,6 +17,7 @@
     appearance: none;
     min-height: 0 !important;
     height: auto !important;
+    line-height: 1;
 }
 
 /* ── Checkbox asset/indicatori ──────────────────────────────────────────────
