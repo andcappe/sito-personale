@@ -24,7 +24,8 @@ if PARENT_DIR not in sys.path:
 import sessions_manager as _sm
 import data_core as dc          # logica dati condivisa (un solo posto)
 
-from style_analysis import get_style_analysis_tab, register_style_analysis_callbacks
+from style_analysis import get_style_analysis_tab, register_style_analysis_callbacks, SA_CSS
+from style_analysis import _sa_sez, _SA_CAMPO, _SA_ETIC, _SA_BTN
 
 import numpy as np
 import pandas as pd
@@ -127,7 +128,7 @@ app.index_string = '''
   }
   /* Doppioni della riga in alto sul cellulare: si nasconde quello del tab non attivo. */
   html body .pf-via { display: none !important; }
-</style>
+'''+ SA_CSS +'''</style>
 </head>
 <body>
 {%app_entry%}
@@ -162,7 +163,10 @@ document.addEventListener('click', function(e){
   // (sezione che sul cellulare può essere chiusa). Sola lettura, senza id doppi.
   if (info && info.getAttribute('data-tab') !== 'tab-frontiera') {
     if (pop) { pop.remove(); return; }
-    var orig = document.querySelector('.pf-info > .pf-strumenti-menu');
+    var dt = info.getAttribute('data-tab');
+    var orig = document.querySelector(dt === 'tab-sa' ? '.sa-info > .pf-strumenti-menu'
+      : dt === 'tab-correlazioni' ? '.corr-info > .pf-strumenti-menu'
+      : '.pf-info:not(.sa-info):not(.corr-info) > .pf-strumenti-menu');
     // Tab Rendimenti: il menu ⚙ sta nei Parametri dell'iframe (sezione chiusa all'apertura).
     if (info.getAttribute('data-tab') === 'tab-rendimenti') {
       try {
@@ -2961,6 +2965,13 @@ def get_date_range_bar(suffix):
     _today         = pd.Timestamp.today().normalize()
     _ten_years_ago = (_today - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
     _today_str     = _today.strftime('%Y-%m-%d')
+    if suffix == 'tab1':
+        # Si parte già dalla Finestra Temporale condivisa (sync_date_range la
+        # restringe poi ai dati): un calendario ricreato non torna a 10 anni fa.
+        _f = dc.leggi_finestra()
+        if _f:
+            _ten_years_ago = _f[0]
+            _today_str = _today_str if _f[1] == 'ultimo' else _f[1]
     # Sul cellulare è una sezione espandibile (chiusa all'apertura). Nome, etichette
     # «Da»/«A» sopra le date e calendario sono gli stessi della «Finestra Temporale»
     # di Frontiera (23/11/2026): se cambi qui, cambia anche lì.
@@ -3005,95 +3016,121 @@ def get_date_range_bar(suffix):
 # Layout Tab — Matrice di Correlazione (portata da ir_fe_14.py, adattata)
 # ─────────────────────────────────────────────────────────────────────────────
 def get_correlation_matrix_tab(options_tickers=None):
-    """Heatmap di correlazione (rendimenti settimanali) + correlazione rolling."""
-    return html.Div([
-        # ── Riga controlli ───────────────────────────────────────────────────
-        html.Div([
-            get_date_range_bar('corr'),
-            html.Div([
-                html.Label("Finestra (giorni):", style={'margin-right': '6px', 'font-size': '12px', 'white-space': 'nowrap'}),
-                dcc.Input(id='correlation-window-input', type='number', value=252, min=10,
-                          placeholder='Giorni', style={'width': '80px', 'margin-right': '14px'}),
-                html.Label("Benchmark:", style={'margin-right': '6px', 'font-size': '12px', 'white-space': 'nowrap'}),
-                dcc.Dropdown(id='benchmark-selector-corr', options=[], value=None,
-                             placeholder='Seleziona benchmark…', clearable=False,
-                             style={'width': '200px', 'font-size': '11px', 'margin-right': '14px'}),
-                html.Button('Update', id='update-correlation-button', n_clicks=0,
-                            style={'background-color': '#28a745', 'color': 'white', 'border': 'none',
-                                   'padding': '7px 18px', 'border-radius': '4px', 'cursor': 'pointer',
-                                   'font-weight': 'bold', 'font-size': '12px'}),
-                html.Div(id='corr-filter-info',
-                         style={'font-size': '11px', 'color': '#0066cc', 'margin-left': '16px', 'align-self': 'center'}),
-            ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '6px', 'flex-wrap': 'wrap'}),
-            html.Div(id='date-values-correlation',
-                     style={'font-size': '11px', 'color': '#666', 'margin-bottom': '4px'}),
-        ], style={'padding': '8px 12px 0 12px'}),
+    """Matrice di correlazione (rendimenti settimanali) + correlazione rolling.
 
-        # ── Corpo a due colonne ──────────────────────────────────────────────
-        html.Div([
-            # Colonna sinistra: griglia asset con spunte MT (matrice) e ML (rolling)
-            html.Div([
-                html.Div('Asset da confrontare',
-                         style={'font-weight': 'bold', 'font-size': '11px', 'color': '#1a3a5c',
-                                'margin-bottom': '2px', 'text-align': 'center'}),
-                html.Div('MT = matrice · ML = rolling',
-                         style={'font-size': '9px', 'color': '#888', 'margin-bottom': '8px', 'text-align': 'center'}),
-                # Intestazione colonne con pulsanti seleziona/deseleziona tutti
-                html.Div([
-                    html.Div('', style={'flex': '1'}),
-                    html.Div([
-                        html.Div('MT', style={'font-size': '10px', 'font-weight': 'bold', 'color': '#1a3a5c'}),
-                        html.Button('☑', id='corr-mt-all', n_clicks=0,
-                                    title='Seleziona/deseleziona tutti — Matrice',
-                                    style={'font-size': '11px', 'padding': '0 3px', 'border': '1px solid #ccc',
-                                           'background': '#eef4ff', 'borderRadius': '3px', 'cursor': 'pointer',
-                                           'lineHeight': '14px'}),
-                    ], style={'width': '34px', 'display': 'flex', 'flexDirection': 'column',
-                              'alignItems': 'center', 'gap': '2px'}),
-                    html.Div([
-                        html.Div('ML', style={'font-size': '10px', 'font-weight': 'bold', 'color': '#e6550d'}),
-                        html.Button('☑', id='corr-ml-all', n_clicks=0,
-                                    title='Seleziona/deseleziona tutti — Rolling',
-                                    style={'font-size': '11px', 'padding': '0 3px', 'border': '1px solid #ccc',
-                                           'background': '#fff3e8', 'borderRadius': '3px', 'cursor': 'pointer',
-                                           'lineHeight': '14px'}),
-                    ], style={'width': '34px', 'display': 'flex', 'flexDirection': 'column',
-                              'alignItems': 'center', 'gap': '2px'}),
-                ], style={'display': 'flex', 'align-items': 'flex-end', 'gap': '4px',
-                          'padding': '0 2px 6px 2px', 'borderBottom': '1px solid #e0e0e0',
-                          'margin-bottom': '4px'}),
-                html.Div(id='corr-asset-grid', children=[
-                    html.Div('(carica i dati per popolare)',
-                             style={'font-size': '10px', 'color': '#aaa', 'font-style': 'italic',
-                                    'text-align': 'center', 'padding': '10px 4px'})
-                ]),
-            ], style={'width': '24%', 'min-width': '180px', 'padding': '10px 8px 10px 12px',
-                      'border-right': '1px solid #e0e0e0', 'overflow-y': 'auto',
-                      'max-height': '88vh', 'box-sizing': 'border-box'}),
-
-            # Colonna destra: heatmap + legenda + rolling chart
-            html.Div([
-                dcc.Loading(id='loading-correlation', type='circle', children=[
-                    dcc.Graph(id='correlation-heatmap', style={'width': '100%', 'height': '48vh'},
-                              config={'responsive': True})]),
-                html.Div([
-                    html.Div('Legenda: ', style={'font-weight': 'bold', 'margin-right': '12px', 'font-size': '11px'}),
-                    html.Div('Verde ≥0.70', style={'background': '#2ca02c', 'color': 'white', 'padding': '3px 8px',
-                                                   'margin': '2px', 'border-radius': '3px', 'font-size': '10px'}),
-                    html.Div('Bianco [-0.50, 0.70)', style={'background': '#e0e0e0', 'color': 'black', 'padding': '3px 8px',
-                                                            'margin': '2px', 'border-radius': '3px', 'font-size': '10px'}),
-                    html.Div('Rosso ≤-0.50', style={'background': '#d62728', 'color': 'white', 'padding': '3px 8px',
-                                                    'margin': '2px', 'border-radius': '3px', 'font-size': '10px'}),
-                ], style={'display': 'flex', 'align-items': 'center', 'margin': '4px 0 6px 0', 'flex-wrap': 'wrap'}),
-                html.Hr(style={'margin': '6px 0'}),
-                html.Div('Correlazione Rolling',
-                         style={'font-weight': 'bold', 'font-size': '12px', 'color': '#1a3a5c', 'margin-bottom': '4px'}),
-                dcc.Loading(id='loading-rolling-corr', type='circle', children=[
-                    dcc.Graph(id='rolling-corr-chart', style={'width': '100%', 'height': '35vh'},
-                              config={'responsive': True})]),
-            ], style={'width': '76%', 'padding': '4px 8px', 'box-sizing': 'border-box'}),
-        ], style={'display': 'flex', 'align-items': 'flex-start'}),
+    Come Style Analysis (23/11/2026, richiesta dell'utente): riga «Aggiorna» + ⚙ con
+    tutte le descrizioni, poi le schede Finestra Temporale (condivisa con Analisi,
+    Frontiera e Style Analysis), Parametri (giorni e benchmark predefinito del file),
+    Asset da confrontare (MT/ML), Tabella delle Correlazioni, Correlazioni Rolling.
+    Si calcola solo con «Aggiorna».
+    """
+    campo = lambda etic, comp: html.Div([html.Div(etic, style=_SA_ETIC), comp], style=_SA_CAMPO)
+    _btn_tutti = {'font-size': '11px', 'padding': '0 4px', 'border': '1px solid #ccc',
+                  'borderRadius': '3px', 'cursor': 'pointer', 'lineHeight': '15px'}
+    _col = {'width': '40px', 'display': 'flex', 'flexDirection': 'column',
+            'alignItems': 'center', 'gap': '2px'}
+    tempo = html.Div(className='sa-date', style={'display': 'flex', 'gap': '10px', 'flex-wrap': 'wrap'},
+                     children=[
+        campo('Da', dcc.DatePickerSingle(id='dr-start-corr', display_format='DD/MM/YYYY',
+                                         first_day_of_week=1, clearable=False)),
+        campo('A', dcc.DatePickerSingle(id='dr-end-corr', display_format='DD/MM/YYYY',
+                                        first_day_of_week=1, clearable=False)),
     ])
+    parametri = html.Div(style={'display': 'flex', 'gap': '14px', 'flex-wrap': 'wrap',
+                                'align-items': 'flex-end'}, children=[
+        campo('Giorni per la correlazione',
+              dcc.Input(id='correlation-window-input', type='number', value=252, min=10,
+                        debounce=True, placeholder='Giorni',
+                        style={'width': '90px', 'height': '30px', 'font-size': '13px'})),
+        campo('Benchmark', dcc.Dropdown(id='benchmark-selector-corr', options=[], value=None,
+                                        placeholder='Seleziona benchmark…', clearable=False,
+                                        style={'width': '260px', 'font-size': '12px'})),
+    ])
+    asset = html.Div(style={'max-width': '560px'}, children=[
+        html.Div([
+            html.Div('Asset', style={'flex': '1', 'font-size': '11px', 'font-weight': '700',
+                                     'color': '#1a3a5c'}),
+            html.Div([html.Div('MT', title='Matrice di correlazione',
+                               style={'font-size': '11px', 'font-weight': '700', 'color': '#1a3a5c'}),
+                      html.Button('☑', id='corr-mt-all', n_clicks=0,
+                                  title='Seleziona/deseleziona tutti — Matrice',
+                                  style={**_btn_tutti, 'background': '#eef4ff'})], style=_col),
+            html.Div([html.Div('ML', title='Matrice rolling (contro il benchmark)',
+                               style={'font-size': '11px', 'font-weight': '700', 'color': '#e6550d'}),
+                      html.Button('☑', id='corr-ml-all', n_clicks=0,
+                                  title='Seleziona/deseleziona tutti — Rolling',
+                                  style={**_btn_tutti, 'background': '#fff3e8'})], style=_col),
+        ], style={'display': 'flex', 'align-items': 'flex-end', 'gap': '4px',
+                  'padding': '0 2px 6px 2px', 'borderBottom': '1px solid #e0e0e0'}),
+        html.Div(id='corr-asset-grid', style={'max-height': '420px', 'overflow-y': 'auto'}, children=[
+            html.Div('(carica i dati per popolare)',
+                     style={'font-size': '10px', 'color': '#aaa', 'font-style': 'italic',
+                            'text-align': 'center', 'padding': '10px 4px'})]),
+    ])
+    _leg = lambda t, bg, col: html.Span(t, style={'background': bg, 'color': col, 'padding': '2px 6px',
+                                                   'margin': '2px 4px 2px 0', 'border-radius': '3px',
+                                                   'font-size': '11px', 'display': 'inline-block'})
+    _tit = lambda t: html.Div(t, style={'font-size': '12px', 'font-weight': '700', 'color': '#1a3a5c',
+                                        'margin': '8px 0 2px 0'})
+    _txt = {'font-size': '12px', 'color': '#5a6b85', 'white-space': 'normal'}
+    # Le descrizioni stanno tutte nel menu ⚙ (richiesta dell'utente): sotto i titoli
+    # delle schede restano solo i grafici. Sul cellulare lo apre il ⚙ della riga in alto.
+    riepilogo = html.Div(className='pf-strumenti-menu',
+                         style={'padding': '10px 12px', 'gap': '0', 'min-width': '300px',
+                                'max-width': '420px'}, children=[
+        html.Div('Descrizione dati correlazioni', style={'font-size': '12px', 'font-weight': '700',
+                                                         'color': '#1a3a5c'}),
+        _tit('Asset'),
+        html.Div(id='corr-filter-info', style=_txt, children='Premi «Aggiorna».'),
+        html.Div('MT = tabella delle correlazioni · ML = correlazioni rolling contro il benchmark',
+                 style=_txt),
+        _tit('Tabella delle Correlazioni'),
+        html.Div(id='date-values-correlation', style=_txt),
+        html.Div('Rendimenti settimanali. Colori:', style=_txt),
+        html.Div([_leg('Verde ≥ 0,70', '#2ca02c', 'white'),
+                  _leg('Bianco fra −0,50 e 0,70', '#e0e0e0', 'black'),
+                  _leg('Rosso ≤ −0,50', '#d62728', 'white')]),
+        _tit('Correlazioni Rolling'),
+        html.Div(id='corr-roll-info', style=_txt),
+        _tit('Finestra Temporale'),
+        html.Div('Condivisa con Analisi Portafoglio, Frontiera e Style Analysis.', style=_txt),
+    ])
+    comandi = html.Div(className='nb-nascondi-cell',
+                       style={'display': 'flex', 'align-items': 'center', 'gap': '6px',
+                              'margin': '0 0 10px 0'}, children=[
+        html.Button('Aggiorna', id='corr-aggiorna-btn', n_clicks=0, style=_SA_BTN),
+        html.Details(className='pf-strumenti pf-info corr-info', children=[
+            html.Summary(html.I(className='fa-solid fa-gear'), title='Descrizione dati',
+                         style={**_SA_BTN, 'padding': '6px 9px'}),
+            riepilogo,
+        ]),
+    ])
+    _vuoto = _corr_vuoto('Premi «Aggiorna»')
+    matrice = dcc.Loading(id='loading-correlation', type='circle', children=[
+        dcc.Graph(id='correlation-heatmap', className='sa-grafico', responsive=True, figure=_vuoto,
+                  style={'--sa-h': '420px', '--sa-hc': '360px'},
+                  config={'displaylogo': False})])
+    rolling = dcc.Loading(id='loading-rolling-corr', type='circle', children=[
+        dcc.Graph(id='rolling-corr-chart', className='sa-grafico', responsive=True, figure=_vuoto,
+                  style={'--sa-h': '420px', '--sa-hc': '360px'},
+                  config={'displaylogo': False})])
+    return html.Div(className='corr-pagina', style={'padding': '8px 12px 0 12px'}, children=[
+        comandi,
+        _sa_sez('Finestra Temporale', tempo, aperta=False),
+        _sa_sez('Parametri', parametri, aperta=False),
+        _sa_sez('Asset da confrontare', asset),
+        _sa_sez('Tabella delle Correlazioni', matrice),
+        _sa_sez('Correlazioni Rolling', rolling),
+    ])
+
+
+def _corr_vuoto(msg):
+    f = go.Figure().add_annotation(text=msg, xref='paper', yref='paper', x=0.5, y=0.5,
+                                   showarrow=False, font=dict(size=14, color='#888'))
+    f.update_layout(paper_bgcolor='white', plot_bgcolor='white',
+                    xaxis=dict(visible=False), yaxis=dict(visible=False),
+                    margin=dict(l=20, r=20, t=20, b=20))
+    return f
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3731,6 +3768,18 @@ app.layout = html.Div([
                                'padding': '7px 12px', 'margin-left': '8px'}),
             # ⚙ accanto: sul tab Analisi mostra «Descrizione dati tabella», sul tab Frontiera
             # apre il menu informazioni della Frontiera (fe-info nell'iframe).
+            # Sul tab Style Analysis, al posto di Update: preme «Esegui Style Analysis».
+            html.Button('▶ Esegui', id='pf-sa-cell', className='nb-solo-cell nb-clicca pf-via',
+                        **{'data-bersaglio': 'btn-run-sa'},
+                        style={**{k: v for k, v in _PF_BTN_PRINCIPALE.items() if k != 'display'},
+                               'white-space': 'nowrap',
+                               'padding': '7px 12px', 'margin-left': '8px'}),
+            # Sul tab Matrice Correlazioni, al posto di Update: preme «Aggiorna».
+            html.Button('Aggiorna', id='pf-corr-cell', className='nb-solo-cell nb-clicca pf-via',
+                        **{'data-bersaglio': 'corr-aggiorna-btn'},
+                        style={**{k: v for k, v in _PF_BTN_PRINCIPALE.items() if k != 'display'},
+                               'white-space': 'nowrap',
+                               'padding': '7px 12px', 'margin-left': '8px'}),
             html.Button('⚙', id='pf-info-cell', className='nb-solo-cell', title='Informazioni',
                         style={**{k: v for k, v in _PF_BTN_PRINCIPALE.items() if k != 'display'},
                                'background-color': '#0066cc', 'padding': '7px 10px',
@@ -4893,21 +4942,32 @@ app.clientside_callback(
         var r = document.getElementById('pf-ricalcola-cell');
         if (r) r.style.backgroundColor = '#0066cc';   // l'iframe riparte senza frontiera
         // ⚙ sul tab Analisi (menu «Descrizione dati tabella») e sul tab Frontiera (fe-info)
-        var rd = tab === 'tab-rendimenti';
-        var info = fr || rd || tab === 'tab-portfolio';
+        var rd = tab === 'tab-rendimenti', sa = tab === 'tab-sa';
+        var co = tab === 'tab-correlazioni';
+        var info = fr || rd || sa || co || tab === 'tab-portfolio';
         var g = document.getElementById('pf-info-cell');
         if (g) g.setAttribute('data-tab', tab || '');
         var pop = document.getElementById('pf-info-pop');
         if (pop) pop.remove();
-        return [(fr || rd) ? 'nb-solo-cell nb-clicca pf-via' : 'nb-solo-cell nb-clicca',
+        // Style Analysis: i grafici disegnati a tab nascosto hanno misure sbagliate.
+        if (sa || co) setTimeout(function(){
+            document.querySelectorAll('#tab-sa-content .js-plotly-plot, #tab-corr-content .js-plotly-plot').forEach(function(g){
+                try { window.Plotly.Plots.resize(g); } catch (e) {}
+            });
+        }, 60);
+        return [(fr || rd || sa || co) ? 'nb-solo-cell nb-clicca pf-via' : 'nb-solo-cell nb-clicca',
                 fr ? 'nb-solo-cell' : 'nb-solo-cell pf-via',
                 info ? 'nb-solo-cell' : 'nb-solo-cell pf-via',
-                rd ? 'nb-solo-cell' : 'nb-solo-cell pf-via'];
+                rd ? 'nb-solo-cell' : 'nb-solo-cell pf-via',
+                sa ? 'nb-solo-cell nb-clicca' : 'nb-solo-cell nb-clicca pf-via',
+                co ? 'nb-solo-cell nb-clicca' : 'nb-solo-cell nb-clicca pf-via'];
     }""",
     Output('pf-update-cell', 'className'),
     Output('pf-ricalcola-cell', 'className'),
     Output('pf-info-cell', 'className'),
     Output('pf-crea-cell', 'className'),
+    Output('pf-sa-cell', 'className'),
+    Output('pf-corr-cell', 'className'),
     Input('main-tabs', 'value'),
 )
 
@@ -4940,24 +5000,27 @@ _CORR_COLORSCALE = [
 
 def _corr_heatmap_figure(corr_matrix, title_text):
     n = len(corr_matrix.columns)
-    max_lbl = max((len(str(c)) for c in corr_matrix.columns), default=6)
+    # Nomi accorciati sugli assi (il nome intero resta nel tooltip): con nomi lunghi
+    # sul cellulare le celle restavano larghe pochi pixel.
+    corto = lambda c: str(c) if len(str(c)) <= 16 else str(c)[:15] + '…'
+    max_lbl = max((len(corto(c)) for c in corr_matrix.columns), default=6)
     tick_size = max(7, min(12, int(130 / max(n, 1))))
     l_margin = max(80, max_lbl * tick_size * 0.65)
     b_margin = max(80, max_lbl * tick_size * 0.65)
     fig = go.Figure(data=go.Heatmap(
-        z=corr_matrix.values, x=list(corr_matrix.columns), y=list(corr_matrix.index),
+        z=corr_matrix.values, x=[corto(c) for c in corr_matrix.columns],
+        y=[corto(c) for c in corr_matrix.index],
+        customdata=[[[r, c] for c in corr_matrix.columns] for r in corr_matrix.index],
         colorscale=_CORR_COLORSCALE, zmid=0, zmin=-1, zmax=1,
         text=np.round(corr_matrix.values, 2), texttemplate='%{text}',
         textfont={'size': max(8, min(16, int(180 / max(n, 1))))},
-        colorbar=dict(title='Correlazione', tickvals=[-1, -0.5, 0, 0.7, 1],
-                      ticktext=['-1.0', '-0.5', '0.0', '0.7', '1.0']),
-        hovertemplate='%{y} vs %{x}<br>Correlazione: %{z:.3f}<extra></extra>',
+        showscale=False,   # i colori li spiega la legenda sotto il grafico
+        hovertemplate='%{customdata[0]} vs %{customdata[1]}<br>Correlazione: %{z:.3f}<extra></extra>',
     ))
     fig.update_layout(
-        title=dict(text=title_text, font=dict(size=13), x=0.5),
         xaxis=dict(side='bottom', tickangle=-45, tickfont=dict(size=tick_size), automargin=True),
         yaxis=dict(autorange='reversed', tickfont=dict(size=tick_size), automargin=True),
-        margin=dict(l=int(l_margin), b=int(b_margin), t=40, r=20), autosize=True,
+        margin=dict(l=int(l_margin), b=int(b_margin), t=12, r=20), autosize=True,
         paper_bgcolor='white',
     )
     return fig
@@ -4969,15 +5032,17 @@ def _corr_heatmap_figure(corr_matrix, title_text):
 @app.callback(
     Output('corr-asset-grid',         'children'),
     Output('benchmark-selector-corr', 'options'),
+    Output('benchmark-selector-corr', 'value'),
     Input('stock-data',               'data'),
+    State('benchmark-selector-corr',  'value'),
     prevent_initial_call=True,
 )
-def build_corr_grid(stock_data):
+def build_corr_grid(stock_data, bench_attuale):
     df = _get_df(stock_data)
     if df is None or df.empty:
         return ([html.Div('(carica i dati per popolare)',
                           style={'font-size': '10px', 'color': '#aaa', 'font-style': 'italic',
-                                 'text-align': 'center', 'padding': '10px 4px'})], [])
+                                 'text-align': 'center', 'padding': '10px 4px'})], [], None)
     assets = list(df.columns)
     ns = _read_user_json(_get_username())
     mt_default = {a for a in assets if ns.get(a, {}).get('checked')}
@@ -5004,7 +5069,50 @@ def build_corr_grid(stock_data):
         ], style={'display': 'flex', 'align-items': 'center', 'gap': '4px',
                   'padding': '2px', 'borderBottom': '1px dotted #eee',
                   'background': 'white' if i % 2 == 0 else '#fafcff'}))
-    return rows, [{'label': a, 'value': a} for a in assets]
+    return rows, [{'label': a, 'value': a} for a in assets], _corr_bench_predefinito(assets, bench_attuale)
+
+
+def _corr_bench_predefinito(assets, attuale=None):
+    """Benchmark del file, come in Analisi Portafoglio (_PF_BENCH_PREDEFINITI)."""
+    if attuale in assets:
+        return attuale
+    for nome in _PF_BENCH_PREDEFINITI:
+        for a in assets:
+            if str(a).startswith(nome):
+                return a
+    return assets[0] if assets else None
+
+
+# Finestra Temporale condivisa (sessions/<u>/finestra.json) con Analisi, Frontiera e
+# Style Analysis: si rilegge a ogni apertura del tab e a ogni dato nuovo.
+@app.callback(
+    Output('dr-start-corr', 'date'),
+    Output('dr-end-corr',   'date'),
+    Input('stock-data',     'data'),
+    Input('main-tabs',      'value'),
+    prevent_initial_call=False,
+)
+def corr_date_condivise(stock_data, tab):
+    if callback_context.triggered_id == 'main-tabs' and tab != 'tab-correlazioni':
+        raise PreventUpdate
+    df = _get_df(stock_data) if stock_data else None
+    if df is None or df.empty:
+        raise PreventUpdate
+    return dc.finestra_iniziale(df.index.min(), df.index.max())
+
+
+@app.callback(
+    Output('corr-calculated', 'data', allow_duplicate=True),
+    Input('dr-start-corr',    'date'),
+    Input('dr-end-corr',      'date'),
+    State('stock-data',       'data'),
+    prevent_initial_call=True,
+)
+def corr_salva_finestra(da, a, stock_data):
+    if da and a:
+        df = _get_df(stock_data) if stock_data else None
+        dc.scrivi_finestra(da, a, dmax=df.index.max() if df is not None and not df.empty else None)
+    return no_update
 
 
 # Pulsanti seleziona/deseleziona tutti (toggle) per colonna MT e ML
@@ -5070,17 +5178,29 @@ def sync_mt_on_open(active_tab, ids):
     Output('date-values-correlation',  'children'),
     Output('corr-filter-info',         'children'),
     Output('corr-calculated',          'data'),
-    Input({'type': 'corr-mt', 'index': ALL}, 'value'),
-    Input('benchmark-selector-corr',   'value'),
-    Input('update-correlation-button', 'n_clicks'),
-    State('stock-data',                'data'),
+    Output('correlation-heatmap',     'style'),
+    Input('corr-aggiorna-btn',         'n_clicks'),
+    State({'type': 'corr-mt', 'index': ALL}, 'value'),
+    State('benchmark-selector-corr',   'value'),
     State('dr-start-corr',             'date'),
     State('dr-end-corr',               'date'),
     State('correlation-window-input',  'value'),
+    State('stock-data',                'data'),
     prevent_initial_call=True,
 )
-def update_correlation_matrix(mt_vals, benchmark_sel, n_clicks, stock_data,
-                              date_start, date_end, corr_window):
+def update_correlation_matrix(_n, mt_vals, benchmark_sel, date_start, date_end, corr_window,
+                              stock_data):
+    _r = update_correlation_matrix_impl(mt_vals, benchmark_sel, stock_data,
+                                        date_start, date_end, corr_window)
+    n = len([v for v in (mt_vals or []) if v])
+    # Altezza secondo il numero di asset: con 30 asset 420 px li schiacciava.
+    alto = max(420, min(1000, 140 + 30 * n))
+    alto_cell = max(360, min(800, 150 + 24 * n))
+    return (*_r, {'--sa-h': f'{alto}px', '--sa-hc': f'{alto_cell}px'})
+
+
+def update_correlation_matrix_impl(mt_vals, benchmark_sel, stock_data,
+                                   date_start, date_end, corr_window):
     def _empty(msg):
         f = go.Figure().add_annotation(text=msg, xref='paper', yref='paper',
                                        x=0.5, y=0.5, showarrow=False, font=dict(size=16, color='#888'))
@@ -5122,34 +5242,41 @@ def update_correlation_matrix(mt_vals, benchmark_sel, n_clicks, stock_data,
     corr_matrix = weekly_df.corr()
     n_weeks     = len(weekly_df)
 
-    title_text = 'Matrice di Correlazione – rendimenti settimanali'
-    if corr_window and corr_window > 0:
-        title_text += f' (ultimi {min(corr_window, len(filtered_df))} gg → {n_weeks} settimane)'
-    else:
-        title_text += f' ({n_weeks} settimane)'
+    # Il titolo sta sopra il grafico (dentro si sovrapponeva al menu di Plotly).
+    title_text = (f'Ultimi {min(corr_window, len(filtered_df))} giorni → {n_weeks} settimane'
+                  if corr_window and corr_window > 0 else f'{n_weeks} settimane')
+    title_text += (f" · dal {filtered_df.index[0].strftime('%d/%m/%Y')}"
+                   f" al {filtered_df.index[-1].strftime('%d/%m/%Y')}")
 
     if benchmark_sel and benchmark_sel in corr_matrix.columns:
         order = corr_matrix[benchmark_sel].abs().sort_values(ascending=False).index.tolist()
         corr_matrix = corr_matrix.loc[order, order]
-        title_text += f'  |  ordinata per correlazione con {benchmark_sel}'
+        title_text += f' · ordinata per correlazione con {benchmark_sel}'
 
     fig = _corr_heatmap_figure(corr_matrix, title_text)
-    date_message = (f"Range: {start_date.strftime('%d-%m-%Y')} — "
-                    f"{end_date.strftime('%d-%m-%Y')} ({len(filtered_df)} giorni)")
+    date_message = title_text
     return fig, date_message, filter_info, True
 
 
 @app.callback(
     Output('rolling-corr-chart',      'figure'),
-    Input({'type': 'corr-ml', 'index': ALL}, 'value'),
-    Input('benchmark-selector-corr',  'value'),
-    State('stock-data',               'data'),
+    Output('corr-roll-info',          'children'),
+    Input('corr-aggiorna-btn',        'n_clicks'),
+    State({'type': 'corr-ml', 'index': ALL}, 'value'),
+    State('benchmark-selector-corr',  'value'),
     State('dr-start-corr',            'date'),
     State('dr-end-corr',              'date'),
     State('correlation-window-input', 'value'),
+    State('stock-data',               'data'),
     prevent_initial_call=True,
 )
-def update_rolling_corr(ml_vals, benchmark, stock_data, date_start, date_end, window):
+def update_rolling_corr(_n, ml_vals, benchmark, date_start, date_end, window, stock_data):
+    fig = update_rolling_corr_impl(ml_vals, benchmark, stock_data, date_start, date_end, window)
+    info = fig.layout.meta if isinstance(fig.layout.meta, str) else ''
+    return fig, info
+
+
+def update_rolling_corr_impl(ml_vals, benchmark, stock_data, date_start, date_end, window):
     def _empty(msg=''):
         f = go.Figure()
         if msg:
@@ -5195,7 +5322,7 @@ def update_rolling_corr(ml_vals, benchmark, stock_data, date_start, date_end, wi
         all_y.extend(rolling_corr.values.tolist())
         fig.add_trace(go.Scatter(
             x=rolling_corr.index, y=rolling_corr.values, mode='lines',
-            name=f'{asset} vs {benchmark}',
+            name=asset,
             line=dict(color=palette[i % len(palette)], width=1.8),
             hovertemplate=f'{asset} vs {benchmark}: %{{y:.3f}}<extra></extra>'))
 
@@ -5212,13 +5339,17 @@ def update_rolling_corr(ml_vals, benchmark, stock_data, date_start, date_end, wi
     if y_min <= -0.5:
         fig.add_hline(y=-0.5, line_dash='dot', line_color='#d62728', line_width=1,
                       annotation_text='-0.50', annotation_position='right')
+    # Niente titolo dentro il grafico (copriva il menu di Plotly): lo scrive
+    # update_rolling_corr sopra il grafico, da layout.meta. Legenda in cima.
     fig.update_layout(
-        title=dict(text=f'Correlazione Rolling vs {benchmark} '
-                        f'({roll_window_weeks} settimane – rend. settimanali)', font=dict(size=13), x=0.5),
-        xaxis_title='Data', yaxis_title='Correlazione', yaxis=dict(range=y_range, zeroline=False),
-        legend=dict(orientation='v', yanchor='top', y=1, xanchor='left', x=1.01, font=dict(size=10)),
-        margin=dict(l=50, r=190, t=50, b=40), hovermode='x unified',
+        meta=(f'Contro {benchmark} · finestra di {roll_window_weeks} settimane '
+              f'({roll_window_days} giorni) · rendimenti settimanali'),
+        yaxis_title='Correlazione', yaxis=dict(range=y_range, zeroline=False),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0,
+                    font=dict(size=11)),
+        margin=dict(l=50, r=20, t=40, b=30), hovermode='x unified',
         paper_bgcolor='white', plot_bgcolor='#f9f9f9')
+    fig.update_xaxes(automargin=True)
     _applica_nascosti(fig, 'rolling-corr-chart')
     return fig
 
@@ -7804,13 +7935,13 @@ def sync_date_range(stock_data, start_date, end_date):
     # Anche la chiamata iniziale (triggered_id None): sul cellulare stock-data è già
     # pronto quando parte, e prima la data finale restava «oggi» invece dell'ultimo dato.
     if ctx.triggered_id in (None, 'stock-data'):
-        # Inizializzazione: 10 anni fa → oggi, clampati al range dei dati
-        today         = pd.Timestamp.today().normalize()
-        ten_years_ago = today - pd.DateOffset(years=10)
-        s = max(ts_min, int(ten_years_ago.timestamp()))
-        e = min(ts_max, int(today.timestamp()))
-        d_start = pd.Timestamp(s, unit='s').strftime('%Y-%m-%d')
-        d_end   = pd.Timestamp(e, unit='s').strftime('%Y-%m-%d')
+        # Inizializzazione: la Finestra Temporale condivisa con Frontiera e Style
+        # Analysis (sessions/<u>/finestra.json), altrimenti 10 anni fa → ultimo dato,
+        # sempre ristretta ai dati. Il tab si ridisegna a ogni ritorno su Analisi, quindi
+        # una data cambiata negli altri tab arriva qui.
+        d_start, d_end = dc.finestra_iniziale(df.index.min(), df.index.max())
+        s = int(pd.Timestamp(d_start).timestamp())
+        e = int(pd.Timestamp(d_end).timestamp())
         return d_start, d_end, _pf_info_periodo(s, e, ts_min, ts_max), [s, e]
 
     # L'utente ha cambiato una delle due date: non riscrivere i picker (evita loop)
@@ -7828,6 +7959,7 @@ def sync_date_range(stock_data, start_date, end_date):
     # ridisegna dopo questo callback): si riporta sull'ultimo/primo dato, così
     # la data finale mostrata è sempre quella vera, come in Frontiera.
     g = lambda t: pd.Timestamp(t, unit='s').strftime('%Y-%m-%d')
+    dc.scrivi_finestra(g(s), g(e), dmax=df.index.max())   # condivisa con Frontiera e Style Analysis
     return (g(s) if s != s0 else no_update, g(e) if e != e0 else no_update,
             _pf_info_periodo(s, e, ts_min, ts_max), [s, e])
 

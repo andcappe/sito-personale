@@ -6,7 +6,9 @@ import pandas as pd
 import plotly.graph_objects as go
 from scipy.optimize import minimize
 
-from dash import html, dcc, callback_context, no_update, ALL
+from dash import html, dcc, callback_context, no_update, ALL, ctx
+
+import data_core as _dc   # Finestra Temporale condivisa
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
@@ -114,26 +116,30 @@ def _returns_monthly(close_returns: pd.DataFrame) -> pd.DataFrame:
 
 
 def _make_stat_table_sa(rows, header_bg='#1a3a5c'):
-    return html.Table([
+    """Tabella dei risultati: dentro .sa-scorri si scorre di lato e la prima colonna
+    (.sa-prima, sticky) resta ferma; ogni cella ha uno sfondo pieno, altrimenti i
+    valori scorrerebbero sotto i nomi."""
+    prima = lambda j: 'sa-prima' if j == 0 else None
+    return html.Div(className='sa-scorri', style={'border': '1px solid #dee2e6'}, children=html.Table([
         html.Thead(html.Tr([
-            html.Th(c, style={
+            html.Th(c, className=prima(j), style={
                 'background': header_bg, 'color': 'white',
-                'padding': '5px 10px', 'font-size': '10px',
-                'text-align': 'left', 'white-space': 'nowrap',
-            }) for c in rows[0]
+                'padding': '5px 10px', 'font-size': '11px',
+                'text-align': 'left',
+            }) for j, c in enumerate(rows[0])
         ])),
         html.Tbody([
             html.Tr([
-                html.Td(cell, style={
-                    'padding': '4px 10px', 'font-size': '10px',
+                html.Td(cell, className=prima(j), style={
+                    'padding': '4px 10px', 'font-size': '11px',
                     'border-bottom': '1px solid #eee',
                     'font-family': 'monospace',
+                    'font-weight': '600' if j == 0 else '400',
                     'background': '#fff' if ri % 2 == 0 else '#f8f9fa',
-                }) for cell in row
+                }) for j, cell in enumerate(row)
             ]) for ri, row in enumerate(rows[1:])
         ])
-    ], style={'border-collapse': 'collapse', 'width': '100%',
-              'border': '1px solid #dee2e6'})
+    ], className='sa-tab'))
 
 
 def _fit_ols(y: pd.Series, X: pd.DataFrame, cov_type: str, nonneg: bool = True):
@@ -265,233 +271,194 @@ def _hex_to_rgba(hex_color: str, alpha: float = 0.6) -> str:
 
 
 # ─── Layout ───────────────────────────────────────────────────────────────────
+# Sezioni a scheda, una sotto l'altra (23/11/2026, richiesta dell'utente): Parametri,
+# Finestra Temporale (condivisa con Analisi Portafoglio e Frontiera), Fattori di stile,
+# Risultati, Style Weights Rolling, R² rolling, Asset Y, Alpha rolling, Contributo al
+# rendimento. Sul cellulare sono sezioni espandibili (nb-espandi) e «Esegui» + ⚙ stanno
+# nella riga in alto del Portafoglio (pf-sa-cell, pf-info-cell).
+_SA_BTN = {'background-color': '#1a3a6b', 'color': 'white', 'border': 'none',
+           'padding': '6px 14px', 'border-radius': '4px', 'cursor': 'pointer',
+           'font-weight': '600', 'font-size': '12px', 'line-height': '18px',
+           'display': 'inline-block', 'user-select': 'none', 'white-space': 'nowrap'}
+_SA_CAMPO = {'display': 'flex', 'flex-direction': 'column', 'gap': '3px'}
+_SA_ETIC = {'font-size': '11px', 'color': '#6b7a99', 'font-weight': '600', 'white-space': 'nowrap'}
+_SA_NOTA = {'font-size': '11px', 'color': '#6b7a99', 'font-weight': '400', 'margin-left': '8px'}
+
+# CSS delle sezioni: lo inserisce portafoglio/app.py nel suo index_string.
+SA_CSS = """
+  .sa-sez { background: #fff; border: 1px solid #e2e8f0; border-radius: 6px;
+    padding: 8px 12px; margin: 0 0 10px 0; box-sizing: border-box; min-width: 0; }
+  .sa-sez > .nb-espandi-btn { font-size: 13px; font-weight: 700; color: #1a3a5c;
+    padding: 2px 0 6px; display: block; }
+  .sa-grafico { height: var(--sa-h, 320px); }
+  /* Tabelle dei risultati: si scorrono di lato, la prima colonna resta ferma. */
+  .sa-scorri { overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch; }
+  .sa-tab { border-collapse: separate; border-spacing: 0; min-width: 100%; }
+  .sa-tab th, .sa-tab td { white-space: nowrap; }
+  .sa-tab .sa-prima { position: sticky; left: 0; z-index: 1; border-right: 1px solid #dee2e6; }
+  .sa-fattori { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 2px 14px; max-height: 320px; overflow-y: auto; }
+  .sa-date .SingleDatePickerInput { border: 1px solid #ccd9ee; border-radius: 4px; }
+  .sa-date .DateInput { width: 104px; }
+  .sa-date .DateInput_input { font-size: 13px; padding: 4px 8px; height: 28px; line-height: 20px; }
+  @media (max-width: 900px) {
+    .sa-grafico .modebar-container { display: none !important; }  /* copriva i titoli */
+    .sa-sez { background: #f8fafc; padding: 5px 14px 5px 8px; margin: 0 0 8px 0; }
+    .sa-sez > .nb-espandi-btn { font-size: 12px; padding: 4px 0; }
+    .sa-fattori { grid-template-columns: 1fr; max-height: 50vh; }
+    .sa-grafico { height: var(--sa-hc, 300px); }
+  }
+"""
+
+
+def _sa_sez(titolo, corpo, aperta=True, nota=None, cls=''):
+    """Sezione a scheda; sul cellulare espandibile (aperta o chiusa all'avvio)."""
+    testa = [titolo]
+    if nota:
+        testa.append(html.Span(nota, className='nb-nascondi-cell', style=_SA_NOTA))
+    testa.append(html.I(className='fa-solid fa-chevron-down nb-espandi-ico'))
+    return html.Div(className=f"nb-espandi sa-sez{' nb-aperto' if aperta else ''} {cls}".strip(),
+                    children=[html.Div(testa, className='nb-espandi-btn'),
+                              html.Div(corpo, className='nb-espandi-corpo')])
+
+
+def _sa_grafico(id_, alto, alto_cell=None):
+    # responsive=True (prop di dcc.Graph, non di config): il grafico prende altezza e
+    # larghezza del riquadro; disegnato a tab nascosto nascerebbe 700×450.
+    return dcc.Graph(id=id_, className='sa-grafico', responsive=True,
+                     figure=_empty_fig('Premi «Esegui Style Analysis»'),
+                     style={'--sa-h': f'{alto}px', '--sa-hc': f'{alto_cell or alto}px'},
+                     config={'displaylogo': False})
+
+
+def _sa_riga(etichetta, valore, colore='#1a3a5c'):
+    return html.Div([
+        html.Span(etichetta, style={'color': '#5a6b85', 'font-size': '12px'}),
+        html.Span(valore, style={'color': colore, 'font-size': '12px', 'font-weight': '600',
+                                 'white-space': 'nowrap'}),
+    ], style={'display': 'flex', 'justify-content': 'space-between', 'gap': '16px',
+              'padding': '3px 0', 'border-bottom': '1px dotted #e2e8f0'})
+
+
+_SA_RIEPILOGO_VUOTO = [html.Div('Riepilogo Style Analysis', style={'font-size': '12px', 'font-weight': '700',
+                                                                   'color': '#1a3a5c', 'margin-bottom': '4px'}),
+                       html.Div('Premi «Esegui Style Analysis»: qui compaiono asset, periodo, '
+                                'fattori e statistiche principali.',
+                                style={'font-size': '12px', 'color': '#5a6b85', 'white-space': 'normal'})]
+
+
 def get_style_analysis_tab(options_tickers):
     opts = options_tickers or []
-    return html.Div([
+    campo = lambda etic, comp: html.Div([html.Div(etic, style=_SA_ETIC), comp], style=_SA_CAMPO)
+    radio = dict(inline=True, style={'font-size': '12px'}, inputStyle={'margin-right': '4px'},
+                 labelStyle={'margin-right': '12px', 'cursor': 'pointer', 'color': '#1a3a5c'})
 
-        # ── Barra controlli ───────────────────────────────────────────────────
-        html.Div([
-            html.Div([
-                html.Label("Asset Y:", style={'font-size': '11px', 'font-weight': 'bold',
-                                              'margin-right': '6px', 'white-space': 'nowrap',
-                                              'color': '#b71c1c'}),
-                dcc.Dropdown(id='sa-asset-y', options=opts,
-                             value=opts[0]['value'] if opts else None,
-                             placeholder="Asset da analizzare…",
-                             style={'width': '220px', 'font-size': '11px'},
-                             clearable=False),
-            ], style={'display': 'flex', 'align-items': 'center',
-                      'background': '#ffebee', 'border': '1px solid #ef9a9a',
-                      'border-radius': '4px', 'padding': '5px 10px',
-                      'margin-right': '10px'}),
+    comandi = html.Div(className='nb-nascondi-cell', style={'display': 'flex', 'align-items': 'center',
+                                                            'gap': '6px', 'margin': '0 0 10px 0'}, children=[
+        html.Button('▶ Esegui Style Analysis', id='btn-run-sa', n_clicks=0, style=_SA_BTN),
+        # Riepilogo dei dati: sul cellulare lo apre il ⚙ della riga in alto (pf-info-cell).
+        html.Details(className='pf-strumenti pf-info sa-info', children=[
+            html.Summary(html.I(className='fa-solid fa-gear'), title='Riepilogo Style Analysis',
+                         style={**_SA_BTN, 'padding': '6px 9px'}),
+            html.Div(id='sa-riepilogo', className='pf-strumenti-menu', children=_SA_RIEPILOGO_VUOTO,
+                     style={'padding': '10px 12px', 'gap': '0', 'min-width': '280px'}),
+        ]),
+    ])
 
-            html.Div([
-                html.Label("Finestra rolling (mesi):", style={'font-size': '11px',
-                           'font-weight': 'bold', 'margin-right': '6px',
-                           'white-space': 'nowrap'}),
-                dcc.Input(id='sa-window', type='number', value=36,
-                          min=12, max=120, step=6,
-                          style={'width': '65px', 'font-size': '11px'}),
-            ], style={'display': 'flex', 'align-items': 'center',
-                      'background': '#e3f2fd', 'border': '1px solid #90caf9',
-                      'border-radius': '4px', 'padding': '5px 10px',
-                      'margin-right': '10px'}),
+    parametri = _sa_sez('Parametri', aperta=False, corpo=html.Div(
+        style={'display': 'flex', 'flex-wrap': 'wrap', 'gap': '12px 22px', 'align-items': 'flex-end'},
+        children=[
+            campo('Asset Y (da spiegare)',
+                  dcc.Dropdown(id='sa-asset-y', options=opts,
+                               value=opts[0]['value'] if opts else None,
+                               placeholder='Asset da analizzare…', clearable=False,
+                               style={'width': '240px', 'font-size': '12px'})),
+            campo('Finestra rolling (mesi)',
+                  dcc.Input(id='sa-window', type='number', value=36, min=12, max=120, step=6,
+                            style={'width': '80px', 'font-size': '12px', 'padding': '4px 6px'})),
+            campo('Lag X (mesi)',
+                  dcc.Input(id='sa-lag', type='number', value=0, min=0, max=24, step=1,
+                            style={'width': '80px', 'font-size': '12px', 'padding': '4px 6px'})),
+            campo('Tipo', dcc.RadioItems(id='sa-reg-type', value='ols', **radio,
+                                         options=[{'label': 'OLS libero', 'value': 'ols'},
+                                                  {'label': 'Sharpe (≥0, Σ=1)', 'value': 'sharpe'}])),
+            campo('Std Error', dcc.RadioItems(id='sa-cov-type', value='HAC', **radio,
+                                              options=[{'label': 'OLS', 'value': 'nonrobust'},
+                                                       {'label': 'HC3', 'value': 'HC3'},
+                                                       {'label': 'HAC', 'value': 'HAC'}])),
+        ]))
 
-            html.Div([
-                html.Label("Lag X (mesi):", style={'font-size': '11px',
-                           'font-weight': 'bold', 'margin-right': '6px',
-                           'white-space': 'nowrap'}),
-                dcc.Input(id='sa-lag', type='number', value=0,
-                          min=0, max=24, step=1,
-                          style={'width': '50px', 'font-size': '11px'}),
-            ], style={'display': 'flex', 'align-items': 'center',
-                      'background': '#e8f5e9', 'border': '1px solid #a5d6a7',
-                      'border-radius': '4px', 'padding': '5px 10px',
-                      'margin-right': '10px'}),
+    # Stessa Finestra Temporale di Analisi Portafoglio e Frontiera (sessions/<u>/finestra.json).
+    finestra = _sa_sez('Finestra Temporale', aperta=False, nota='condivisa con Analisi Portafoglio e Frontiera',
+                       cls='sa-date', corpo=html.Div(style={'display': 'flex', 'gap': '10px'}, children=[
+        campo('Da', dcc.DatePickerSingle(id='sa-date-start', display_format='DD/MM/YYYY',
+                                         first_day_of_week=1, clearable=False)),
+        campo('A', dcc.DatePickerSingle(id='sa-date-end', display_format='DD/MM/YYYY',
+                                        first_day_of_week=1, clearable=False)),
+    ]))
 
-            html.Div([
-                html.Label("Tipo:", style={'font-size': '11px', 'font-weight': 'bold',
-                                          'margin-right': '6px', 'white-space': 'nowrap'}),
-                dcc.RadioItems(id='sa-reg-type',
-                               options=[{'label': ' OLS libero', 'value': 'ols'},
-                                        {'label': ' Sharpe (≥0, Σ=1)', 'value': 'sharpe'}],
-                               value='ols', inline=True,
-                               style={'font-size': '11px'},
-                               inputStyle={'margin-right': '3px'},
-                               labelStyle={'margin-right': '10px'}),
-            ], style={'display': 'flex', 'align-items': 'center',
-                      'background': '#fff8e1', 'border': '1px solid #ffe082',
-                      'border-radius': '4px', 'padding': '5px 10px',
-                      'margin-right': '10px'}),
+    fattori = _sa_sez('Fattori di stile', nota='variabili X della regressione', corpo=[
+        html.Div(style={'display': 'flex', 'gap': '6px', 'margin-bottom': '6px'}, children=[
+            html.Button('✔ Tutti', id='sa-sel-all', n_clicks=0,
+                        style={**_SA_BTN, 'background-color': '#eef3fb', 'color': '#1a3a6b',
+                               'border': '1px solid #c0d0e8', 'padding': '3px 10px'}),
+            html.Button('✘ Nessuno', id='sa-sel-none', n_clicks=0,
+                        style={**_SA_BTN, 'background-color': '#eef3fb', 'color': '#1a3a6b',
+                               'border': '1px solid #c0d0e8', 'padding': '3px 10px'}),
+        ]),
+        html.Div(id='sa-x-checklist', className='sa-fattori'),
+    ])
 
-            html.Div([
-                html.Label("Std Error:", style={'font-size': '11px', 'font-weight': 'bold',
-                                               'margin-right': '6px', 'white-space': 'nowrap'}),
-                dcc.RadioItems(id='sa-cov-type',
-                               options=[{'label': ' OLS', 'value': 'nonrobust'},
-                                        {'label': ' HC3', 'value': 'HC3'},
-                                        {'label': ' HAC', 'value': 'HAC'}],
-                               value='HAC', inline=True,
-                               style={'font-size': '11px'},
-                               inputStyle={'margin-right': '3px'},
-                               labelStyle={'margin-right': '8px'}),
-            ], style={'display': 'flex', 'align-items': 'center',
-                      'background': '#fce4ec', 'border': '1px solid #f48fb1',
-                      'border-radius': '4px', 'padding': '5px 10px',
-                      'margin-right': '10px'}),
+    risultati = _sa_sez('Risultati Style Analysis', nota='equazione, statistiche e parametri', corpo=dcc.Loading(
+        type='circle', children=[
+            html.Div(id='sa-equation', className='sa-scorri',
+                     children='Premi «Esegui Style Analysis».',
+                     style={'font-family': 'monospace', 'font-size': '12px', 'background': '#f8f9fa',
+                            'border': '1px solid #dee2e6', 'border-radius': '4px', 'padding': '8px 14px',
+                            'white-space': 'pre', 'color': '#1a3a5c'}),
+            html.Div(id='sa-stats-table', style={'margin-top': '10px'}),
+            html.Div(id='sa-coeff-table', style={'margin-top': '4px'}),
+        ]))
 
-            html.Button('▶  Esegui Style Analysis', id='btn-run-sa', n_clicks=0,
-                        style={'background': '#1b3a6b', 'color': 'white',
-                               'border': 'none', 'padding': '8px 20px',
-                               'border-radius': '5px', 'cursor': 'pointer',
-                               'font-size': '13px', 'font-weight': 'bold',
-                               'box-shadow': '0 2px 4px rgba(0,0,0,0.3)',
-                               'white-space': 'nowrap'}),
+    pesi = _sa_sez('Style Weights Rolling', nota='peso di ciascun fattore nella finestra mobile', corpo=[
+        _sa_grafico('sa-chart-weights', 440, 380),
+        html.Div(id='sa-portfolio-suggest', style={'padding': '10px 4px 4px'}),
+        # Esporta il portafoglio target come Analisi: si carica in P1/P2/P3 da
+        # Analisi Portafoglio → 🧰 Strumenti → Importa/Esporta.
+        html.Div(style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap', 'gap': '6px',
+                        'padding': '10px 4px 4px', 'border-top': '1px solid #e2e8f0', 'margin-top': '8px'},
+                 children=[
+            html.Span('📤 Esporta il portafoglio per Analisi Portafoglio',
+                      style={'font-size': '12px', 'font-weight': '600', 'color': '#1a3a5c'}),
+            dcc.Input(id='sa-export-name', placeholder='Nome analisi…',
+                      style={'font-size': '12px', 'padding': '4px 8px', 'border': '1px solid #ccd9ee',
+                             'border-radius': '4px', 'width': '180px'}),
+            html.Button('Esporta come Analisi', id='sa-export-btn', n_clicks=0,
+                        style={**_SA_BTN, 'background-color': '#1b7a34'}),
+            html.Span(id='sa-export-status', style={'font-size': '12px', 'color': '#1b5e20',
+                                                    'font-weight': '600'}),
+        ]),
+        html.Div('Poi in Analisi Portafoglio: 🧰 Strumenti → Importa/Esporta → carica l\'analisi in P1, P2 o P3.',
+                 style={'font-size': '11px', 'color': '#6b7a99', 'padding': '2px 4px'}),
+    ])
 
-            html.Div(id='sa-status', style={'font-size': '11px', 'color': '#444',
-                                            'margin-left': '12px',
-                                            'font-style': 'italic',
-                                            'max-width': '300px'}),
-        ], style={'display': 'flex', 'align-items': 'center',
-                  'padding': '8px 16px', 'background': '#f0f4fa',
-                  'border-bottom': '1px solid #dee2e6',
-                  'flex-wrap': 'wrap', 'gap': '8px'}),
-
-        # ── Date range ────────────────────────────────────────────────────────
-        html.Div([
-            html.Label("Da:", style={'font-size': '11px', 'margin-right': '6px',
-                                     'font-weight': 'bold'}),
-            dcc.DatePickerSingle(id='sa-date-start', display_format='DD/MM/YYYY',
-                                 first_day_of_week=1, placeholder='Data inizio',
-                                 style={'margin-right': '20px'}),
-            html.Label("A:", style={'font-size': '11px', 'margin-right': '6px',
-                                    'font-weight': 'bold'}),
-            dcc.DatePickerSingle(id='sa-date-end', display_format='DD/MM/YYYY',
-                                 first_day_of_week=1, placeholder='Data fine'),
-        ], style={'padding': '6px 28px 8px', 'display': 'flex', 'align-items': 'center'}),
-
-        # ── Body ──────────────────────────────────────────────────────────────
-        html.Div([
-
-            # Sidebar X
-            html.Div([
-                html.B("X — Fattori di stile",
-                       style={'font-size': '10px', 'color': '#1a5276',
-                              'background': '#eaf4fb', 'display': 'block',
-                              'padding': '4px 8px', 'border-radius': '3px',
-                              'margin-bottom': '8px'}),
-                html.Div(id='sa-x-checklist'),
-                html.Hr(style={'margin': '8px 0'}),
-                html.Div([
-                    html.Button('✔ Tutti', id='sa-sel-all', n_clicks=0,
-                                style={'font-size': '9px', 'padding': '2px 7px',
-                                       'margin-right': '4px', 'cursor': 'pointer'}),
-                    html.Button('✘ Nessuno', id='sa-sel-none', n_clicks=0,
-                                style={'font-size': '9px', 'padding': '2px 7px',
-                                       'cursor': 'pointer'}),
-                ], style={'display': 'flex'}),
-            ], style={'width': '230px', 'min-width': '210px',
-                      'padding': '12px', 'border-right': '1px solid #ddd',
-                      'height': 'calc(100vh - 180px)',
-                      'overflow-y': 'auto', 'background': '#fafafa'}),
-
-            # Area risultati
-            html.Div([
-                dcc.Loading(type='circle', children=[
-                    html.Div(id='sa-equation',
-                             style={'font-family': 'monospace', 'font-size': '11px',
-                                    'background': '#f8f9fa', 'border': '1px solid #dee2e6',
-                                    'border-radius': '4px', 'padding': '8px 14px',
-                                    'margin': '10px 14px 0', 'white-space': 'pre-wrap',
-                                    'color': '#1a3a5c'}),
-                    html.Div(id='sa-stats-table', style={'margin': '8px 14px 0'}),
-                    html.Div(id='sa-coeff-table', style={'margin': '8px 14px 0'}),
-
-                    html.Div([
-                        html.B("📊  Style Weights Rolling",
-                               style={'font-size': '11px', 'color': '#1a3a5c'}),
-                        html.Span("  Contributo % di ciascun fattore al rendimento",
-                                  style={'font-size': '10px', 'color': '#666',
-                                         'margin-left': '8px'}),
-                    ], style={'padding': '5px 14px', 'background': '#eaf4fb',
-                              'border-top': '1px solid #aed6f1',
-                              'border-bottom': '1px solid #aed6f1', 'margin-top': '10px'}),
-                    dcc.Graph(id='sa-chart-weights', style={'height': '38vh'},
-                              config={'responsive': True}),
-
-                    html.Div(id='sa-portfolio-suggest',
-                             style={'padding': '8px 16px 4px', 'background': '#1a2a1a',
-                                    'border': '1px solid #2a4a2a', 'border-radius': '6px',
-                                    'margin': '6px 4px 10px'}),
-
-                    # ── Esporta il portafoglio target come Analisi ───────────
-                    html.Div([
-                        html.Span('📤 Esporta portafoglio target:',
-                                  style={'font-size': '11px', 'font-weight': '600',
-                                         'color': '#1a3a5c', 'margin-right': '8px'}),
-                        dcc.Input(id='sa-export-name', placeholder='Nome analisi…',
-                                  style={'font-size': '11px', 'padding': '4px 8px',
-                                         'border': '1px solid #aaa', 'border-radius': '4px',
-                                         'margin-right': '6px', 'width': '180px'}),
-                        html.Button('Esporta come Analisi', id='sa-export-btn', n_clicks=0,
-                                    style={'background': '#1b7a34', 'color': 'white',
-                                           'border': 'none', 'padding': '5px 12px',
-                                           'border-radius': '4px', 'cursor': 'pointer',
-                                           'font-size': '11px', 'font-weight': 'bold'}),
-                        html.Span(id='sa-export-status',
-                                  style={'font-size': '11px', 'margin-left': '10px',
-                                         'color': '#1b5e20', 'font-weight': '600'}),
-                    ], style={'padding': '6px 14px 10px', 'display': 'flex',
-                              'align-items': 'center', 'flex-wrap': 'wrap'}),
-
-                    html.Div([
-                        html.B("📈  R² rolling", style={'font-size': '11px', 'color': '#1a3a5c'}),
-                        html.Span("  Potere esplicativo del modello nella finestra mobile",
-                                  style={'font-size': '10px', 'color': '#666',
-                                         'margin-left': '8px'}),
-                    ], style={'padding': '5px 14px', 'background': '#e8f5e9',
-                              'border-top': '1px solid #a5d6a7',
-                              'border-bottom': '1px solid #a5d6a7'}),
-                    dcc.Graph(id='sa-chart-r2', style={'height': '20vh'},
-                              config={'responsive': True}),
-
-                    html.Div([
-                        html.B("🔵  Asset Y — Osservato vs Stimato",
-                               style={'font-size': '11px', 'color': '#1a3a5c'}),
-                    ], style={'padding': '5px 14px', 'background': '#fff8e1',
-                              'border-top': '1px solid #ffe082',
-                              'border-bottom': '1px solid #ffe082'}),
-                    dcc.Graph(id='sa-chart-fit', style={'height': '28vh'},
-                              config={'responsive': True}),
-
-                    html.Div([
-                        html.B("🟢  Alpha rolling (residuo non spiegato)",
-                               style={'font-size': '11px', 'color': '#1a3a5c'}),
-                        html.Span("  Positivo = sovraperformance, Negativo = sottoperformance",
-                                  style={'font-size': '10px', 'color': '#666',
-                                         'margin-left': '8px'}),
-                    ], style={'padding': '5px 14px', 'background': '#f3e5f5',
-                              'border-top': '1px solid #ce93d8',
-                              'border-bottom': '1px solid #ce93d8'}),
-                    dcc.Graph(id='sa-chart-alpha', style={'height': '22vh'},
-                              config={'responsive': True}),
-
-                    html.Div([
-                        html.B("📦  Decomposizione media del rendimento",
-                               style={'font-size': '11px', 'color': '#1a3a5c'}),
-                        html.Span("  Contributo medio per fattore su tutto il periodo",
-                                  style={'font-size': '10px', 'color': '#666',
-                                         'margin-left': '8px'}),
-                    ], style={'padding': '5px 14px', 'background': '#e3f2fd',
-                              'border-top': '1px solid #90caf9',
-                              'border-bottom': '1px solid #90caf9'}),
-                    dcc.Graph(id='sa-chart-decomp', style={'height': '26vh'},
-                              config={'responsive': True}),
-                ]),
-            ], style={'flex': '1', 'min-width': '0',
-                      'overflow-y': 'auto', 'height': 'calc(100vh - 180px)'}),
-
-        ], style={'display': 'flex'}),
+    return html.Div(className='sa-corpo', style={'padding': '8px calc(8px + 1%) 24px'}, children=[
+        comandi,
+        html.Div(id='sa-status', style={'font-size': '12px', 'color': '#b71c1c', 'font-weight': '600',
+                                        'margin': '0 0 8px 0'}),
+        parametri,
+        finestra,
+        fattori,
+        risultati,
+        pesi,
+        _sa_sez('R² rolling', nota='potere esplicativo del modello nella finestra mobile',
+                corpo=_sa_grafico('sa-chart-r2', 380, 320)),
+        _sa_sez('Asset Y — osservato vs stimato', nota='rendimento cumulato',
+                corpo=_sa_grafico('sa-chart-fit', 340, 300)),
+        _sa_sez('Alpha rolling', nota='residuo non spiegato dai fattori: positivo = sovraperformance',
+                corpo=_sa_grafico('sa-chart-alpha', 300, 280)),
+        _sa_sez('Contributo al rendimento di ogni asset', nota='contributo medio per fattore, %/anno',
+                corpo=_sa_grafico('sa-chart-decomp', 360, 340)),
     ])
 
 
@@ -516,35 +483,67 @@ def register_style_analysis_callbacks(app):
             return options_tickers, current
         return options_tickers, (options_tickers[0]['value'] if options_tickers else None)
 
+    def _sa_dati(stock_data):
+        cr = _get_df(stock_data)
+        if cr is None or cr.empty:
+            cr = _sa_build_cr_from_current()   # fonte unica: current.json
+        return cr if cr is not None and not cr.empty else None
+
+    # Finestra Temporale condivisa con Analisi Portafoglio e Frontiera: si rilegge dal
+    # file a ogni apertura del tab (una data cambiata là arriva qui) e a ogni dato nuovo.
     @app.callback(
-        Output('sa-x-checklist', 'children'),
         Output('sa-date-start', 'date'),
         Output('sa-date-end', 'date'),
+        Input('stock-data', 'data'),
+        Input('main-tabs', 'value'),
+        prevent_initial_call=False,
+    )
+    def sa_date_condivise(stock_data, tab):
+        if ctx.triggered_id == 'main-tabs' and tab != 'tab-sa':
+            raise PreventUpdate
+        cr = _sa_dati(stock_data)
+        if cr is None:
+            return None, None
+        return _dc.finestra_iniziale(cr.index.min(), cr.index.max())
+
+    # Una data cambiata qui vale anche per Analisi Portafoglio e Frontiera.
+    @app.callback(
+        Output('sa-status', 'children', allow_duplicate=True),
+        Input('sa-date-start', 'date'),
+        Input('sa-date-end', 'date'),
+        State('stock-data', 'data'),
+        prevent_initial_call=True,
+    )
+    def sa_salva_finestra(da, a, stock_data):
+        if da and a:
+            cr = _sa_dati(stock_data)
+            _dc.scrivi_finestra(da, a, dmax=cr.index.max() if cr is not None else None)
+        return no_update
+
+    @app.callback(
+        Output('sa-x-checklist', 'children'),
         Input('stock-data', 'data'),
         prevent_initial_call=False,
     )
     def sa_populate_x(stock_data):
-        cr = _get_df(stock_data)
-        if cr is None or cr.empty:
-            cr = _sa_build_cr_from_current()   # fonte unica: current.json
-        if cr is None or cr.empty:
-            return [], None, None
+        cr = _sa_dati(stock_data)
+        if cr is None:
+            return []
         checks = [
             html.Div(
                 dcc.Checklist(
                     id={'type': 'sa-x-check', 'index': c},
                     options=[{'label': f' {c}', 'value': c}],
                     value=[],
-                    style={'font-size': '10px'},
-                    inputStyle={'margin-right': '4px'},
+                    style={'font-size': '12px', 'color': '#1a3a5c'},
+                    inputStyle={'margin-right': '5px'},
                 ),
-                style={'margin-bottom': '3px'}
+                style={'padding': '2px 0', 'white-space': 'nowrap', 'overflow': 'hidden',
+                       'text-overflow': 'ellipsis'}, title=c,
             )
             for c in cr.columns
         ]
-        min_date = str(cr.index.min().date())
-        max_date = str(cr.index.max().date())
-        return checks, min_date, max_date
+        return checks
 
     @app.callback(
         Output({'type': 'sa-x-check', 'index': ALL}, 'value'),
@@ -554,11 +553,10 @@ def register_style_analysis_callbacks(app):
         prevent_initial_call=True,
     )
     def sa_sel_x(a, b, ids):
-        ctx = callback_context
-        if not ctx.triggered:
-            raise PreventUpdate
-        if 'none' in ctx.triggered[0]['prop_id']:
+        if ctx.triggered_id == 'sa-sel-none':
             return [[] for _ in ids]
+        if ctx.triggered_id != 'sa-sel-all':
+            raise PreventUpdate
         return [[i['index']] for i in ids]
 
     @app.callback(
@@ -573,6 +571,7 @@ def register_style_analysis_callbacks(app):
         Output('sa-chart-decomp',      'figure'),
         Output('sa-status',            'children'),
         Output('style-analysis-store', 'data'),
+        Output('sa-riepilogo',         'children'),
         Input('btn-run-sa', 'n_clicks'),
         State('stock-data',   'data'),
         State('sa-asset-y',   'value'),
@@ -594,7 +593,7 @@ def register_style_analysis_callbacks(app):
                           _empty_fig('Nessun risultato'), '',
                           _empty_fig(''), _empty_fig(''),
                           _empty_fig(''), _empty_fig(''),
-                          f'❌ {msg}', None)
+                          f'❌ {msg}', None, no_update)
 
         if not y_col:            return _e('Seleziona la variabile Y')
 
@@ -777,17 +776,16 @@ def register_style_analysis_callbacks(app):
                                    marker_line_width=0,
                                    hovertemplate=f'<b>{col}</b><br>%{{x|%b %Y}}: %{{y:.2%}}<extra></extra>'))
         fig_w.add_hline(y=1.0, line_color='#555', line_dash='dot', line_width=1,
-                        annotation_text='Σw=1', annotation_font_size=9)
+                        annotation_text='Σw=1', annotation_font_size=9,
+                        annotation_position='bottom left')
         fig_w.update_layout(
             barmode='stack',
-            title=dict(text=f'Composizione rolling — {W} mesi' + (' [Sharpe]' if reg_type == 'sharpe' else ' [OLS]'),
-                       font=dict(size=11), x=0.5),
             xaxis=dict(tickformat='%b %Y', tickangle=-45, showgrid=False),
-            yaxis=dict(title='Peso', tickformat='.0%', range=[0, 1.05], gridcolor='#2a2a2a'),
-            legend=dict(orientation='h', y=-0.25, font=dict(size=9)),
-            plot_bgcolor='#111', paper_bgcolor='#111',
-            font=dict(color='#ccc', size=10),
-            margin=dict(l=40, r=20, t=35, b=80),
+            yaxis=dict(title='Peso', tickformat='.0%', range=[0, 1.05], gridcolor='#e8e8e8'),
+            legend=dict(orientation='h', y=-0.22, font=dict(size=10)),
+            plot_bgcolor='#f8f8f8', paper_bgcolor='white',
+            font=dict(color='#1a3a5c', size=10),
+            margin=dict(l=45, r=20, t=12, b=90),
         )
 
         # Portafoglio suggerito ultima finestra
@@ -806,44 +804,61 @@ def register_style_analysis_callbacks(app):
         for c, w in sig_w:
             clr = _COLORS[x_selected.index(c) % len(_COLORS)]
             suggest_rows.append(html.Div([
-                html.Span(f'{c}', style={'flex': '1', 'font-size': '11px', 'color': '#ddd'}),
+                html.Span(f'{c}', title=c, style={'flex': '1', 'font-size': '12px', 'color': '#1a3a5c',
+                                                  'min-width': '0', 'overflow': 'hidden',
+                                                  'text-overflow': 'ellipsis', 'white-space': 'nowrap'}),
                 html.Div(style={'width': f'{w*100:.1f}%', 'min-width': '2px', 'height': '10px',
                                 'background': clr, 'border-radius': '2px', 'margin': '0 8px',
                                 'flex': '0 0 auto', 'max-width': '40%'}),
-                html.Span(f'{w:.1%}', style={'width': '52px', 'text-align': 'right',
-                                              'font-size': '11px', 'font-weight': 'bold',
-                                              'color': '#8eff8e'}),
+                html.Span(f'{w:.1%}', style={'width': '56px', 'text-align': 'right',
+                                              'font-size': '12px', 'font-weight': '700',
+                                              'color': '#1b7a34'}),
             ], style={'display': 'flex', 'align-items': 'center', 'margin': '3px 0'}))
 
         suggest_block = html.Div([
-            html.B('🎯 Portafoglio suggerito — ultima finestra',
-                   style={'font-size': '11px', 'color': '#8eff8e', 'display': 'block',
-                          'margin-bottom': '6px'}),
+            html.B('🎯 Percentuali del portafoglio — ultima finestra',
+                   style={'font-size': '12px', 'color': '#1a3a5c', 'display': 'block',
+                          'margin-bottom': '4px'}),
             html.Span(
                 (f'Finestra: {roll_dates[-1].strftime("%b %Y") if len(roll_dates) else "—"}'
                  f' | Assets: {len(sig_w)}'
                  + (f' | TE: {te_last*100:.2f}%/mese' if not np.isnan(te_last) else '')),
-                style={'font-size': '9px', 'color': '#888', 'display': 'block', 'margin-bottom': '8px'}),
+                style={'font-size': '11px', 'color': '#6b7a99', 'display': 'block', 'margin-bottom': '8px'}),
             *suggest_rows,
-        ]) if sig_w else html.Span('Nessun peso significativo',
-                                    style={'color': '#888', 'font-size': '10px'})
+        ], style={'max-width': '720px'}) if sig_w else html.Span('Nessun peso significativo',
+                                    style={'color': '#888', 'font-size': '12px'})
 
         # ── Grafico 2: R² rolling ────────────────────────────────────────────
         r2_arr = np.array(roll_r2)
         mean_r2 = float(np.nanmean(r2_arr))
         fig_r2 = go.Figure()
-        fig_r2.add_trace(go.Scatter(x=roll_dates, y=r2_arr, name='R² rolling',
-                                    line=dict(color='#2e6da4', width=1.8),
-                                    fill='tozeroy', fillcolor='rgba(46,109,164,0.12)'))
-        fig_r2.add_hline(y=mean_r2, line_color='#d62728', line_dash='dash', line_width=1.2,
-                         annotation_text=f'μ R²={mean_r2:.3f}', annotation_position='right')
-        fig_r2.add_hline(y=g_r2, line_color='#2ca02c', line_dash='dot', line_width=1.2,
-                         annotation_text=f'Full={g_r2:.3f}', annotation_position='right')
-        fig_r2.update_layout(title=dict(text='R² Rolling', font=dict(size=11), x=0.01),
-                             hovermode='x unified', margin=dict(t=40, b=25, l=55, r=90),
-                             paper_bgcolor='white', plot_bgcolor='#f8f8f8', showlegend=False)
-        fig_r2.update_yaxes(range=[0, 1.05], showgrid=True, gridcolor='#e8e8e8', title_text='R²')
-        fig_r2.update_xaxes(showgrid=True, gridcolor='#e8e8e8')
+        # Fasce di lettura: quanto del rendimento di Y spiegano i fattori.
+        for y0, y1, col, txt in ((0, 50, 'rgba(214,39,40,0.06)', 'debole'),
+                                 (50, 80, 'rgba(255,165,0,0.07)', 'discreto'),
+                                 (80, 100, 'rgba(44,160,44,0.07)', 'buono')):
+            fig_r2.add_hrect(y0=y0, y1=y1, fillcolor=col, line_width=0, layer='below')
+            fig_r2.add_annotation(xref='paper', x=0.005, y=(y0 + y1) / 2, yref='y', text=txt,
+                                  showarrow=False, xanchor='left',
+                                  font=dict(size=10, color='#8a94a6'))
+        fig_r2.add_trace(go.Scatter(x=roll_dates, y=r2_arr * 100, name='R² rolling',
+                                    line=dict(color='#1a3a6b', width=2.6),
+                                    hovertemplate='%{y:.1f}%<extra>R² rolling</extra>'))
+        n = len(roll_dates)
+        fig_r2.add_trace(go.Scatter(x=roll_dates, y=[mean_r2 * 100] * n,
+                                    name=f'Media rolling {mean_r2*100:.1f}%',
+                                    line=dict(color='#d62728', dash='dash', width=1.6),
+                                    hoverinfo='skip'))
+        fig_r2.add_trace(go.Scatter(x=roll_dates, y=[g_r2 * 100] * n,
+                                    name=f'Intero periodo {g_r2*100:.1f}%',
+                                    line=dict(color='#2ca02c', dash='dot', width=2),
+                                    hoverinfo='skip'))
+        fig_r2.update_layout(hovermode='x unified', margin=dict(t=36, b=30, l=50, r=12),
+                             paper_bgcolor='white', plot_bgcolor='white', font=dict(size=12),
+                             legend=dict(orientation='h', x=0, y=1.02, yanchor='bottom',
+                                         font=dict(size=12)))
+        fig_r2.update_yaxes(range=[0, 101], dtick=20, ticksuffix='%', showgrid=True,
+                            gridcolor='#e3e8ef', title_text='R²', zeroline=False)
+        fig_r2.update_xaxes(showgrid=True, gridcolor='#eef1f5', hoverformat='%b %Y')
 
         # ── Grafico 3: Fit storico ───────────────────────────────────────────
         fig_fit = go.Figure()
@@ -855,18 +870,16 @@ def register_style_analysis_callbacks(app):
         fig_fit.add_trace(go.Scatter(x=g_fitted.index, y=cum_fitted.values * 100,
                                      name='Stimato', line=dict(color='#d62728', width=1.8, dash='dot')))
         fig_fit.update_layout(
-            title=dict(text=f'Cumulato Osservato vs Stimato | R²={g_r2:.4f}',
-                       font=dict(size=11), x=0.01),
             hovermode='x unified',
             legend=dict(orientation='h', y=1.02, x=0, font=dict(size=9)),
-            margin=dict(t=45, b=30, l=55, r=20),
+            margin=dict(t=30, b=30, l=55, r=20),
             paper_bgcolor='white', plot_bgcolor='#f8f8f8')
         fig_fit.update_xaxes(showgrid=True, gridcolor='#e8e8e8')
         fig_fit.update_yaxes(showgrid=True, gridcolor='#e8e8e8', title_text='Rend. cumulato (%)')
         fig_fit.add_annotation(text=f'R²={g_r2:.4f}  R²adj={g_r2_adj:.4f}',
-                               xref='paper', yref='paper', x=0.99, y=0.98,
+                               xref='paper', yref='paper', x=0.99, y=0.02,
                                showarrow=False, font=dict(size=10),
-                               bgcolor='rgba(255,255,255,0.8)', xanchor='right', yanchor='top')
+                               bgcolor='rgba(255,255,255,0.8)', xanchor='right', yanchor='bottom')
 
         # ── Grafico 4: Alpha rolling ─────────────────────────────────────────
         alpha_arr = np.array(roll_alpha) * 12 * 100
@@ -880,9 +893,7 @@ def register_style_analysis_callbacks(app):
         fig_alpha.add_hline(y=mean_alpha, line_color='navy', line_dash='dash', line_width=1.5,
                             annotation_text=f'μ α={mean_alpha:+.2f}%/anno',
                             annotation_position='right')
-        fig_alpha.update_layout(title=dict(text=f'Alpha Rolling (annualizzato) — {W} mesi',
-                                           font=dict(size=11), x=0.01),
-                                hovermode='x unified', margin=dict(t=40, b=25, l=55, r=120),
+        fig_alpha.update_layout(hovermode='x unified', margin=dict(t=14, b=25, l=55, r=120),
                                 paper_bgcolor='white', plot_bgcolor='#f8f8f8', showlegend=False)
         fig_alpha.update_xaxes(showgrid=True, gridcolor='#e8e8e8')
         fig_alpha.update_yaxes(showgrid=True, gridcolor='#e8e8e8', title_text='Alpha %/anno')
@@ -907,9 +918,7 @@ def register_style_analysis_callbacks(app):
         fig_decomp.add_hline(y=total_c, line_color='navy', line_dash='dash', line_width=1.5,
                              annotation_text=f'Tot={total_c:+.2f}%', annotation_position='right')
         fig_decomp.update_layout(
-            title=dict(text='Decomposizione Rendimento — contributo medio per fattore (%/anno)',
-                       font=dict(size=11), x=0.01),
-            margin=dict(t=45, b=60, l=55, r=90),
+            margin=dict(t=24, b=60, l=55, r=90),
             paper_bgcolor='white', plot_bgcolor='#f8f8f8', showlegend=False)
         fig_decomp.update_xaxes(tickangle=-25, tickfont=dict(size=10))
         fig_decomp.update_yaxes(showgrid=True, gridcolor='#e8e8e8', title_text='Contributo %/anno')
@@ -925,10 +934,33 @@ def register_style_analysis_callbacks(app):
         store_data = {'eq_text': eq_text, 'g_r2': g_r2, 'g_r2_adj': g_r2_adj,
                       'status': status, 'target': target, 'y': y_col}
 
+        # Riepilogo nel menu ⚙ (sul cellulare lo copia il ⚙ della riga in alto).
+        _d = lambda t: pd.Timestamp(t).strftime('%m/%Y')
+        tipo = 'Sharpe (≥0, Σ=1)' if reg_type == 'sharpe' else 'OLS libero'
+        std = ('—' if reg_type == 'sharpe' else
+               {'nonrobust': 'OLS classico', 'HC3': 'HC3 robusto', 'HAC': 'HAC Newey-West'}.get(cov_type, cov_type))
+        riepilogo = [
+            _SA_RIEPILOGO_VUOTO[0],
+            _sa_riga('Asset Y:', y_col),
+            _sa_riga('Periodo:', f'{_d(combined.index.min())} — {_d(combined.index.max())}'),
+            _sa_riga('Mesi usati:', f'{n_obs}'),
+            _sa_riga('Fattori di stile:', f'{len(x_selected)}'),
+            _sa_riga('Tipo:', tipo),
+            _sa_riga('Std Error:', std),
+            _sa_riga('R²:', f'{g_r2:.4f}'),
+            _sa_riga('R² adj.:', f'{g_r2_adj:.4f}'),
+            _sa_riga('Alpha medio:', f'{mean_alpha:+.2f}%/anno',
+                     '#1b7a34' if mean_alpha >= 0 else '#b71c1c'),
+            _sa_riga('Finestra rolling:', f'{W} mesi'),
+            _sa_riga('Lag X:', f'{lag} mesi'),
+            _sa_riga('Dati della finestra:', f'{_d(date_start) if date_start else "—"} — '
+                                             f'{_d(date_end) if date_end else "—"}', '#5a6b85'),
+        ]
+
         return (eq_text, stat_table, coef_table,
                 fig_w, suggest_block,
                 fig_r2, fig_fit, fig_alpha, fig_decomp,
-                status, store_data)
+                '', store_data, riepilogo)
 
     # ── Esporta il portafoglio target come Analisi (stesso archivio analyses.json) ──
     @app.callback(

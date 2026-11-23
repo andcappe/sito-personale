@@ -27,6 +27,7 @@ from settings.browser_css import BROWSER_RESET_CSS, FONT
 from settings.caratteri import NOME_ASSET
 import sessions_manager as _sm
 import arima_utenti
+import data_core as dc          # Finestra Temporale condivisa
 import time
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1668,22 +1669,43 @@ def build_grid_on_load(loaded, stock_data, _sync_sig, rawdata):
 # su Calcola Frontiera. (Era auto_calc_on_open; fe-auto-calc-flag resta nel layout.)
 
 
-# Finestra Temporale all'apertura: stessa regola dell'Analisi Portafoglio
-# (sync_date_range): 10 anni fa → oggi, ristretti ai dati di current.json. Il layout
-# è statico, quindi le date scritte lì sarebbero quelle dell'avvio del processo.
+def _fe_estremi_dati():
+    """(primo, ultimo) giorno dei dati di current.json, o (None, None)."""
+    date = [d for v in _read_user_json().values() if isinstance(v, dict)
+            for d in (v.get('dates') or [])[:1] + (v.get('dates') or [])[-1:]]
+    if not date:
+        return None, None
+    return pd.Timestamp(min(date)), pd.Timestamp(max(date))
+
+
+# Finestra Temporale all'apertura: è condivisa con Analisi Portafoglio e Style
+# Analysis (data_core.finestra_iniziale, file sessions/<u>/finestra.json), ristretta
+# ai dati di current.json; senza file 10 anni fa → ultimo dato. Il layout è statico,
+# quindi le date scritte lì sarebbero quelle dell'avvio del processo.
 @app.callback(
     Output('fe-date-start', 'date'),
     Output('fe-date-end',   'date'),
     Input('fe-date-init',   'data'),
 )
 def _fe_date_iniziali(_):
-    oggi = pd.Timestamp.today().normalize()
-    inizio, fine = oggi - pd.DateOffset(years=10), oggi
-    date = [d for v in _read_user_json().values() for d in (v.get('dates') or [])[:1] + (v.get('dates') or [])[-1:]]
-    if date:
-        dmin, dmax = pd.Timestamp(min(date)), pd.Timestamp(max(date))
-        inizio, fine = max(dmin, inizio), min(dmax, fine)
-    return inizio.strftime('%Y-%m-%d'), fine.strftime('%Y-%m-%d')
+    dmin, dmax = _fe_estremi_dati()
+    if dmin is None:
+        oggi = pd.Timestamp.today().normalize()
+        return (oggi - pd.DateOffset(years=10)).strftime('%Y-%m-%d'), oggi.strftime('%Y-%m-%d')
+    return dc.finestra_iniziale(dmin, dmax)
+
+
+# Una data cambiata qui vale anche per Analisi Portafoglio e Style Analysis.
+@app.callback(
+    Output('fe-date-init', 'data', allow_duplicate=True),
+    Input('fe-date-start', 'date'),
+    Input('fe-date-end',   'date'),
+    prevent_initial_call=True,
+)
+def _fe_salva_finestra(da, a):
+    if da and a:
+        dc.scrivi_finestra(da, a, dmax=_fe_estremi_dati()[1])
+    return no_update
 
 
 # Cambio di parametri (date, «Finestra gg», rischio P1/P2/P3, punti, pesi, risk free)

@@ -122,6 +122,65 @@ def write_json_atomic(path, data):
         return False
 
 
+# ─── Finestra Temporale condivisa ─────────────────────────────────────────────
+# Una sola finestra (Da / A) per utente, letta e scritta da Analisi Portafoglio,
+# Frontiera Efficiente e Style Analysis: sessions/<u>/finestra.json (sincronizzato su R2).
+# «a» = 'ultimo' quando la data finale è l'ultimo dato: così il giorno dopo la
+# finestra arriva al dato nuovo invece di restare ferma alla data salvata.
+_FINESTRA_ULTIMO = 'ultimo'
+
+
+def finestra_path(username=None):
+    return ROOT / 'sessions' / (username or get_username()) / 'finestra.json'
+
+
+def leggi_finestra(username=None):
+    """(da, a) come 'YYYY-MM-DD' (a può essere 'ultimo'), oppure None."""
+    try:
+        with open(finestra_path(username)) as f:
+            d = json.load(f)
+        da, a = str(d.get('da') or '')[:10], str(d.get('a') or '')[:10]
+        return (da, a) if da and a else None
+    except Exception:
+        return None
+
+
+def scrivi_finestra(da, a, dmax=None, username=None):
+    """Salva la finestra scelta dall'utente. `dmax` = ultimo dato disponibile: una data
+    finale uguale o successiva si salva come 'ultimo'. Non riscrive se è uguale (ogni
+    scrittura va anche su R2)."""
+    da, a = str(da or '')[:10], str(a or '')[:10]
+    if not da or not a:
+        return False
+    try:
+        if dmax is not None and pd.Timestamp(a) >= pd.Timestamp(dmax).normalize():
+            a = _FINESTRA_ULTIMO
+    except Exception:
+        pass
+    if leggi_finestra(username) == (da, a):
+        return False
+    return write_json_atomic(finestra_path(username), {'da': da, 'a': a})
+
+
+def finestra_iniziale(dmin, dmax, username=None):
+    """Date da mostrare all'apertura, ristrette ai dati [dmin, dmax]: la finestra
+    condivisa se c'è, altrimenti 10 anni fa → ultimo dato."""
+    dmin, dmax = pd.Timestamp(dmin).normalize(), pd.Timestamp(dmax).normalize()
+    f = leggi_finestra(username)
+    inizio, fine = pd.Timestamp.today().normalize() - pd.DateOffset(years=10), dmax
+    if f:
+        try:
+            inizio = pd.Timestamp(f[0])
+            fine = dmax if f[1] == _FINESTRA_ULTIMO else pd.Timestamp(f[1])
+        except Exception:
+            pass
+    inizio = min(max(inizio, dmin), dmax)
+    fine = max(min(fine, dmax), dmin)
+    if inizio > fine:
+        inizio, fine = dmin, dmax
+    return inizio.strftime('%Y-%m-%d'), fine.strftime('%Y-%m-%d')
+
+
 def read_analyses(username=None):
     try:
         with open(analyses_path(username)) as f:
