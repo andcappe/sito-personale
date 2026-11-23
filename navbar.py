@@ -55,6 +55,9 @@ NAVBAR_CSS = """
     html .nb-solo-flex { display: flex !important; }   /* batte la regola base, che viene dopo */
     /* Riga etichetta + menu a tendina + pulsante: il menu prende lo spazio che resta. */
     .nb-riga-cresci { margin-right: 0 !important; }
+    .nb-legenda-btn { border: 1px solid #ccd9ee; background: #fff; color: #1a3a6b; border-radius: 4px;
+      padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .nb-legenda-riga { display: flex !important; justify-content: flex-end; padding: 4px 2px; }
     .nb-riga-cresci > .dash-dropdown { flex: 1 1 auto; min-width: 0; width: auto !important; }
     .nb-etic-data { text-align: left !important; }
     /* Griglia 2×2 del range temporale: le righe si «sciolgono» nella griglia,
@@ -85,6 +88,7 @@ NAVBAR_CSS = """
   .nb-solo-flex { display: none !important; }
   /* Testo che compare solo sul cellulare (il gemello da PC ha nb-nascondi-cell). */
   .nb-solo-cell { display: none; }
+  .nb-legenda-riga { display: none; }
   #site-navbar .nb-menu a:hover { color: #1a3a6b !important; }
   /* Tendina dei sotto-tab (solo cellulare): il pulsante mostra il sotto-tab
      attivo, il menu verticale sostituisce i dcc.Tabs nascosti con nb-nascondi-cell. */
@@ -116,7 +120,103 @@ NAVBAR_CSS = """
 NAVBAR_JS = """
 if (location.search.indexOf('embed=1') !== -1)
   document.documentElement.classList.add('nb-embed');
+""" + r"""
+// Legenda a tutto schermo (cellulare, 23/11/2026): un pulsante .nb-legenda-btn con
+// data-grafico=<id del dcc.Graph> apre l'elenco delle voci della legenda principale
+// ('legend') con colore e nome intero; un tocco accende/spegne la voce e tutto il suo
+// legendgroup con Plotly.restyle, come un clic sulla legenda (quindi restyleData parte
+// e la memoria delle serie spente del Portafoglio continua a funzionare).
+// Dentro un iframe (Frontiera nel Portafoglio) il pannello va sulla pagina di sopra,
+// altrimenti coprirebbe solo l'iframe.
+window.nbLegendaSchermo = function (idGrafico, titolo) {
+  var gd = document.getElementById(idGrafico);
+  gd = gd && (gd.classList.contains('js-plotly-plot') ? gd : gd.querySelector('.js-plotly-plot'));
+  if (!gd || !gd.data || !window.Plotly) return;
+  var doc = document;
+  try { if (window.top !== window && window.top.document.body) doc = window.top.document; } catch (e) {}
+  var vecchio = doc.getElementById('nb-legenda-pop');
+  if (vecchio) vecchio.remove();
+  function voci() {
+    var out = [], visti = {};
+    gd.data.forEach(function (t, i) {
+      var nome = (t.name || '').trim();
+      if (!nome || t.showlegend === false || t.visible === false) return;
+      if ((t.legend || 'legend') !== 'legend') return;
+      var k = (t.legendgroup || '') + '|' + nome;
+      if (visti[k]) return;
+      visti[k] = 1;
+      if (/…$/.test(nome) && t.legendgroup) nome = t.legendgroup;
+      var col = (t.line && t.line.color) || (t.marker && typeof t.marker.color === 'string' && t.marker.color) || '#1a3a6b';
+      out.push({i: i, nome: nome, col: col, rango: (t.legendrank === undefined ? 1000 : t.legendrank)});
+    });
+    out.sort(function (a, b) { return a.rango - b.rango || a.i - b.i; });
+    return out;
+  }
+  function indici(i) {
+    var g = gd.data[i].legendgroup;
+    if (!g) return [i];
+    var r = [];
+    gd.data.forEach(function (t, j) { if (t.legendgroup === g && t.visible !== false) r.push(j); });
+    return r;
+  }
+  function spenta(i) { return gd.data[i].visible === 'legendonly'; }
+  function imposta(lista, val) {
+    var idx = [];
+    lista.forEach(function (i) { indici(i).forEach(function (j) { if (idx.indexOf(j) < 0) idx.push(j); }); });
+    if (idx.length) window.Plotly.restyle(gd, {visible: idx.map(function () { return val; })}, idx);
+  }
+  var pop = doc.createElement('div');
+  pop.id = 'nb-legenda-pop';
+  pop.style.cssText = 'position:fixed;inset:0;z-index:5000;background:#fff;display:flex;' +
+    'flex-direction:column;font-size:14px;color:#1a3a5c;';
+  var testa = doc.createElement('div');
+  testa.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 12px;' +
+    'border-bottom:1px solid #e2e8f0;background:#f8fafc;';
+  var tit = doc.createElement('div');
+  tit.textContent = titolo || 'Legenda';
+  tit.style.cssText = 'flex:1;font-weight:700;font-size:15px;color:#1a3a6b;';
+  testa.appendChild(tit);
+  function pulsante(testo, fn, stile) {
+    var b = doc.createElement('button');
+    b.type = 'button'; b.textContent = testo;
+    b.style.cssText = 'border:1px solid #ccd9ee;background:#fff;color:#1a3a6b;border-radius:4px;' +
+      'padding:6px 9px;font-size:12px;font-weight:600;cursor:pointer;' + (stile || '');
+    b.addEventListener('click', fn);
+    return b;
+  }
+  var lista = doc.createElement('div');
+  lista.style.cssText = 'flex:1;overflow-y:auto;padding:4px 0;-webkit-overflow-scrolling:touch;';
+  function disegna() {
+    lista.innerHTML = '';
+    voci().forEach(function (v) {
+      var r = doc.createElement('div');
+      var off = spenta(v.i);
+      r.style.cssText = 'display:flex;align-items:center;gap:12px;padding:11px 16px;' +
+        'border-bottom:1px solid #f0f3f8;cursor:pointer;opacity:' + (off ? '0.4' : '1') + ';';
+      var c = doc.createElement('span');
+      c.style.cssText = 'flex:0 0 26px;height:4px;border-radius:2px;background:' + v.col + ';';
+      var n = doc.createElement('span');
+      n.textContent = v.nome;
+      n.style.cssText = 'flex:1;font-weight:600;' + (off ? 'text-decoration:line-through;' : '');
+      r.appendChild(c); r.appendChild(n);
+      r.addEventListener('click', function () { imposta([v.i], spenta(v.i) ? true : 'legendonly'); disegna(); });
+      lista.appendChild(r);
+    });
+  }
+  testa.appendChild(pulsante('Mostra tutti', function () { imposta(voci().map(function (v) { return v.i; }), true); disegna(); }));
+  testa.appendChild(pulsante('Nascondi tutti', function () { imposta(voci().map(function (v) { return v.i; }), 'legendonly'); disegna(); }));
+  testa.appendChild(pulsante('✕', function () { pop.remove(); }, 'font-size:15px;padding:4px 11px;'));
+  pop.appendChild(testa); pop.appendChild(lista);
+  disegna();
+  doc.body.appendChild(pop);
+};
+""" + """
 document.addEventListener('click', function (e) {
+  var lb = e.target.closest && e.target.closest('.nb-legenda-btn');
+  if (lb) {
+    window.nbLegendaSchermo(lb.getAttribute('data-grafico'), lb.getAttribute('data-titolo'));
+    return;
+  }
   // Tendine dei sotto-tab: il pulsante apre/chiude, una voce o un tocco fuori chiude.
   // Doppioni da cellulare: cliccano il componente vero (data-bersaglio = id).
   var cl = e.target.closest && e.target.closest('.nb-clicca');
@@ -157,6 +257,14 @@ document.addEventListener('click', function (e) {
   }
 });
 """
+
+
+def legenda_btn(id_grafico, titolo='Legenda'):
+    """Riga col pulsante «⤢ Legenda» (solo cellulare): apre la legenda di id_grafico a
+    tutto schermo (nbLegendaSchermo in NAVBAR_JS)."""
+    return html.Div(html.Button('⤢ Legenda', className='nb-legenda-btn', n_clicks=0,
+                                **{'data-grafico': id_grafico, 'data-titolo': titolo}),
+                    className='nb-legenda-riga')
 
 
 def installa_css(app) -> None:

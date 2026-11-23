@@ -155,6 +155,64 @@ app.index_string = '''
   .fe-box .SingleDatePickerInput { border: 1px solid #ccd9ee; border-radius: 4px; }
   .fe-box .DateInput { width: 104px; }
   .fe-box .DateInput_input { font-size: 13px; padding: 4px 8px; height: 28px; line-height: 20px; }
+  /* Sezioni «Parametri Frontiere» e «Rischi di portafoglio»: sul computer non
+     esistono (i campi restano su una riga sola nel riquadro Frontiere); sul
+     cellulare sono schede che si aprono e chiudono come nell'Analisi Portafoglio
+     (nb-espandi in navbar.NAVBAR_CSS/JS). */
+  .fe-sez, .fe-sez > .nb-espandi-corpo { display: contents; }
+  .fe-corpo-tempo { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  .fe-riga-calcolo { display: flex; gap: 6px; margin-top: auto; align-items: stretch; }
+  .fe-info { position: relative; display: flex; }
+  .fe-info > summary { list-style: none; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; width: 34px; background: #0066cc; color: white; border-radius: 4px;
+    font-size: 15px; user-select: none; box-shadow: 0 2px 6px rgba(0,102,204,0.35); }
+  .fe-info > summary::-webkit-details-marker { display: none; }
+  .fe-info-menu { position: absolute; top: calc(100% + 4px); right: 0; width: 360px; z-index: 60;
+    background: white; border: 1px solid #ccd9ee; border-radius: 6px; padding: 8px 10px;
+    box-shadow: 0 6px 18px rgba(26,58,107,0.18); display: flex; flex-direction: column; gap: 8px;
+    font-size: 11px; color: #1a3a5c; }
+  .fe-info-titolo { font-size: 12px; font-weight: 700; color: #1a3a6b; }
+  .fe-info-etic { font-size: 10px; font-weight: 600; color: #6b7a99; margin-bottom: 1px; }
+  .fe-info-riga:has(> span:empty), .fe-info-riga:has(> div:empty) { display: none; }
+  @media (max-width: 900px) {
+    .fe-info-menu { position: fixed; top: 8px; left: 8px; right: 8px; width: auto; }
+    html.nb-embed .fe-info > summary { display: none; }
+    html.nb-embed .fe-riga-calcolo { margin: 0; }
+    .fe-comandi { flex-direction: column !important; gap: 0 !important;
+      padding: 8px 8px 0 !important; border-bottom: none !important; }
+    /* Tutte le sezioni uguali (23/11/2026): stessi lati di 8 px, stesso rientro,
+       stessa intestazione, 8 px fra una e l'altra. */
+    .fe-corpo-grafici { padding: 0 8px !important; margin-top: 0 !important; }
+    .fe-box { background: transparent !important; border: none !important; padding: 0 !important;
+      flex: 0 0 auto !important; }
+    .fe-sez { display: block; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;
+      padding: 5px 14px 5px 8px; margin: 0 0 8px 0; width: 100%; box-sizing: border-box; }
+    .fe-sez > .nb-espandi-corpo { display: flex; flex-wrap: wrap; gap: 10px 14px;
+      align-items: flex-end; }
+    /* Date a sinistra, come nella Finestra Temporale dell'Analisi Portafoglio. */
+    .fe-sez > .fe-corpo-tempo { align-items: flex-start; }
+    .fe-sez > .nb-espandi-btn { font-size: 12px !important; font-weight: 700 !important;
+      color: #1a3a5c !important; padding: 4px 0 !important; margin: 0 !important; }
+    /* Dentro il Portafoglio il pulsante sta nella riga in alto, accanto al file. */
+    html.nb-embed #fe-calc-btn { display: none !important; }
+    /* Asset, poi frontiera, andamento (legenda in cima) e drawdown, uno sotto l'altro. */
+    .fe-corpo-grafici { flex-direction: column !important; align-items: stretch !important; }
+    .fe-col-asset, .fe-col-grafici { width: 100% !important; box-sizing: border-box; }
+    .fe-col-asset { border-right: none !important; max-height: none !important; overflow: visible !important;
+      background: #f8fafc !important; border: 1px solid #e2e8f0 !important; border-radius: 6px;
+      padding: 5px 14px 5px 8px; margin: 0 0 8px 0; }
+    .fe-col-asset > .nb-espandi-btn { font-size: 12px !important; font-weight: 700 !important;
+      color: #1a3a5c !important; padding: 4px 0 !important; }
+    .fe-col-asset > .nb-espandi-corpo { max-height: 60vh; overflow-y: auto; background: white; }
+    .fe-col-grafici { padding: 0 !important; }
+    .fe-loading-frontiera, .fe-loading-frontiera > div:has(#fe-frontier-chart), #fe-frontier-chart { height: 540px !important; }
+    #fe-drawdown-chart { height: 380px !important; }
+    .fe-sez-graf { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;
+      padding: 5px 14px 5px 8px; margin: 0 0 8px 0; box-sizing: border-box; }
+    .fe-sez-graf > .nb-espandi-btn { font-size: 12px !important; font-weight: 700 !important;
+      color: #1a3a5c !important; padding: 4px 0 !important; margin: 0 !important; }
+    .fe-sez-graf > .nb-espandi-corpo { background: white; }
+  }
 </style>
 </head>
 <body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer>
@@ -187,6 +245,26 @@ app.index_string = '''
     if(el&&!el.contains(e.relatedTarget)){if(_tip){_tip.remove();_tip=null;}}
   },true);
 })();
+</script>
+<script>
+// Sezioni dei grafici sul cellulare: un grafico ridisegnato a sezione chiusa nasce largo 0,
+// quindi alla riapertura si ridimensiona sulla larghezza vera.
+document.addEventListener('click', function(e){
+  var t = e.target.closest && e.target.closest('.fe-sez-graf > .nb-espandi-btn');
+  if (!t) return;
+  setTimeout(function(){
+    t.parentNode.querySelectorAll('.js-plotly-plot').forEach(function(g){
+      if (window.Plotly && g.offsetWidth) window.Plotly.Plots.resize(g);
+    });
+  }, 60);
+});
+</script>
+<script>
+// Menu ⚙: si chiude con un clic fuori.
+document.addEventListener('click', function(e){
+  var d = document.getElementById('fe-info');
+  if (d && d.open && !d.contains(e.target)) d.removeAttribute('open');
+});
 </script>
 <script>
 (function(){
@@ -868,6 +946,8 @@ def _fe_figura(serie, titolo, asse_y, con_legenda):
             title=dict(text=titolo, font=dict(size=13, color='#1a3a6b'), x=0.01,
                        y=1, yanchor='top', yref='container', pad=dict(t=8)),
             margin=dict(**_FE_MARGINE, t=36 + 21 * righe + 12),
+            # 520 px di grafico vero, più la legenda in cima
+            height=520 + 36 + 21 * righe + 12 + _FE_MARGINE.get('b', 40),
         )
     else:
         fig.update_layout(
@@ -885,7 +965,7 @@ def _build_perf_chart(prices_data, chart_assets, frontier_weights, show_frontier
                           date_start, date_end, lambda cum: (cum / cum.iloc[0] - 1) * 100)
         if not serie:
             return _fe_grafico_vuoto()
-        return _fe_figura(serie, 'Andamento — performance cumulativa (%)',
+        return _fe_figura(serie, 'Performance %',
                           'Rendimento cumulativo (%)', con_legenda=True)
     except Exception:
         return _fe_grafico_vuoto()
@@ -906,6 +986,9 @@ def _build_drawdown_chart(prices_data, chart_assets, frontier_weights, show_fron
 # ─────────────────────────────────────────────────────────────────────────────
 # Navbar
 # ─────────────────────────────────────────────────────────────────────────────
+from navbar import legenda_btn
+
+
 def _navbar():
     from navbar import make_navbar
     return make_navbar(current='frontiera')
@@ -929,10 +1012,22 @@ _P_COLORS = {'P1': '#0066cc', 'P2': '#2ca02c', 'P3': '#d62728'}   # = _FC
 
 _FE_CALC_STILE = {'background':'#0066cc','color':'white','border':'none',
                   'padding':'8px 16px','borderRadius':'4px','cursor':'pointer',
-                  'fontWeight':'bold','fontSize':'12px','marginTop':'auto',
+                  'fontWeight':'bold','fontSize':'12px','flex':'1',
                   'boxShadow':'0 2px 6px rgba(0,102,204,0.35)'}
 _FE_CALC_DA_RIFARE = {**_FE_CALC_STILE, 'background':'#e67e22',
                       'boxShadow':'0 2px 6px rgba(230,126,34,0.45)'}
+
+
+def _fe_info_riga(etichetta, valore):
+    """Riga del menu ⚙ (come _pf_info_riga del Portafoglio)."""
+    return html.Div([html.Div(etichetta, className='fe-info-etic'), valore], className='fe-info-riga')
+
+
+def _fe_testa_sez(titolo):
+    """Intestazione di una sezione che esiste solo sul cellulare (come _testa_cell
+    del Portafoglio): sul computer non si vede e i campi restano in riga."""
+    return html.Div(className='nb-espandi-btn nb-testa-cell', children=[
+        titolo, html.I(className='fa-solid fa-chevron-down nb-espandi-ico')])
 
 
 app.layout = html.Div([
@@ -946,12 +1041,17 @@ app.layout = html.Div([
                     html.Div('📈 Frontiere', style={**_FE_TITOLO_BOX, 'marginBottom':'0'}),
                     html.Span('Una frontiera per ogni portafoglio P1/P2/P3 con almeno 2 asset spuntati',
                               style={'fontSize':FONT['xs'],'color':'#6b7a99','fontStyle':'italic'}),
-                ], style={'display':'flex','alignItems':'baseline','gap':'10px','flexWrap':'wrap',
+                ], className='nb-nascondi-cell',
+                   style={'display':'flex','alignItems':'baseline','gap':'10px','flexWrap':'wrap',
                           'marginBottom':'6px'}),
                 html.Div([
+                  # 1) Parametri Frontiere (sezione solo sul cellulare)
+                  html.Div(className='nb-espandi fe-sez', children=[
+                    _fe_testa_sez('Parametri Frontiere'),
+                    html.Div(className='nb-espandi-corpo', children=[
                     html.Div([
-                        html.Span('Punti sulla curva', style=_FE_ETICHETTA),
-                        dcc.Input(id='fe-n-portfolios', type='number', value=15, min=5, max=100,
+                        html.Span('Numero Port.', style=_FE_ETICHETTA),
+                        dcc.Input(id='fe-n-portfolios', type='number', value=10, min=5, max=100,
                                   style=_FE_INPUT),
                     ], style=_FE_CAMPO),
                     html.Div([
@@ -969,6 +1069,12 @@ app.layout = html.Div([
                         dcc.Input(id='fe-rf', type='number', value=2.0, min=0, max=20, step=0.1,
                                   style=_FE_INPUT),
                     ], style=_FE_CAMPO),
+                    ]),
+                  ]),
+                  # 2) Rischi di portafoglio (sezione solo sul cellulare)
+                  html.Div(className='nb-espandi fe-sez', children=[
+                    _fe_testa_sez('Rischi di portafoglio'),
+                    html.Div(className='nb-espandi-corpo', children=[
                     # Una misura di rischio per ogni portafoglio (F1 usa quella di P1, …)
                     *[html.Div([
                         html.Span(f'Rischio {p}', style={**_FE_ETICHETTA, 'color': _P_COLORS[p]}),
@@ -986,9 +1092,8 @@ app.layout = html.Div([
                                   style=_FE_INPUT),
                     ], id='fe-arima-window-div',
                        style={'display':'none','flexDirection':'column','gap':'2px'}),
-                    html.Div(id='fe-arima-cache-status',
-                             style={'display':'none','fontSize':'9px','padding':'2px 6px',
-                                    'borderRadius':'3px','fontWeight':'600'}),
+                    ]),
+                  ]),
                     # Tutto passa dall'unico pulsante generale del Portafoglio (sopra i tab).
                     html.Button('🔄 Importa/Esporta Portafoglio', id='fpio-btn', n_clicks=0,
                                 style={'display': 'none'}),
@@ -996,41 +1101,66 @@ app.layout = html.Div([
                                 title='Salva F1→P1, F2→P2, F3→P3 nella dashboard Analisi Portafoglio',
                                 style={'display':'none'}),
                 ], style={'display':'flex','alignItems':'flex-end','gap':'14px','flexWrap':'wrap'}),
-                # Riepilogo delle frontiere calcolate (Max Sharpe F1/F2/F3, metodo)
-                html.Div(id='fe-stats-panel',
-                         style={'marginTop':'6px','fontSize':'11px','color':'#1a3a5c'}),
                 html.Div(id='fe-save-port-msg', style={'fontSize':'11px','color':'#1a7a4a','fontWeight':'600'}),
             ], className='fe-box', style={**_FE_BOX, 'flex':'1 1 520px'}),
+            # 3) Finestra Temporale: riquadro sul computer, sezione sul cellulare
             html.Div([
-                html.Div('📅 Periodo', style=_FE_TITOLO_BOX),
+              html.Div(className='nb-espandi fe-sez', children=[
+                html.Div(className='nb-espandi-btn', children=[
+                    html.Span('📅 ', className='nb-nascondi-cell'), 'Finestra Temporale',
+                    html.I(className='fa-solid fa-chevron-down nb-espandi-ico'),
+                ], style=_FE_TITOLO_BOX),
+                html.Div(className='nb-espandi-corpo fe-corpo-tempo', children=[
                 html.Div([
                     html.Div([
                         html.Span('Da', style=_FE_ETICHETTA),
-                        dcc.DatePickerSingle(id='fe-date-start',
+                        dcc.DatePickerSingle(id='fe-date-start', first_day_of_week=1, clearable=False,
                             date=(pd.Timestamp.today()-pd.DateOffset(years=10)).strftime('%Y-%m-%d'),
                             display_format='DD/MM/YYYY'),
                     ], style=_FE_CAMPO),
                     html.Div([
                         html.Span('A', style=_FE_ETICHETTA),
-                        dcc.DatePickerSingle(id='fe-date-end',
+                        dcc.DatePickerSingle(id='fe-date-end', first_day_of_week=1, clearable=False,
                             date=pd.Timestamp.today().strftime('%Y-%m-%d'),
                             display_format='DD/MM/YYYY'),
                     ], style=_FE_CAMPO),
                 ], style={'display':'flex','gap':'10px','flexWrap':'wrap'}),
-                html.Span(id='fe-last-updated',
-                          style={'fontSize':FONT['xs'],'color':'#6b7a99','fontStyle':'italic'}),
+                ]),
+              ]),
+              # Fuori dalla sezione, così il menu ⚙ si apre anche a sezione chiusa (cellulare).
+              html.Div([
                 html.Button('Calcola Frontiera', id='fe-calc-btn', n_clicks=0,
                             title='Calcola le frontiere coi parametri impostati',
                             style=_FE_CALC_STILE),
+                # ⚙ Informazioni che non servono subito: fonte dati, numero asset,
+                # stato ARIMA, riepilogo Max Sharpe. Sul cellulare dentro il Portafoglio
+                # lo apre il ⚙ della riga in alto (pf-info-cell).
+                html.Details(id='fe-info', className='fe-info', children=[
+                    html.Summary('⚙', title='Informazioni'),
+                    html.Div(className='fe-info-menu', children=[
+                        html.Div('Informazioni', className='fe-info-titolo'),
+                        _fe_info_riga('Dati', html.Span(id='fe-last-updated')),
+                        _fe_info_riga('Asset', html.Span(id='fe-asset-count')),
+                        html.Div(id='fe-arima-cache-status', style={'display':'none'}),
+                        _fe_info_riga('Riepilogo frontiere',
+                                      html.Div(id='fe-stats-panel',
+                                               style={'display':'flex','flexDirection':'column',
+                                                      'gap':'3px'})),
+                    ]),
+                ]),
+              ], className='fe-riga-calcolo'),
             ], className='fe-box', style={**_FE_BOX, 'flex':'0 0 auto'}),
 
-        ], style={'display':'flex','gap':'8px','flexWrap':'wrap','alignItems':'stretch',
+        ], className='fe-comandi', style={'display':'flex','gap':'8px','flexWrap':'wrap','alignItems':'stretch',
                   'padding':'8px','background':'#f0f4fb','borderBottom':'2px solid #0066cc'}),
 
         # ── Griglia + Grafici ────────────────────────────────────────────────
+        # Sul cellulare in colonna: sezione «Asset» (aperta), frontiera, andamento, drawdown.
         html.Div([
             # Sinistra: asset
             html.Div([
+              _fe_testa_sez('Asset'),
+              html.Div(className='nb-espandi-corpo', children=[
                 html.Div([
                     html.Div('Asset',
                              style={'width':'25%','fontWeight':'bold','fontSize':FONT['xs'],
@@ -1075,14 +1205,14 @@ app.layout = html.Div([
                 ], style={'display':'flex','alignItems':'center','minHeight':'28px',
                           'background':'#e8f0fb','borderBottom':'1px solid #aed6f1',
                           'position':'sticky','top':'0','zIndex':'2'}),
-                html.Div(id='fe-asset-count', style={'fontSize':FONT['sm'],'color':'#555',
-                                                      'padding':'3px 5px'}),
                 html.Div(id='fe-grid', children=[
                     html.Div('Carica i dati e clicca Calcola Frontiera',
                              style={'color':'#888','fontStyle':'italic',
                                     'fontSize':'11px','padding':'12px 8px'})
                 ]),
-            ], style={'width':'35%','overflowY':'auto','borderRight':'1px solid #ccd9ee',
+              ]),
+            ], className='nb-espandi nb-aperto fe-col-asset',
+               style={'width':'35%','overflowY':'auto','borderRight':'1px solid #ccd9ee',
                       'background':'white','maxHeight':'870px'}),
 
             # Destra: grafici — flex-column per riempire esattamente lo spazio disponibile
@@ -1144,45 +1274,64 @@ app.layout = html.Div([
                         style={'width':'100%','height':'9px','background':'#ccd9ee',
                                'borderRadius':'6px','overflow':'hidden'}),
                 ]),
-                dcc.Loading(
-                    type='circle',
-                    color='#1a3a6b',
-                    fullscreen=True,
-                    overlay_style={
-                        'visibility':'visible','opacity':1,
-                        'backgroundColor':'rgba(240,244,251,0.82)',
-                        'zIndex':9999,
-                    },
-                    custom_spinner=html.Div([
-                        html.Div(style={
-                            'width':'52px','height':'52px','border':'5px solid #ccd9ee',
-                            'borderTop':'5px solid #1a3a6b','borderRadius':'50%',
-                            'animation':'fe-spin 0.9s linear infinite','margin':'0 auto',
-                        }),
-                        html.P('Calcolo frontiera in corso…',
-                               style={'color':'#1a3a6b','marginTop':'14px','fontSize':'13px',
-                                      'fontWeight':'600','fontFamily':'Inter, sans-serif',
-                                      'textAlign':'center'}),
-                    ], style={'textAlign':'center','padding':'32px 40px',
-                              'background':'white','borderRadius':'12px',
-                              'boxShadow':'0 4px 24px rgba(26,58,107,0.15)'}),
-                    children=dcc.Graph(id='fe-frontier-chart',
-                                       style={'height':'100%'},
-                                       config={'displayModeBar':True}),
-                    style={'height':'420px'},
-                ),
-                dcc.Graph(id='fe-perf-chart',
-                          style={'height':'460px','marginTop':'6px'},
-                          config={'displayModeBar':True}),
-                dcc.Graph(id='fe-drawdown-chart',
-                          style={'height':'320px','marginTop':'6px'},
-                          config={'displayModeBar':True}),
+                # Sul cellulare: sezione «Frontiera Efficiente» che si apre e chiude
+                # (sul computer l'intestazione è nascosta e il corpo resta aperto).
+                html.Div([
+                    _fe_testa_sez('Frontiera Efficiente'),
+                    html.Div([
+                        legenda_btn('fe-frontier-chart', 'Legenda — Frontiera Efficiente'),
+                        dcc.Loading(
+                            type='circle',
+                            color='#1a3a6b',
+                            fullscreen=True,
+                            overlay_style={
+                                'visibility':'visible','opacity':1,
+                                'backgroundColor':'rgba(240,244,251,0.82)',
+                                'zIndex':9999,
+                            },
+                            custom_spinner=html.Div([
+                                html.Div(style={
+                                    'width':'52px','height':'52px','border':'5px solid #ccd9ee',
+                                    'borderTop':'5px solid #1a3a6b','borderRadius':'50%',
+                                    'animation':'fe-spin 0.9s linear infinite','margin':'0 auto',
+                                }),
+                                html.P('Calcolo frontiera in corso…',
+                                       style={'color':'#1a3a6b','marginTop':'14px','fontSize':'13px',
+                                              'fontWeight':'600','fontFamily':'Inter, sans-serif',
+                                              'textAlign':'center'}),
+                            ], style={'textAlign':'center','padding':'32px 40px',
+                                      'background':'white','borderRadius':'12px',
+                                      'boxShadow':'0 4px 24px rgba(26,58,107,0.15)'}),
+                            children=dcc.Graph(id='fe-frontier-chart',
+                                               style={'height':'620px'},
+                                               config={'displayModeBar':True}),
+                            style={'height':'620px'},
+                            parent_className='fe-loading-frontiera',
+                        ),
+                    ], className='nb-espandi-corpo'),
+                ], className='nb-espandi nb-aperto fe-sez-graf'),
+                # altezza dell'andamento dalla figura (_fe_figura): area del grafico
+                # fissa più la legenda, che cresce col numero di serie
+                html.Div([
+                    _fe_testa_sez('Andamento portafoglio e drawdown'),
+                    html.Div([
+                        legenda_btn('fe-perf-chart', 'Legenda — Andamento e drawdown'),
+                        dcc.Graph(id='fe-perf-chart',
+                                  style={'marginTop':'6px'},
+                                  config={'displayModeBar':True}),
+                        dcc.Graph(id='fe-drawdown-chart',
+                                  style={'height':'520px','marginTop':'6px'},
+                                  config={'displayModeBar':True}),
+                    ], className='nb-espandi-corpo'),
+                ], className='nb-espandi nb-aperto fe-sez-graf'),
                 dcc.Store(id='fe-legenda-sync'),
-            ], style={
+                dcc.Store(id='fe-legenda-cell'),
+                dcc.Store(id='fe-legenda-popup'),
+            ], className='fe-col-grafici', style={
                 'width':'65%','padding':'6px','background':'white',
                 'display':'flex','flexDirection':'column',
             }),
-        ], style={'display':'flex','alignItems':'flex-start'}),
+        ], className='fe-corpo-grafici', style={'display':'flex','alignItems':'flex-start'}),
 
     ], style={'marginTop':'106px'}),
 
@@ -1196,7 +1345,8 @@ app.layout = html.Div([
     dcc.Store(id='fe-f2-weights',      data=None),
     dcc.Store(id='fe-f3-weights',      data=None),
     dcc.Store(id='fe-frontier-rawdata',data=None),
-    dcc.Store(id='fe-param-calcolo',  data=None),   # parametri dell'ultima frontiera disegnata
+    dcc.Store(id='fe-param-calcolo',  data=None),
+    dcc.Store(id='fe-date-init',      data=None),   # fa partire _fe_date_iniziali all'apertura   # parametri dell'ultima frontiera disegnata
     dcc.Store(id='fe-selected-pt',     data=None),
     dcc.Store(id='fe-arima-reqid',     data=None),
     dcc.Interval(id='fe-arima-poll',   interval=600, n_intervals=0, disabled=True),
@@ -1520,6 +1670,24 @@ def build_grid_on_load(loaded, stock_data, _sync_sig, rawdata):
 # su Calcola Frontiera. (Era auto_calc_on_open; fe-auto-calc-flag resta nel layout.)
 
 
+# Finestra Temporale all'apertura: stessa regola dell'Analisi Portafoglio
+# (sync_date_range): 10 anni fa → oggi, ristretti ai dati di current.json. Il layout
+# è statico, quindi le date scritte lì sarebbero quelle dell'avvio del processo.
+@app.callback(
+    Output('fe-date-start', 'date'),
+    Output('fe-date-end',   'date'),
+    Input('fe-date-init',   'data'),
+)
+def _fe_date_iniziali(_):
+    oggi = pd.Timestamp.today().normalize()
+    inizio, fine = oggi - pd.DateOffset(years=10), oggi
+    date = [d for v in _read_user_json().values() for d in (v.get('dates') or [])[:1] + (v.get('dates') or [])[-1:]]
+    if date:
+        dmin, dmax = pd.Timestamp(min(date)), pd.Timestamp(max(date))
+        inizio, fine = max(dmin, inizio), min(dmax, fine)
+    return inizio.strftime('%Y-%m-%d'), fine.strftime('%Y-%m-%d')
+
+
 # Cambio di parametri (date, «Finestra gg», rischio P1/P2/P3, punti, pesi, risk free)
 # con una frontiera già disegnata: NON si ricalcola (scelta dell'utente, più calcoli di
 # fila appesantivano il server). Il pulsante diventa arancione finché non si ripreme
@@ -1531,32 +1699,42 @@ _FE_PARAMETRI = [('fe-date-start', 'date'), ('fe-date-end', 'date'), ('fe-arima-
                  ({'type':'fe-p2','index':ALL}, 'value'), ({'type':'fe-p3','index':ALL}, 'value')]
 
 
-def _firma_parametri(valori):
-    return json.dumps(valori, sort_keys=True, default=str)
-
-
+# Pulsante arancione «⟳ Ricalcola» quando i parametri (spunte P1/P2/P3 comprese)
+# non sono più quelli dell'ultima frontiera. Tutto nel browser (23/11/2026): una
+# spunta tolta o rimessa non deve far partire niente sul server; si calcola solo
+# premendo il pulsante.
 # Arriva una frontiera nuova: si annotano i parametri con cui è stata disegnata.
-@app.callback(
+app.clientside_callback(
+    """function(rawdata) {
+        if (!rawdata) return null;
+        return JSON.stringify(Array.prototype.slice.call(arguments, 1));
+    }""",
     Output('fe-param-calcolo', 'data'),
     Input('fe-frontier-rawdata', 'data'),
     *[State(i, pr) for i, pr in _FE_PARAMETRI],
     prevent_initial_call=True,
 )
-def _annota_parametri(rawdata, *valori):
-    return _firma_parametri(list(valori)) if rawdata else None
 
 
-@app.callback(
+app.clientside_callback(
+    """function(firma) {
+        var ora = JSON.stringify(Array.prototype.slice.call(arguments, 1));
+        var rifare = !!firma && ora !== firma;
+        // Dentro il Portafoglio sul cellulare il pulsante sta nella riga in alto.
+        try {
+            var b = window.parent !== window &&
+                    window.parent.document.getElementById('pf-ricalcola-cell');
+            if (b) b.style.backgroundColor = rifare ? '#e67e22' : '#0066cc';
+        } catch (e) {}
+        if (!rifare) return ['Calcola Frontiera', %s];
+        return ['⟳ Ricalcola Frontiera', %s];
+    }""" % (json.dumps(_FE_CALC_STILE), json.dumps(_FE_CALC_DA_RIFARE)),
     Output('fe-calc-btn', 'children'),
     Output('fe-calc-btn', 'style'),
     Input('fe-param-calcolo', 'data'),
     *[Input(i, pr) for i, pr in _FE_PARAMETRI],
     prevent_initial_call=True,
 )
-def _calcola_da_rifare(firma, *valori):
-    if not firma or _firma_parametri(list(valori)) == firma:
-        return 'Calcola Frontiera', _FE_CALC_STILE
-    return '⟳ Ricalcola Frontiera', _FE_CALC_DA_RIFARE
 
 
 # Quando cambia la LISTA asset (es. cancelli un asset in Analisi Portafoglio),
@@ -1615,7 +1793,7 @@ def _asset_nei_portafogli(*liste):
 #   ARIMA+GARCH: μ e σ dal file personale arima_garch.json (ultimi 250 rendimenti di
 #     ogni asset, date ignorate), correlazioni sugli ultimi 250 giorni.
 _NOME_MISURA = dict(_MISURE)
-_ASSE_MISURA = {'standard': 'Volatilità', 'vol': 'Volatilità [fin.]', 'cvar90': 'CVaR 90%',
+_ASSE_MISURA = {'standard': 'Rischio', 'vol': 'Rischio [fin.]', 'cvar90': 'CVaR 90%',
                 'cvar95': 'CVaR 95%', 'arima_garch': 'Vol GARCH'}
 _P_DI = {'F1': 'P1', 'F2': 'P2', 'F3': 'P3'}
 
@@ -1694,6 +1872,7 @@ def _punti_asset(fig, returns_df, assets, gruppi, misure, finestra_vol, arima, r
             fig.add_trace(go.Scatter(
                 x=[None], y=[None], mode='markers', name=f'Asset {p}',
                 legendgroup=gruppo, showlegend=True, hoverinfo='skip',
+                legendrank=_rango(p, 'asset'),
                 marker=dict(size=8, symbol='circle', color=colore, opacity=0.8)))
         for asset in assets:
             st = st_p if (st_p is not None and asset in st_p[0].columns) else None
@@ -1734,6 +1913,43 @@ def _fig_senza_portafogli():
                           showarrow=False, font=dict(size=13, color='#6b7a99'))])
 
 
+# ── Legenda della frontiera per colore (23/11/2026) ────────────────────────
+# Una riga per portafoglio, nell'ordine P1 blu, P2 verde, P3 rosso; dentro la riga
+# Max Sharpe, linea della frontiera (con la sua CML), asset, rombo dell'Analisi.
+# Ogni voce si spegne/accende col clic come le altre.
+_RANGO_P = {'P1': 100, 'P2': 200, 'P3': 300, 'F1': 100, 'F2': 200, 'F3': 300}
+_RANGO_VOCE = {'sharpe': 1, 'frontiera': 2, 'asset': 3, 'analisi': 4}
+
+
+def _rango(p, voce):
+    return _RANGO_P[p] + _RANGO_VOCE[voce]
+
+
+def _ordina_legenda(fig):
+    """Una riga di legenda per colore: completa le righe più corte con voci vuote
+    (trasparenti, senza dati) così ogni portafoglio comincia a capo. Restituisce il
+    margine alto che serve."""
+    conta = {}
+    for t in fig.data:
+        if t.showlegend is False or t.legendrank is None:
+            continue
+        r = int(t.legendrank) // 100
+        conta[r] = conta.get(r, 0) + 1
+    if not conta:
+        return 80
+    n = max(conta.values())
+    for r, c in conta.items():
+        for k in range(n - c):
+            fig.add_trace(go.Scatter(
+                x=[None], y=[None], mode='markers', name=' ', showlegend=True,
+                legendrank=r * 100 + 50 + k, legendgroup=f'vuoto-{r}-{k}',
+                hoverinfo='skip', marker=dict(opacity=0)))
+    fig.update_layout(legend=dict(
+        orientation='h', traceorder='normal', entrywidthmode='fraction', entrywidth=1 / n,
+        yanchor='bottom', y=1.02, xanchor='left', x=0))
+    return 46 + 22 * len(conta)
+
+
 def _punti_portafogli(fig, returns_df, misure, finestra_vol, arima=None, returns_all=None):
     """P1/P2/P3 dell'Analisi Portafoglio (pesi di current.json) come rombi, ognuno con
     la misura di rischio e il campione del proprio portafoglio. Restituisce i P disegnati."""
@@ -1755,7 +1971,8 @@ def _punti_portafogli(fig, returns_df, misure, finestra_vol, arima=None, returns
         hover_lines = '<br>'.join(f'{a}: {wi*100:.1f}%' for a, wi in zip(assets, w))
         fig.add_trace(go.Scatter(
             x=[v_p * 100], y=[r_p * 100],
-            mode='markers+text', name=pname,
+            mode='markers+text', name=f'{pname} Analisi',
+            legendrank=_rango(pname, 'analisi'), legendgroup=f'analisi-{pname}',
             marker=dict(size=14, symbol='diamond', color=pcolor,
                         line=dict(color='white', width=1.5)),
             text=[pname], textposition='top center',
@@ -1784,9 +2001,9 @@ _TENDINE_RISCHIO = ('fe-risk-p1', 'fe-risk-p2', 'fe-risk-p3')
 
 @app.callback(
     Output('fe-frontier-chart', 'figure', allow_duplicate=True),
-    Input({'type':'fe-p1','index':ALL}, 'value'),
-    Input({'type':'fe-p2','index':ALL}, 'value'),
-    Input({'type':'fe-p3','index':ALL}, 'value'),
+    # Le spunte P1/P2/P3 sono State (23/11/2026): toglierne una non fa partire niente,
+    # vale solo al prossimo «Calcola». Si ridisegna quando arriva la griglia.
+    Input('fe-grid',             'children'),
     Input('fe-risk-p1',          'value'),
     Input('fe-risk-p2',          'value'),
     Input('fe-risk-p3',          'value'),
@@ -1796,10 +2013,14 @@ _TENDINE_RISCHIO = ('fe-risk-p1', 'fe-risk-p2', 'fe-risk-p3')
     State('fe-date-end',         'date'),
     State('fe-arima-window',     'value'),
     State('fe-frontier-chart',   'figure'),
+    State({'type':'fe-p1','index':ALL}, 'value'),
+    State({'type':'fe-p2','index':ALL}, 'value'),
+    State({'type':'fe-p3','index':ALL}, 'value'),
     prevent_initial_call=True,
 )
-def preview_asset_points(p1_vals, p2_vals, p3_vals, r1, r2, r3, stock_data, rawdata,
-                         date_start, date_end, arima_window, fig_attuale=None):
+def preview_asset_points(_griglia, r1, r2, r3, stock_data, rawdata,
+                         date_start, date_end, arima_window, fig_attuale=None,
+                         p1_vals=None, p2_vals=None, p3_vals=None):
     # Frontiera già calcolata → il grafico lo disegna calc_and_render (un cambio di
     # misura non ricalcola: si ripreme Calcola); qui si accendono/spengono soltanto
     # i punti degli asset secondo le spunte P1/P2/P3.
@@ -1847,15 +2068,14 @@ def preview_asset_points(p1_vals, p2_vals, p3_vals, r1, r2, r3, stock_data, rawd
 
     usati = [p for p in ('P1', 'P2', 'P3') if p in disegnati or gruppi.get(p)]
     fig.update_layout(
-        title=dict(text='Rendimento / Rischio — asset selezionati',
-                   font=dict(size=14, color='#1a3a6b'), x=0.02),
         xaxis=dict(title=_etichetta_asse([(p, misure[p]) for p in usati]),
                    gridcolor='#e8eef8', zeroline=False),
         yaxis=dict(title='Rendimento Atteso Ann. (%)', gridcolor='#e8eef8', zeroline=False),
         paper_bgcolor='white', plot_bgcolor='#f8faff',
         font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
-        margin=dict(l=50, r=30, t=80, b=40), hovermode='closest',
+        hovermode='closest',
     )
+    fig.update_layout(margin=dict(l=50, r=30, t=_ordina_legenda(fig), b=40))
     return fig
 
 
@@ -1930,6 +2150,101 @@ app.clientside_callback(
     Output('fe-legenda-sync', 'data'),
     Input('fe-perf-chart', 'restyleData'),
     prevent_initial_call=True,
+)
+
+
+# Popup del nome intero sulle voci delle legende (Andamento e Frontiera) che non ci stanno nella
+# loro colonna (Plotly le taglia senza «…»): data-tooltip sulla voce, lo mostra lo
+# script globale dell'index_string, bordo del colore della linea. Si rifà a ogni
+# plotly_afterplot, perché Plotly ridisegna le voci a ogni clic sulla legenda.
+app.clientside_callback(
+    """
+    function(fig, figFrontiera) {
+        var nu = window.dash_clientside.no_update;
+        setTimeout(function() { ['fe-perf-chart', 'fe-frontier-chart'].forEach(function(id) {
+            var gd = document.getElementById(id);
+            gd = gd && (gd.classList.contains('js-plotly-plot') ? gd : gd.querySelector('.js-plotly-plot'));
+            if (!gd || !gd.on) { return; }
+            function marca() {
+                var voci = gd.querySelectorAll('.legend .traces');
+                if (!voci.length) { return; }
+                var xs = [];
+                voci.forEach(function(v) {
+                    var m = /translate\\(([-\\d.]+)/.exec(v.getAttribute('transform') || '');
+                    var x = m ? parseFloat(m[1]) : 0;
+                    if (xs.indexOf(x) < 0) { xs.push(x); }
+                });
+                xs.sort(function(a, b) { return a - b; });
+                var bg = gd.querySelector('.legend .bg');
+                var larga = bg ? parseFloat(bg.getAttribute('width')) : gd.clientWidth;
+                var colori = {};
+                (gd.data || []).forEach(function(t) {
+                    colori[t.name] = (t.line && t.line.color) || (t.marker && t.marker.color) || '#1a3a6b';
+                });
+                voci.forEach(function(v) {
+                    var txt = v.querySelector('text.legendtext');
+                    if (!txt) { return; }
+                    var m = /translate\\(([-\\d.]+)/.exec(v.getAttribute('transform') || '');
+                    var x = m ? parseFloat(m[1]) : 0;
+                    var i = xs.indexOf(x);
+                    var fine = (i >= 0 && i < xs.length - 1) ? xs[i + 1] : larga;
+                    var nome = txt.textContent;
+                    var lungo = txt.getComputedTextLength() > fine - x - 40 - 2;
+                    if (lungo && nome.trim()) {
+                        v.setAttribute('data-tooltip', nome);
+                        v.setAttribute('data-tooltip-color', colori[nome] || '#1a3a6b');
+                    } else {
+                        v.removeAttribute('data-tooltip');
+                    }
+                });
+            }
+            if (!gd._fePopupLegenda) {
+                gd._fePopupLegenda = true;
+                gd.on('plotly_afterplot', marca);
+            }
+            marca();
+        }); }, 120);
+        return nu;
+    }
+    """,
+    Output('fe-legenda-popup', 'data'),
+    Input('fe-perf-chart', 'figure'),
+    Input('fe-frontier-chart', 'figure'),
+)
+
+
+# Legenda della frontiera su schermo stretto: il server la fa con tutte le voci di un
+# portafoglio su una riga (entrywidth 1/n), che sotto i 600 px si sovrappongono. Qui
+# il browser la porta a due voci per riga e alza il margine di conseguenza; i colori
+# restano insieme perché l'ordine viene da legendrank.
+app.clientside_callback(
+    """
+    function(fig) {
+        var nu = window.dash_clientside.no_update;
+        if (!fig || window.innerWidth > 600) { return nu; }
+        setTimeout(function() {
+            var gd = document.getElementById('fe-frontier-chart');
+            gd = gd && (gd.classList.contains('js-plotly-plot') ? gd : gd.querySelector('.js-plotly-plot'));
+            if (!gd || !gd.data || !window.Plotly) { return; }
+            var righe = {};
+            gd.data.forEach(function(t) {
+                if (t.showlegend === false || t.legendrank === undefined) { return; }
+                righe[Math.floor(t.legendrank / 100)] = 1;
+            });
+            var n = Object.keys(righe).length;
+            if (!n) { return; }
+            window.Plotly.relayout(gd, {'legend.entrywidth': 0.5,
+                                        'legend.entrywidthmode': 'fraction',
+                                        'legend.font.size': 11,
+                                        'title.yref': 'container', 'title.y': 0.995,
+                                        'title.yanchor': 'top',
+                                        'margin.t': 70 + 40 * n});
+        }, 50);
+        return nu;
+    }
+    """,
+    Output('fe-legenda-cell', 'data'),
+    Input('fe-frontier-chart', 'figure'),
 )
 
 
@@ -2066,7 +2381,7 @@ def calc_and_render(n, stock_data, prices_data,
     wmin_f = (wmin or 0) / 100
     wmax_f = (wmax or 100) / 100
     rf_f   = (rf or 2.0) / 100
-    n_f    = int(n_port or 15)
+    n_f    = int(n_port or 10)
 
     # ── ARIMA+GARCH: stime dal file personale; gli asset che mancano si calcolano
     # in background (barra di avanzamento), poi on_arima_done ripreme Calcola.
@@ -2165,6 +2480,7 @@ def calc_and_render(n, stock_data, prices_data,
             fig.add_trace(go.Scatter(
                 x=df_f['Volatility'] * 100, y=df_f['Return'] * 100,
                 mode='lines+markers', name=f'Frontiera {fname} · {nome_m}',
+                legendrank=_rango(fname, 'frontiera'), legendgroup=f'frontiera-{fname}',
                 line=dict(color=fcolor, width=2),
                 marker=dict(size=6),
                 customdata=cd,
@@ -2175,7 +2491,7 @@ def calc_and_render(n, stock_data, prices_data,
             vr = np.linspace(0, ms['Volatility'] * 1.8, 100)
             fig.add_trace(go.Scatter(
                 x=vr * 100, y=(rf_f + ms['Sharpe'] * vr) * 100,
-                mode='lines', name=f'CML {fname}',
+                mode='lines', name=f'CML {fname}', legendgroup=f'frontiera-{fname}',
                 line=dict(color=cml_col, dash='dash', width=1.5), showlegend=False,
                 hovertemplate=f'<b>CML {fname}</b><br>%{{x:.2f}}% → %{{y:.2f}}%<extra></extra>',
             ))
@@ -2184,6 +2500,7 @@ def calc_and_render(n, stock_data, prices_data,
             fig.add_trace(go.Scatter(
                 x=[ms['Volatility'] * 100], y=[ms['Return'] * 100],
                 mode='markers', name=f'Max Sharpe {fname}',
+                legendrank=_rango(fname, 'sharpe'), legendgroup=f'sharpe-{fname}',
                 marker=dict(symbol='circle', size=14, color=fcolor,
                             line=dict(color='#1a1a1a', width=1.2)),
                 customdata=[[fname, idx_ms, 'sharpe']],
@@ -2205,9 +2522,9 @@ def calc_and_render(n, stock_data, prices_data,
         yaxis=dict(title='Rendimento Atteso Ann. (%)', gridcolor='#e8eef8', zeroline=False),
         paper_bgcolor='white', plot_bgcolor='#f8faff',
         font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
-        margin=dict(l=50, r=30, t=80, b=40), hovermode='closest',
+        hovermode='closest',
     )
+    fig.update_layout(margin=dict(l=50, r=30, t=_ordina_legenda(fig), b=40))
 
     # ── Performance e Drawdown chart ─────────────────────────────────────────
     # F1 spuntato di default solo se non c'era ancora nessuna riga di frontiera

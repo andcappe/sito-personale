@@ -111,7 +111,7 @@ app.index_string = '''
     .pf-hr { display: none !important; }
     .pf-corpo { border-bottom: none !important; }
   }
-  /* Range temporale: date compatte come nel riquadro «Periodo» della Frontiera. */
+  /* Finestra Temporale: date compatte come nella «Finestra Temporale» della Frontiera. */
   .pf-date .SingleDatePickerInput { border: 1px solid #ccd9ee; border-radius: 4px; }
   .pf-date .DateInput { width: 104px; }
   .pf-date .DateInput_input { font-size: 13px; padding: 4px 8px; height: 28px; line-height: 20px; }
@@ -125,6 +125,8 @@ app.index_string = '''
     0%   { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
   }
+  /* Doppioni della riga in alto sul cellulare: si nasconde quello del tab non attivo. */
+  html body .pf-via { display: none !important; }
 </style>
 </head>
 <body>
@@ -133,6 +135,37 @@ app.index_string = '''
 <script>
 // Menu «Strumenti»: si chiude con un clic fuori o dopo aver scelto una voce
 // (setTimeout: il clic deve prima arrivare al pulsante o al campo file).
+// «Ricalcola Frontiera» della riga in alto (cellulare): preme il pulsante vero
+// dentro l'iframe della Frontiera (stessa origine).
+document.addEventListener('click', function(e){
+  if (!e.target.closest) return;
+  var calc = e.target.closest('#pf-ricalcola-cell'), info = e.target.closest('#pf-info-cell');
+  var pop = document.getElementById('pf-info-pop');
+  if (pop && !info && !pop.contains(e.target)) pop.remove();
+  if (!calc && !info) return;
+  // ⚙ sul tab Analisi: copia del menu «Descrizione dati tabella», che sta nei Parametri
+  // (sezione che sul cellulare può essere chiusa). Sola lettura, senza id doppi.
+  if (info && info.getAttribute('data-tab') !== 'tab-frontiera') {
+    if (pop) { pop.remove(); return; }
+    var orig = document.querySelector('.pf-info > .pf-strumenti-menu');
+    if (!orig) return;
+    pop = orig.cloneNode(true);
+    pop.id = 'pf-info-pop';
+    pop.querySelectorAll('[id]').forEach(function(n){ n.removeAttribute('id'); });
+    var r = info.getBoundingClientRect();
+    pop.style.cssText = 'position:fixed;left:16px;right:16px;top:' + Math.round(r.bottom + 6) + 'px;' +
+      'z-index:2000;background:#fff;border:1px solid #ccd9ee;border-radius:6px;padding:10px 12px;' +
+      'box-shadow:0 6px 18px rgba(26,58,107,0.18);display:flex;flex-direction:column;';
+    document.body.appendChild(pop);
+    return;
+  }
+  try {
+    var f = document.getElementById('iframe-frontiera');
+    var b = f && f.contentDocument && f.contentDocument.getElementById(calc ? 'fe-calc-btn' : 'fe-info');
+    if (b && calc) b.click();
+    if (b && info) { if (b.open) b.removeAttribute('open'); else b.setAttribute('open', ''); }
+  } catch (err) {}
+});
 document.addEventListener('click', function(e){
   document.querySelectorAll('details.pf-strumenti[open]').forEach(function(d){
     var dentro = d.contains(e.target);
@@ -185,7 +218,7 @@ _FOTO_PNG = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file_
 _FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
 
 _FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES', 'VALUTE']
-from navbar import ETICHETTA_PERSONALE
+from navbar import ETICHETTA_PERSONALE, legenda_btn
 from settings.caratteri import NOME_ASSET
 _PERSONALE_OPT = {'label': ETICHETTA_PERSONALE, 'value': '__personale__'}
 
@@ -488,12 +521,20 @@ def _rebalanced_cum(rets_df, weights):
     return result * (tot / 100.0)
 
 def calculate_historical_cvar(returns_series, window, tail_pct=0.05):
+    """CVaR storico (expected shortfall, VaR condizionale): media del tail_pct peggiore
+    (0.10 → 90%, 0.05 → 95%) dei rendimenti composti a N=window giorni, sulla
+    distribuzione espansa di tutto ciò che si è visto fino a t. Non è il VaR (quantile)."""
     # Rendimenti composti rolling a N giorni
     n_day_ret = (1 + returns_series).rolling(window, min_periods=window).apply(np.prod, raw=True) - 1
-    # CVaR calcolato sulla distribuzione espansa di tutti i rendimenti N-giorni visti fino a t
     def _cvar(w):
+        # I NaN (primi N-1 giorni, giorni prima che l'asset esistesse) non sono
+        # osservazioni: contati nella dimensione della coda la allargavano fin verso la
+        # mediana, tanto più quanto l'asset è giovane rispetto al range.
+        w = w[~np.isnan(w)]
+        if not len(w):
+            return np.nan
         n_tail = max(1, int(len(w) * tail_pct))
-        return np.partition(w, n_tail)[:n_tail].mean()
+        return np.partition(w, n_tail - 1)[:n_tail].mean()
     return n_day_ret.expanding(min_periods=window + 1).apply(_cvar, raw=True)
 
 def _rolling_volatility(returns_series, window):
@@ -2898,41 +2939,34 @@ def get_date_range_bar(suffix):
     _today         = pd.Timestamp.today().normalize()
     _ten_years_ago = (_today - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
     _today_str     = _today.strftime('%Y-%m-%d')
-    # Sul cellulare è una sezione espandibile (chiusa all'apertura) e le due date
-    # stanno in una griglia 2×2 (etichetta | data); sul computer resta la riga unica di sempre.
+    # Sul cellulare è una sezione espandibile (chiusa all'apertura). Nome, etichette
+    # «Da»/«A» sopra le date e calendario sono gli stessi della «Finestra Temporale»
+    # di Frontiera (23/11/2026): se cambi qui, cambia anche lì.
     _riga = {'display': 'flex', 'align-items': 'center', 'gap': '4px'}
-    # Sul computer: etichetta piccola sopra la data, come in Frontiera (sul
-    # cellulare nb-riga-data è display: contents, quindi questo non conta).
+    # Etichetta piccola sopra la data, come in Frontiera, su computer e cellulare.
     _campo = {'display': 'flex', 'flex-direction': 'column', 'gap': '2px'}
     _etic = {'font-size': '11px', 'color': '#6b7a99', 'font-weight': '600', 'white-space': 'nowrap'}
     return html.Div(className='nb-piena', children=[
         html.Div(className='nb-espandi nb-a-capo pf-sez', children=[
             html.Div(className='nb-espandi-btn', children=[
-                html.Span('📅 ', className='nb-nascondi-cell'), 'Range temporale',
-                html.Span(':', className='nb-nascondi-cell'),
+                html.Span('📅 ', className='nb-nascondi-cell'), 'Finestra Temporale',
                 html.I(className='fa-solid fa-chevron-down nb-espandi-ico'),
             ], style={'font-size': '11px', 'font-weight': 'bold',
                       'color': '#1a3a5c', 'white-space': 'nowrap',
                       'margin-right': '10px', 'padding-bottom': '8px'}),
-            html.Div(className='nb-espandi-corpo nb-griglia-date pf-date', style={**_riga, 'gap': '10px'}, children=[
+            html.Div(className='nb-espandi-corpo pf-date', style={**_riga, 'gap': '10px'}, children=[
                 html.Div([
-                    html.Div([html.Span('Da', className='nb-nascondi-cell'),
-                              html.Span('Finestra temporale Inizio:', className='nb-solo-cell')],
-                             className='nb-etic-data',
-                             style=_etic),
+                    html.Div('Da', className='nb-etic-data', style=_etic),
                     dcc.DatePickerSingle(id=f'dr-start-{suffix}', display_format='DD/MM/YYYY',
                                          first_day_of_week=1, date=_ten_years_ago,
                                          clearable=False),
-                ], className='nb-riga-data', style=_campo),
+                ], style=_campo),
                 html.Div([
-                    html.Div([html.Span('A', className='nb-nascondi-cell'),
-                              html.Span('Finestra temporale Fine:', className='nb-solo-cell')],
-                             className='nb-etic-data',
-                             style=_etic),
+                    html.Div('A', className='nb-etic-data', style=_etic),
                     dcc.DatePickerSingle(id=f'dr-end-{suffix}', display_format='DD/MM/YYYY',
                                          first_day_of_week=1, date=_today_str,
                                          clearable=False),
-                ], className='nb-riga-data', style=_campo),
+                ], style=_campo),
                 # Il periodo effettivo dei dati: solo sul computer. In Analisi
                 # Portafoglio (tab1) sta nel menu «Descrizione dati tabella».
                 *([] if suffix == 'tab1' else [html.Div(id=f'dr-label-{suffix}', className='nb-nascondi-cell',
@@ -3225,7 +3259,7 @@ def get_rolling_analysis_tab():
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout Tab 1
 # ─────────────────────────────────────────────────────────────────────────────
-# Gli indicatori (AKRatio, Sharpe, TEV, DrawDown, Volatilità, VaR) non hanno più una
+# Gli indicatori (AKRatio, Sharpe, TEV, DrawDown, Volatilità, CVaR) non hanno più una
 # colonna di spunte: update_graph li disegna tutti per ogni titolo spuntato in CH.
 _LARG_NOME, _LARG_CH, _LARG_PESO = '34%', '6%', '17%'
 _COLONNE_ASSET = [   # larghezza, etichetta, colore, tooltip, id del pulsante ☑
@@ -3285,7 +3319,7 @@ def get_portfolio_analysis_tab(options_tickers):
             # (nb-espandi / nb-espandi-btn / nb-espandi-corpo, CSS e JS in navbar.py).
             html.Div(className='nb-espandi pf-sez', children=[
                 html.Span(className='nb-espandi-btn', children=[
-                    'Parametri indicatori di rischio', html.Span(':', className='nb-nascondi-cell'),
+                    'Parametri', html.Span(':', className='nb-nascondi-cell'),
                     html.I(className='fa-solid fa-chevron-down nb-espandi-ico'),
                 ], style={'margin-right': '10px', 'white-space': 'nowrap',
                           'font-size': '12px', 'font-weight': '700',
@@ -3368,8 +3402,9 @@ def get_portfolio_analysis_tab(options_tickers):
                         ]),
                     ]),
                     # Descrizione dati tabella: numero asset e periodo, tolti dallo schermo.
+                    # Sul cellulare il pulsante è il ⚙ della riga in alto (pf-info-cell).
                     # Gli id asset-count-display e dr-label-tab1 sono gli stessi di prima.
-                    html.Details(className='pf-strumenti pf-info', style={'margin-left': '4px'}, children=[
+                    html.Details(className='pf-strumenti pf-info nb-nascondi-cell', style={'margin-left': '4px'}, children=[
                         html.Summary(html.I(className='fa-solid fa-gear'),
                                      title='Descrizione dati tabella',
                                      style={**_PF_BTN_PRINCIPALE, 'padding': '6px 9px'}),
@@ -3476,6 +3511,7 @@ def get_portfolio_analysis_tab(options_tickers):
                 html.Div([
                   _testa_cell('Grafici'),
                   html.Div(className='nb-espandi-corpo', children=[
+                    legenda_btn('controls-and-graph', 'Legenda — Analisi Portafoglio'),
                     dcc.Loading(
                         id='graph-loading',
                         target_components={'controls-and-graph': 'figure'},
@@ -3654,11 +3690,24 @@ app.layout = html.Div([
             dcc.Dropdown(id='file-selector', options=_list_files(),
                          value='ETF.xlsx', clearable=False,
                          style={'width': '200px', 'font-size': '11px'}, optionHeight=28),
-            html.Button('Update', className='nb-solo-cell nb-clicca',
+            html.Button('Update', id='pf-update-cell', className='nb-solo-cell nb-clicca',
                         **{'data-bersaglio': 'update-portfolio-button'},
                         # senza 'display': lo decide nb-solo-cell (nascosto sul computer)
                         style={**{k: v for k, v in _PF_BTN_PRINCIPALE.items() if k != 'display'},
                                'padding': '7px 12px', 'margin-left': '8px'}),
+            # Sul tab Frontiera, al posto di Update: preme «Calcola Frontiera» nell'iframe
+            # (script nell'index_string); il colore lo copia la Frontiera (arancione =
+            # parametri cambiati).
+            html.Button('⟳ Ricalcola Frontiera', id='pf-ricalcola-cell', className='nb-solo-cell pf-via',
+                        style={**{k: v for k, v in _PF_BTN_PRINCIPALE.items() if k != 'display'},
+                               'background-color': '#0066cc', 'white-space': 'nowrap',
+                               'padding': '7px 12px', 'margin-left': '8px'}),
+            # ⚙ accanto: sul tab Analisi mostra «Descrizione dati tabella», sul tab Frontiera
+            # apre il menu informazioni della Frontiera (fe-info nell'iframe).
+            html.Button('⚙', id='pf-info-cell', className='nb-solo-cell', title='Informazioni',
+                        style={**{k: v for k, v in _PF_BTN_PRINCIPALE.items() if k != 'display'},
+                               'background-color': '#0066cc', 'padding': '7px 10px',
+                               'margin-left': '6px'}),
         ], className='nb-piena nb-riga-cresci',
            style={'display': 'flex', 'align-items': 'center', 'margin-right': '12px'}),
 
@@ -4787,6 +4836,29 @@ def render_tab1(active_tab, options_tickers):
     return get_portfolio_analysis_tab(options_tickers), show, hide, hide, hide, hide, hide
 
 
+# Riga in alto sul cellulare: sul tab Frontiera «Ricalcola Frontiera» prende il posto di Update.
+app.clientside_callback(
+    """function(tab) {
+        var fr = tab === 'tab-frontiera';
+        var r = document.getElementById('pf-ricalcola-cell');
+        if (r) r.style.backgroundColor = '#0066cc';   // l'iframe riparte senza frontiera
+        // ⚙ sul tab Analisi (menu «Descrizione dati tabella») e sul tab Frontiera (fe-info)
+        var info = fr || tab === 'tab-portfolio';
+        var g = document.getElementById('pf-info-cell');
+        if (g) g.setAttribute('data-tab', tab || '');
+        var pop = document.getElementById('pf-info-pop');
+        if (pop) pop.remove();
+        return [fr ? 'nb-solo-cell nb-clicca pf-via' : 'nb-solo-cell nb-clicca',
+                fr ? 'nb-solo-cell' : 'nb-solo-cell pf-via',
+                info ? 'nb-solo-cell' : 'nb-solo-cell pf-via'];
+    }""",
+    Output('pf-update-cell', 'className'),
+    Output('pf-ricalcola-cell', 'className'),
+    Output('pf-info-cell', 'className'),
+    Input('main-tabs', 'value'),
+)
+
+
 # Carica/ricarica l'iframe (fresco, anti-cache) quando si apre il relativo tab
 @app.callback(
     Output('iframe-frontiera',  'src'),
@@ -5410,7 +5482,7 @@ def calcola_rolling(n_clicks, bm_scelto, bm, cmp1, extra1, extra2,
     except Exception:
         d_ini, d_fin = None, None
     if d_ini is None or d_fin is None or d_ini >= d_fin:
-        msg = _roll_vuoto('Range temporale non valido.', '#c0392b')
+        msg = _roll_vuoto('Finestra temporale non valida.', '#c0392b')
         return msg, msg, msg, None, '⚠ Controlla le date.'
 
     # Si scarica anche PRIMA della data iniziale: una finestra di N anni ha il
@@ -7666,8 +7738,6 @@ def _pf_info_periodo(s, e, ts_min, ts_max):
 )
 def sync_date_range(stock_data, start_date, end_date):
     ctx = callback_context
-    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ''
-
     if not stock_data:
         raise PreventUpdate
 
@@ -7678,7 +7748,9 @@ def sync_date_range(stock_data, start_date, end_date):
     ts_min = int(df.index.min().timestamp())
     ts_max = int(df.index.max().timestamp())
 
-    if triggered_id == 'stock-data':
+    # Anche la chiamata iniziale (triggered_id None): sul cellulare stock-data è già
+    # pronto quando parte, e prima la data finale restava «oggi» invece dell'ultimo dato.
+    if ctx.triggered_id in (None, 'stock-data'):
         # Inizializzazione: 10 anni fa → oggi, clampati al range dei dati
         today         = pd.Timestamp.today().normalize()
         ten_years_ago = today - pd.DateOffset(years=10)
@@ -7695,10 +7767,16 @@ def sync_date_range(stock_data, start_date, end_date):
     except Exception:
         s, e = ts_min, ts_max
 
+    s0, e0 = s, e
     s = max(ts_min, min(s, ts_max))
     e = max(ts_min, min(e, ts_max))
 
-    return no_update, no_update, _pf_info_periodo(s, e, ts_min, ts_max), [s, e]
+    # Data fuori dai dati (anche «oggi» dei calendari ricreati quando il tab si
+    # ridisegna dopo questo callback): si riporta sull'ultimo/primo dato, così
+    # la data finale mostrata è sempre quella vera, come in Frontiera.
+    g = lambda t: pd.Timestamp(t, unit='s').strftime('%Y-%m-%d')
+    return (g(s) if s != s0 else no_update, g(e) if e != e0 else no_update,
+            _pf_info_periodo(s, e, ts_min, ts_max), [s, e])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7714,7 +7792,7 @@ _PF_COLORI_CELL = ['#0047ff', '#ff8c00', '#00a651', '#9400d3', '#000000', '#00bc
 _PF_COLORE_BENCH = '#e00000'
 # Suffissi con cui update_graph nomina le serie dei sette grafici → nome dell'asset.
 _PF_SUFFISSI = (' Cum. Returns', '_AKRatio', ' Sharpe Ratio', ' TEV', ' DrawDown',
-                ' Volatilità', ' VaR90', ' VaR95')
+                ' Volatilità', ' CVaR90', ' CVaR95')
 _PF_NOME_MAX = 16      # caratteri in legenda sul cellulare, poi «…» (due colonne)
 _PF_NOME_MAX_PC = 28   # sul computer (margine destro di 220 px)
 # Spessore della linea evidenziata in rosso col clic (era 8 px, troppo grossa).
@@ -7793,8 +7871,8 @@ def _pf_legenda_unica(fig, colori, larghezza, cell, larg_grafico=None):
     per asset, nello stesso legendgroup delle sue serie. I segnaposto stanno in coda,
     quindi i curveNumber delle serie vere non cambiano."""
     for a in fig.layout.annotations:
-        if a.text == 'VaR (90% / 95%)':
-            a.text = 'VaR (continuo 90%, punteggiato 95%)'
+        if a.text == 'CVaR (90% / 95%)':
+            a.text = 'CVaR (continuo 90%, punteggiato 95%)'
     # Tutte le serie degli asset nella legenda unica: Plotly isola (doppio clic) e
     # accende/spegne solo le serie della legenda su cui si clicca, quindi lasciate
     # nelle vecchie legend2…7 gli indicatori restavano accesi col doppio clic. Le serie
@@ -8032,7 +8110,7 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
         row_heights=[0.26, 0.12, 0.12, 0.12, 0.12, 0.13, 0.13],
         specs=[[{"secondary_y": False}]] * 7,
         subplot_titles=('Cumulative Returns', 'AKRatio', 'Sharpe Ratio',
-                        'TEV', 'DrawDown', 'Volatilità', 'VaR (90% / 95%)')
+                        'TEV', 'DrawDown', 'Volatilità', 'CVaR (90% / 95%)')
     )
 
     for row in range(1, 8):
@@ -8211,13 +8289,13 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
                 fig.add_trace(go.Scatter(x=vs.index, y=vs, name=tn,
                                           line=line_dict, legend='legend6'), row=6, col=1)
 
-    # Subplot 7: VaR
+    # Subplot 7: CVaR (VaR condizionale, media della coda) a 90% e 95%
     for v90 in selected_var90:
         if v90:
             an = v90.replace('_VaR90', '')
             if an in df_with_portfolios.columns:
                 vs    = _thin(calculate_historical_cvar(df_with_portfolios[an], vol_window, 0.10))
-                tn    = f'{an} VaR90'
+                tn    = f'{an} CVaR90'
                 is_sel = (selected_column == tn)
                 if is_sel:
                     line_dict = dict(color='red', width=_PF_LARG_EVID)
@@ -8233,7 +8311,7 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
             an = v95.replace('_VaR95', '')
             if an in df_with_portfolios.columns:
                 vs    = _thin(calculate_historical_cvar(df_with_portfolios[an], vol_window, 0.05))
-                tn    = f'{an} VaR95'
+                tn    = f'{an} CVaR95'
                 is_sel = (selected_column == tn)
                 if is_sel:
                     line_dict = dict(color='red', width=_PF_LARG_EVID)
@@ -8280,7 +8358,7 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
     fig.update_yaxes(title_text='TEV',                row=4, col=1)
     fig.update_yaxes(title_text='DrawDown',           row=5, col=1)
     fig.update_yaxes(title_text='Volatilità (ann.)',  row=6, col=1)
-    fig.update_yaxes(title_text='VaR',                row=7, col=1)
+    fig.update_yaxes(title_text='CVaR',               row=7, col=1)
 
     # uirevision legata alla STRUTTURA del grafico (nomi delle serie nell'ordine in cui
     # sono disegnate). Finché cambiano solo i dati (stesse selezioni) la chiave resta
@@ -8313,7 +8391,7 @@ def update_graph(update_clicks, delete_clicks, clickData, picker_start, picker_e
         legend6=dict(title=dict(text='<b>Volatilità</b>', font=dict(size=11)),
                      orientation='v', yanchor='top', y=0.16, xanchor='left', x=1.01,
                      bgcolor='rgba(255,255,255,0.85)', bordercolor='#aed6f1', borderwidth=1),
-        legend7=dict(title=dict(text='<b>VaR — (solido 90%, punteg. 95%)</b>', font=dict(size=11)),
+        legend7=dict(title=dict(text='<b>CVaR — (solido 90%, punteg. 95%)</b>', font=dict(size=11)),
                      orientation='v', yanchor='top', y=0.02, xanchor='left', x=1.01,
                      bgcolor='rgba(255,255,255,0.85)', bordercolor='#aed6f1', borderwidth=1),
         margin=dict(b=20, t=60, r=220),
