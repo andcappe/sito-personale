@@ -184,7 +184,10 @@ app.index_string = '''
        stessa intestazione, 8 px fra una e l'altra. */
     .fe-corpo-grafici { padding: 0 8px !important; margin-top: 0 !important; }
     .fe-box { background: transparent !important; border: none !important; padding: 0 !important;
-      flex: 0 0 auto !important; }
+      flex: 0 0 auto !important; gap: 0 !important; }
+    /* Fra una scheda e l'altra solo i suoi 8 px: le gap dei contenitori (14 e 4 px)
+       si sommavano e davano 22 e 12 px. */
+    .fe-box > div:has(> .fe-sez) { gap: 0 !important; }
     .fe-sez { display: block; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;
       padding: 5px 14px 5px 8px; margin: 0 0 8px 0; width: 100%; box-sizing: border-box; }
     .fe-sez > .nb-espandi-corpo { display: flex; flex-wrap: wrap; gap: 10px 14px;
@@ -1217,12 +1220,6 @@ app.layout = html.Div([
 
             # Destra: grafici — flex-column per riempire esattamente lo spazio disponibile
             html.Div([
-                html.Div(id='fe-hint',
-                         style={'display':'none','fontSize':'9px','color':'#0066cc',
-                                'fontWeight':'600','padding':'2px 5px 4px',
-                                'background':'#e8f4ff','borderLeft':'3px solid #0066cc',
-                                'marginBottom':'4px','borderRadius':'0 4px 4px 0',
-                                'flexShrink':'0'}),
 
                 # ── Toast ARIMA background: appare al primo avvio, si chiude da solo ──
                 html.Div(id='fe-arima-toast', style={'display': 'none'},
@@ -1340,6 +1337,7 @@ app.layout = html.Div([
     dcc.Store(id='fe-stock-data',    data=None),
     dcc.Store(id='fe-prices-data',   data=None),
     dcc.Store(id='fe-loaded-flag',   data=False),
+    dcc.Store(id='fe-rf-condiviso'),
     dcc.Store(id='fe-data-source',   data='default'),
     dcc.Store(id='fe-f1-weights',      data=None),
     dcc.Store(id='fe-f2-weights',      data=None),
@@ -2108,23 +2106,16 @@ def toggle_window_div(r1, r2, r3, _req):
     return win_style, txt, stile
 
 
-@app.callback(
-    Output('fe-hint', 'style'),
-    Input('fe-loaded-flag', 'data'),
-    Input('fe-calc-btn',    'n_clicks'),
+# Risk free condiviso con Rendimenti Storici (localStorage, stessa origine).
+app.clientside_callback(
+    """function(rf) {
+        try { if (rf !== null && rf !== undefined && rf !== '')
+            localStorage.setItem('par-rf', JSON.stringify(rf)); } catch (e) {}
+        return window.dash_clientside.no_update;
+    }""",
+    Output('fe-rf-condiviso', 'data'),
+    Input('fe-rf', 'value'),
 )
-def toggle_hint(loaded, calc):
-    shown  = {'display':'block','fontSize':'9px','color':'#0066cc','fontWeight':'600',
-               'padding':'2px 5px 4px','background':'#e8f4ff',
-               'borderLeft':'3px solid #0066cc','marginBottom':'4px','borderRadius':'0 4px 4px 0'}
-    hidden = {**shown,'display':'none'}
-    ctx = callback_context
-    trig = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ''
-    if trig == 'fe-calc-btn':
-        return hidden
-    if trig == 'fe-loaded-flag' and loaded:
-        return {**shown, 'children': '▶ Dati caricati — clicca CALCOLA FRONTIERA per procedere'}
-    return hidden
 
 
 # ── Legenda unica: un clic sulla legenda dell'andamento vale anche per il drawdown ──

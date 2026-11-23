@@ -48,6 +48,10 @@ _NU = no_update
 # clip si applica SOLO alle variabili dei rendimenti (non ai prezzi).
 _MAX_DAILY_RET = 0.5
 
+# AKRatio: finestra e media mobile predefinite (come AK-SH-TV W e MA in Analisi Portafoglio)
+_AKR_W, _AKR_MA = 100, 10
+_RF = 2.0   # come il risk free predefinito della Frontiera
+
 def _get_df(js):
     if not js:
         return None
@@ -260,9 +264,79 @@ app.index_string = '''<!DOCTYPE html><html>
 /* Dentro il Portafoglio (?embed=1, classe nb-embed da NAVBAR_JS): niente spazio per
    la navbar e stessi margini della Frontiera incorporata */
 html.nb-embed .rend-corpo { padding: 8px 8px 16px !important; }
+/* Tabella: la colonna dei nomi resta ferma (sticky left), le altre scorrono di lato. */
+.rend-scorri { overflow: auto; max-height: 78vh; border: 1px solid #ddd; border-radius: 4px;
+  -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+.rend-nome { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+/* Colonna AKR ferma accanto ai nomi: il suo «left» è la larghezza della colonna dei
+   nomi, misurata dallo script in fondo (--rend-nome-w sul riquadro che scorre). */
+.rend-akr { left: var(--rend-nome-w, 0px) !important; }
+/* Menu ⚙ «Descrizione dati tabella» accanto a Crea tabella (come in Analisi Portafoglio). */
+.rend-menu { position: relative; display: inline-block; margin-left: 4px; }
+.rend-menu > summary { list-style: none; }
+.rend-menu > summary::-webkit-details-marker { display: none; }
+.rend-menu-corpo { position: absolute; top: calc(100% + 4px); right: 0; z-index: 1500;
+  background: #fff; border: 1px solid #c0d0e8; border-radius: 6px; padding: 10px 12px;
+  box-shadow: 0 6px 20px rgba(26,58,107,0.18); min-width: 260px; max-width: 360px;
+  display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: #333; }
+@media (max-width: 900px) {
+  .rend-menu-corpo { position: fixed; top: auto; left: 16px; right: 16px; min-width: 0; max-width: none; }
+  /* Parametri, Asset e Tabella: tre schede uguali, come in Analisi Portafoglio. */
+  .rend-sez { background: #f8fafc !important; border: 1px solid #e2e8f0 !important;
+    border-radius: 6px !important; padding: 5px 14px 5px 8px !important;
+    margin: 0 0 8px 0 !important; width: 100% !important; box-sizing: border-box; }
+  .rend-sez > .nb-espandi-btn { font-size: 12px !important; font-weight: 700 !important;
+    color: #1a3a5c !important; padding: 4px 0 !important; border-bottom: none !important; }
+  .rend-titolo { display: none !important; }
+  .rend-scorri { max-height: 75vh; }
+  .rend-nome { max-width: 104px; }
+  .rend-th button { padding: 8px 8px !important; font-size: 11px !important; }
+  .rend-th { min-width: 0 !important; }
+  .rend-td { padding: 6px 7px !important; font-size: 11px !important; }
+  .rend-td-nome { padding: 6px 7px !important; }
+  /* Dentro il Portafoglio il pulsante sta nella riga in alto, accanto al file. */
+  html.nb-embed #rend-update-btn { display: none !important; }
+}
 </style>
 </head>
 <body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer>
+<script>
+// Larghezza della colonna dei nomi → left della colonna AKR (ferma accanto).
+(function(){
+  function misura(){
+    document.querySelectorAll('.rend-scorri').forEach(function(sc){
+      var th = sc.querySelector('th.rend-td-nome');
+      if (th) sc.style.setProperty('--rend-nome-w', th.getBoundingClientRect().width + 'px');
+    });
+  }
+  new MutationObserver(misura).observe(document.documentElement, {childList: true, subtree: true});
+  window.addEventListener('resize', misura);
+})();
+// Menu ⚙: si chiude con un clic fuori (anche la copia aperta dal ⚙ del Portafoglio).
+// Clic su un nome asset tagliato («…»): fumetto col nome intero, sparisce al clic dopo.
+document.addEventListener('click', function(e){
+  document.querySelectorAll('details.rend-menu[open]').forEach(function(d){
+    if (!d.contains(e.target)) d.removeAttribute('open');
+  });
+  try { var pp = window.parent.document.getElementById('pf-info-pop'); if (pp) pp.remove(); } catch (err) {}
+  var vecchio = document.getElementById('rend-nome-pop');
+  if (vecchio) vecchio.remove();
+  var n = e.target.closest && e.target.closest('.rend-nome');
+  if (!n || n.scrollWidth <= n.clientWidth || vecchio && vecchio._nome === n) return;
+  var pop = document.createElement('div');
+  pop.id = 'rend-nome-pop'; pop._nome = n; pop.textContent = n.textContent;
+  var r = n.getBoundingClientRect();
+  pop.style.cssText = 'position:fixed;z-index:3000;left:' + Math.round(Math.max(4, r.left)) + 'px;' +
+    'top:' + Math.round(r.bottom + 4) + 'px;max-width:' + Math.round(window.innerWidth - 16) + 'px;' +
+    'background:#1a3a5c;color:#fff;font-size:12px;font-weight:600;padding:5px 9px;' +
+    'border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,0.25);white-space:normal;';
+  document.body.appendChild(pop);
+});
+// Lo scorrimento della tabella lo stacca dal nome: si toglie.
+document.addEventListener('scroll', function(){
+  var p = document.getElementById('rend-nome-pop'); if (p) p.remove();
+}, true);
+</script>
 <script>
 (function(){
   if (location.search.indexOf('embed=1') === -1) return;
@@ -280,6 +354,70 @@ html.nb-embed .rend-corpo { padding: 8px 8px 16px !important; }
 '''
 
 # ─── Layout ──────────────────────────────────────────────────────────────────
+# Sezioni come in Analisi Portafoglio: «Parametri», «Asset» e «Tabella». Sul cellulare
+# sono schede che si chiudono (nb-espandi, CSS e JS in navbar.py); Asset e Tabella
+# sono aperte all'avvio, Parametri chiusa. Le larghezze delle colonne della griglia
+# asset sono quelle di Analisi Portafoglio (_LARG_* in portafoglio/app.py).
+_LARG_NOME, _LARG_CH, _LARG_PESO = '34%', '6%', '17%'
+_COLONNE_ASSET = [   # larghezza, etichetta, colore, tooltip, id del pulsante ☑
+    (_LARG_CH,   'CH', '#1a3a5c', 'Deseleziona tutti (o seleziona tutti se nessuno è spuntato)', 'rend-deselect-btn'),
+    (_LARG_PESO, 'P1', '#e6194b', 'Azzera pesi P1 (se già a zero: pesi uguali sugli asset spuntati in CH)', 'rend-reset-p1-btn'),
+    (_LARG_PESO, 'P2', '#3cb44b', 'Azzera pesi P2 (se già a zero: pesi uguali sugli asset spuntati in CH)', 'rend-reset-p2-btn'),
+    (_LARG_PESO, 'P3', '#4363d8', 'Azzera pesi P3 (se già a zero: pesi uguali sugli asset spuntati in CH)', 'rend-reset-p3-btn'),
+]
+_BTN_PRINCIPALE = {'backgroundColor': '#1a3a6b', 'color': 'white', 'border': 'none',
+                   'padding': '6px 14px', 'borderRadius': '4px', 'cursor': 'pointer',
+                   'fontWeight': '600', 'fontSize': '12px', 'lineHeight': '18px',
+                   'whiteSpace': 'nowrap'}
+_ETIC = {'fontSize': '10px', 'whiteSpace': 'nowrap', 'marginRight': '4px'}
+_CAMPO = {'display': 'flex', 'alignItems': 'center', 'marginRight': '10px'}
+_INPUT = {'fontSize': '10px'}
+
+
+def _etichette_colonne():
+    """Asset | CH | P1 | P2 | P3 sopra la griglia, come in Analisi Portafoglio;
+    i ☑ alternano (vedi toggle_all_checks e reset_pesi)."""
+    return html.Div([
+        html.Div('Asset', style={
+            'width': _LARG_NOME, 'fontWeight': '700', 'fontSize': '11px',
+            'paddingLeft': '4px', 'color': '#1a3a5c',
+            'display': 'flex', 'alignItems': 'center', 'overflow': 'hidden',
+        }),
+        *[html.Div([
+            html.Span(lbl, style={'fontWeight': '700', 'fontSize': '11px', 'color': col,
+                                  'lineHeight': '1', 'whiteSpace': 'nowrap'}),
+            html.Button('☑', id=btn_id, n_clicks=0, title=tip, style={
+                'fontSize': '10px', 'border': 'none', 'background': 'none',
+                'cursor': 'pointer', 'color': col,
+                'padding': '0', 'margin': '0', 'lineHeight': '1'}),
+        ], style={
+            'width': w, 'display': 'flex', 'flexDirection': 'column',
+            'alignItems': 'center', 'justifyContent': 'center', 'gap': '1px',
+            'overflow': 'hidden',
+        }) for w, lbl, col, tip, btn_id in _COLONNE_ASSET],
+    ], style={
+        'display': 'flex', 'alignItems': 'center', 'minHeight': '30px',
+        'background': '#eaf4fb', 'borderBottom': '1px solid #aed6f1',
+        'position': 'sticky', 'top': '0', 'zIndex': '2',
+    })
+
+
+def _testa_cell(titolo):
+    """Intestazione di una sezione che si chiude solo sul cellulare (nascosta sul computer)."""
+    return html.Div(className='nb-espandi-btn nb-testa-cell', children=[
+        titolo,
+        html.I(className='fa-solid fa-chevron-down nb-espandi-ico'),
+    ], style={'fontSize': '12px', 'fontWeight': '700', 'color': '#1a3a5c',
+              'padding': '6px 0 4px 4px', 'borderBottom': '1px solid #aed6f1'})
+
+
+def _somma_pesi(id_):
+    return html.Div(id=id_, children='0%', style={
+        'width': _LARG_PESO, 'textAlign': 'right', 'paddingRight': '5px',
+        'fontWeight': 'bold', 'color': '#d62728', 'fontSize': '10px',
+        'boxSizing': 'border-box'})
+
+
 app.layout = html.Div([
     make_navbar("Rendimenti"),
 
@@ -293,9 +431,9 @@ app.layout = html.Div([
     dcc.Store(id='rend-perf-data'),
     dcc.Store(id='rend-sort-state', data={}),
     dcc.Store(id='rend-ir-bench-store'),
-    dcc.Store(id='rend-rf-store', data=0.0),
-    dcc.Store(id='rend-akr-w-store',      data=30),
-    dcc.Store(id='rend-akr-ma-store',     data=1),
+    dcc.Store(id='rend-rf-store', data=_RF),
+    dcc.Store(id='rend-akr-w-store',      data=_AKR_W),
+    dcc.Store(id='rend-akr-ma-store',     data=_AKR_MA),
     dcc.Store(id='rend-akr-filter-store', data='all'),
 
     # Trigger caricamento dati al primo render (stesso pattern di frontiera)
@@ -304,145 +442,119 @@ app.layout = html.Div([
     dcc.Interval(id='rend-live-sync', interval=2000, n_intervals=0, disabled=False),
 
     html.Div([
-
-        # ── Barra controlli — riga 1 ───────────────────────────────────────
-        html.Div([
-            html.H2('Rendimenti Storici per Periodo', style={
-                'fontFamily': 'Inter, sans-serif', 'fontSize': '1.1rem',
-                'fontWeight': '700', 'color': '#1a3a6b',
-                'margin': '0', 'marginRight': '24px', 'whiteSpace': 'nowrap',
-            }),
-            html.Div([
-                html.Label('Benchmark:', style={
-                    'fontSize': '10px', 'whiteSpace': 'nowrap',
-                    'marginRight': '4px', 'fontWeight': 'bold',
-                }),
-                dcc.Dropdown(id='rend-ir-bench', options=[], value=None,
-                             placeholder='Seleziona…', clearable=True,
-                             style={'width': '180px', 'fontSize': '10px',
-                                    'minWidth': '180px'}),
-            ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '8px'}),
-            html.Div([
-                html.Label('Risk-Free SR %:', style={
-                    'fontSize': '10px', 'whiteSpace': 'nowrap',
-                    'marginRight': '4px', 'color': '#7a5c00', 'fontWeight': 'bold',
-                }),
-                dcc.Input(id='rend-rf-input', type='number', value=0.0,
-                          min=0, max=20, step=0.1, placeholder='es. 3.5',
-                          style={'width': '55px', 'fontSize': '10px',
-                                 'border': '1px solid #aaa', 'borderRadius': '3px',
-                                 'padding': '3px 5px'}),
-            ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '8px'}),
-            html.Div([
-                html.Label('AK-W:', style={
-                    'fontSize': '10px', 'whiteSpace': 'nowrap',
-                    'marginRight': '4px', 'fontWeight': 'bold',
-                }),
-                dcc.Input(id='rend-akr-w', type='number', value=30, min=5, step=1,
-                          placeholder='30',
-                          style={'width': '45px', 'fontSize': '10px',
-                                 'border': '1px solid #aaa', 'borderRadius': '3px',
-                                 'padding': '3px 5px'}),
-            ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '8px'}),
-            html.Div([
-                html.Label('MA:', style={
-                    'fontSize': '10px', 'whiteSpace': 'nowrap',
-                    'marginRight': '4px', 'fontWeight': 'bold',
-                }),
-                dcc.Input(id='rend-akr-ma', type='number', value=1, min=1, step=1,
-                          placeholder='1',
-                          style={'width': '40px', 'fontSize': '10px',
-                                 'border': '1px solid #aaa', 'borderRadius': '3px',
-                                 'padding': '3px 5px'}),
-            ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '8px'}),
-            html.Div([
-                html.Label('Filtro AKR:', style={
-                    'fontSize': '9px', 'fontWeight': 'bold', 'color': '#1a3a5c',
-                    'marginRight': '4px', 'whiteSpace': 'nowrap',
-                }),
-                dcc.RadioItems(
-                    id='rend-akr-filter',
-                    options=[
-                        {'label': 'Tutti',  'value': 'all'},
-                        {'label': '>−1',    'value': 'gt_minus1'},
-                        {'label': '>0',     'value': 'gt_0'},
-                    ],
-                    value='all', inline=True,
-                    inputStyle={'marginRight': '2px'},
-                    labelStyle={'marginRight': '6px', 'fontSize': '9px',
-                                'cursor': 'pointer'},
-                ),
-            ], style={
-                'display': 'flex', 'alignItems': 'center',
-                'padding': '2px 6px', 'background': '#f0f4fa',
-                'border': '1px solid #d0d8e8', 'borderRadius': '5px',
-                'marginRight': '8px',
-            }),
-            html.Button('Aggiorna Tabella', id='rend-update-btn', n_clicks=0, style={
-                'background': '#c0392b', 'color': 'white', 'border': 'none',
-                'padding': '4px 14px', 'borderRadius': '4px', 'cursor': 'pointer',
-                'fontWeight': 'bold', 'fontSize': '10px', 'marginLeft': 'auto',
-                'whiteSpace': 'nowrap',
-                'boxShadow': '0 2px 6px rgba(192,57,43,0.4)',
-            }),
-        ], style={
-            'display': 'flex', 'alignItems': 'center', 'marginBottom': '8px',
-            'flexWrap': 'wrap', 'gap': '4px',
-            'padding': '5px 8px', 'background': '#f8fafd',
-            'border': '1px solid #e0e6ef', 'borderRadius': '6px',
+        html.H2('Rendimenti Storici per Periodo', className='rend-titolo', style={
+            'fontSize': '1.1rem', 'fontWeight': '700', 'color': '#1a3a6b',
+            'margin': '0 0 8px 0', 'whiteSpace': 'nowrap',
         }),
 
-        html.Div(id='rend-data-info', style={
-            'fontSize': '11px', 'color': '#555', 'marginBottom': '10px',
-        }),
-        html.Hr(style={'margin': '0 0 12px 0', 'borderColor': '#e0e6ef'}),
-
-        # ── Corpo: griglia sinistra + tabella destra ─────────────────────
-        html.Div([
-
-            # Colonna sinistra (30%)
-            html.Div([
-                html.Div(id='rend-asset-grid'),
-                html.Hr(style={'margin': '8px 0'}),
+        # ── Parametri ──────────────────────────────────────────────────────
+        html.Div(className='nb-espandi rend-sez', children=[
+            html.Span(className='nb-espandi-btn', children=[
+                'Parametri', html.Span(':', className='nb-nascondi-cell'),
+                html.I(className='fa-solid fa-chevron-down nb-espandi-ico'),
+            ], style={'marginRight': '10px', 'whiteSpace': 'nowrap', 'fontSize': '12px',
+                      'fontWeight': '700', 'color': '#1a3a5c'}),
+            html.Div(className='nb-espandi-corpo', children=[
                 html.Div([
-                    html.Div('Totale Pesi:', style={
-                        'width': '35%', 'fontWeight': 'bold',
-                        'fontSize': '10px', 'paddingLeft': '5px',
-                    }),
-                    html.Div('', style={'width': '10%'}),
-                    html.Div(id='rend-sum-p1', children='0%', style={
-                        'width': '15%', 'textAlign': 'center',
-                        'color': '#d62728', 'fontSize': '10px', 'fontWeight': 'bold',
-                    }),
-                    html.Div(id='rend-sum-p2', children='0%', style={
-                        'width': '15%', 'textAlign': 'center',
-                        'color': '#d62728', 'fontSize': '10px', 'fontWeight': 'bold',
-                    }),
-                    html.Div(id='rend-sum-p3', children='0%', style={
-                        'width': '15%', 'textAlign': 'center',
-                        'color': '#d62728', 'fontSize': '10px', 'fontWeight': 'bold',
-                    }),
-                ], style={'display': 'flex', 'alignItems': 'center'}),
-            ], style={
-                'width': '30%', 'paddingRight': '15px', 'verticalAlign': 'top',
-                'overflowY': 'auto', 'maxHeight': '78vh',
-            }),
-
-            # Colonna destra (70%)
-            html.Div([
-                dcc.Loading(type='circle', children=[
-                    html.Div(id='rend-perf-table', style={
-                        'overflowX': 'auto', 'overflowY': 'auto',
-                        'maxHeight': '78vh',
-                        'border': '1px solid #ddd', 'borderRadius': '4px',
-                    }),
+                    html.Label('Benchmark:', style=_ETIC),
+                    dcc.Dropdown(id='rend-ir-bench', options=[], value=None,
+                                 placeholder='Seleziona…', clearable=True,
+                                 style={'width': '180px', 'fontSize': '10px',
+                                        'minWidth': '180px'}),
+                ], style=_CAMPO),
+                html.Div([
+                    html.Label('Risk-Free SR %:', style=_ETIC),
+                    dcc.Input(id='rend-rf-input', type='number', value=_RF,
+                              min=0, max=20, step=0.1, placeholder='es. 3.5',
+                              style={**_INPUT, 'width': '55px'}),
+                ], style=_CAMPO),
+                html.Div([
+                    html.Label('AKR W:', style=_ETIC),
+                    dcc.Input(id='rend-akr-w', type='number', value=_AKR_W, min=5, step=1,
+                              placeholder=str(_AKR_W), style={**_INPUT, 'width': '45px'}),
+                ], style=_CAMPO),
+                html.Div([
+                    html.Label('MA:', style=_ETIC),
+                    dcc.Input(id='rend-akr-ma', type='number', value=_AKR_MA, min=1, step=1,
+                              placeholder=str(_AKR_MA), style={**_INPUT, 'width': '40px'}),
+                ], style=_CAMPO),
+                html.Div([
+                    html.Label('Filtro AKR:', style={**_ETIC, 'fontWeight': '600'}),
+                    dcc.RadioItems(
+                        id='rend-akr-filter',
+                        options=[
+                            {'label': 'Tutti',  'value': 'all'},
+                            {'label': '>−1',    'value': 'gt_minus1'},
+                            {'label': '>0',     'value': 'gt_0'},
+                        ],
+                        value='all', inline=True,
+                        inputStyle={'marginRight': '3px'},
+                        labelStyle={'marginRight': '8px', 'fontSize': '10px',
+                                    'cursor': 'pointer'},
+                    ),
+                ], style=_CAMPO),
+                # Dentro il Portafoglio sul cellulare il pulsante sta nella riga in alto
+                # (pf-crea-cell, che preme questo).
+                html.Button('Crea tabella', id='rend-update-btn', n_clicks=0,
+                            style=_BTN_PRINCIPALE),
+                # ⚙ Descrizione dati tabella: numero asset, data dei dati, parametri, legenda.
+                html.Details(className='rend-menu', children=[
+                    html.Summary(html.I(className='fa-solid fa-gear'),
+                                 title='Descrizione dati tabella',
+                                 style={**_BTN_PRINCIPALE, 'padding': '6px 9px'}),
+                    html.Div(className='rend-menu-corpo', children=[
+                        html.Div('Descrizione dati tabella',
+                                 style={'fontSize': '12px', 'fontWeight': '700', 'color': '#1a3a5c'}),
+                        html.Div(id='rend-info-asset'),
+                        html.Div('Premi «Crea tabella» per i dati della tabella.',
+                                 id='rend-info-tabella', style={'color': '#888'}),
+                    ]),
                 ]),
-            ], style={'width': '70%', 'verticalAlign': 'top'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap',
+                      'gap': '4px 0'}),
+        ], style={'marginBottom': '8px', 'display': 'flex', 'alignItems': 'center',
+                  'flexWrap': 'wrap', 'padding': '5px 8px', 'background': '#f8fafc',
+                  'border': '1px solid #e2e8f0', 'borderRadius': '6px'}),
 
-        ], style={'display': 'flex'}),
+        # Solo per l'errore «Nessun dato disponibile»; vuota non occupa spazio.
+        html.Div(id='rend-data-info', className='rend-info', style={
+            'fontSize': '11px', 'color': '#c0392b',
+        }),
+
+        # ── Corpo: Asset (sx) + Tabella (dx); impilati sul cellulare ──────
+        html.Div([
+            html.Div([
+                _testa_cell('Asset'),
+                html.Div(className='nb-espandi-corpo', children=[
+                    _etichette_colonne(),
+                    html.Div(id='rend-asset-grid'),
+                    html.Div([
+                        html.Hr(style={'margin': '10px 0'}),
+                        html.Div([
+                            html.Div('Totale Pesi:', style={
+                                'width': '40%', 'fontWeight': 'bold',
+                                'paddingLeft': '4px', 'fontSize': '9px'}),
+                            _somma_pesi('rend-sum-p1'),
+                            _somma_pesi('rend-sum-p2'),
+                            _somma_pesi('rend-sum-p3'),
+                        ], style={'display': 'flex', 'alignItems': 'center'}),
+                    ], style={'marginTop': '10px'}),
+                ]),
+            ], className='nb-piena nb-espandi nb-aperto rend-sez',
+               style={'width': '35%', 'paddingRight': '12px', 'boxSizing': 'border-box'}),
+
+            html.Div([
+                _testa_cell('Tabella'),
+                html.Div(className='nb-espandi-corpo', children=[
+                    dcc.Loading(type='circle', children=[
+                        html.Div(id='rend-perf-table'),
+                    ]),
+                ]),
+            ], className='nb-piena nb-espandi nb-aperto rend-sez',
+               style={'width': '65%', 'minWidth': '0'}),
+        ], className='nb-impila', style={'display': 'flex', 'alignItems': 'flex-start'}),
 
     ], className='rend-corpo', style={
-        'paddingTop': '112px',
         'padding': '112px 5% 32px',
         'fontFamily': 'Inter, sans-serif',
     }),
@@ -467,218 +579,177 @@ def load_default_data(_):
             style={'color': '#c0392b'},
         ), {}, {}, {}
     p1, p2, p3 = _read_weights_from_json()
-    n_assets = len(prices.columns)
-    last_date = prices.index[-1].strftime('%d/%m/%Y') if not prices.empty else 'N/D'
-    has_ports = any([p1, p2, p3])
-    info_parts = [
-        html.I(className='fa-solid fa-circle-info', style={'marginRight': '6px', 'color': '#1a3a6b'}),
-        f'{n_assets} asset · dati al {last_date}',
-    ]
-    if saved_at:
-        info_parts.append(f' · aggiornati il {saved_at}')
-    if has_ports:
-        defined = [f'P{i}' for i, w in enumerate([p1, p2, p3], 1) if w]
-        info_parts.append(html.Span(
-            f' · pesi caricati da Portafoglio ({", ".join(defined)})',
-            style={'color': '#1b5e20', 'fontWeight': '600'},
-        ))
-    info_parts.append(html.Span(
-        ' — seleziona asset/portafogli e clicca Aggiorna Tabella',
-        style={'color': '#888'},
-    ))
+    # Niente riga «N asset · dati al…» (inutile per l'utente): la riga resta solo per l'errore.
     return (prices.to_json(orient='split', date_format='iso'),
             returns.to_json(orient='split', date_format='iso'),
-            html.Span(info_parts), p1, p2, p3)
+            None, p1, p2, p3)
 
 
-# Stile base del nome asset nella griglia di selezione (sinistra)
+# Stile del nome asset nella griglia (come in Analisi Portafoglio): padding fisso,
+# il filo rosso del filtro AKR (box-shadow inset) lo mette color_asset_names.
 _RASSET_BASE = {
     **NOME_ASSET, 'overflow': 'hidden', 'whiteSpace': 'nowrap',
-    'textOverflow': 'ellipsis', 'maxWidth': '100%',
-    'fontFamily': 'Inter, sans-serif',
+    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'color': '#1a3a5c',
+    'padding': '3px 6px', 'borderRadius': '5px', 'boxSizing': 'border-box',
+    'boxShadow': 'none',
 }
+_ROSSO_AKR = '#c0392b'
+_PORT_RIGHE = ('Port1', 'Port2', 'Port3')
+
+
+def _chk(chk_id, valore, spuntato, w):
+    return html.Div(
+        dcc.Checklist(id=chk_id, options=[{'label': '', 'value': valore}],
+                      value=[valore] if spuntato else [],
+                      inputStyle={'width': '10px', 'height': '10px',
+                                  'cursor': 'pointer', 'margin': '0'},
+                      style={'display': 'flex', 'justifyContent': 'center',
+                             'alignItems': 'center', 'width': '100%'}),
+        style={'width': w, 'height': '22px', 'display': 'flex',
+               'alignItems': 'center', 'justifyContent': 'center'})
+
+
+# ─── Parametri iniziali presi dalle altre dashboard ───────────────────────────
+# Benchmark, AKR W, MA e Filtro AKR = gli ultimi usati in Analisi Portafoglio, risk free =
+# l'ultimo della Frontiera (li scrivono nel localStorage, chiavi «par-*»). Mancano: stessi
+# predefiniti (benchmark per file come _PF_BENCH_PREDEFINITI, rf 2%, 100/10, Tutti).
+# Una volta per pagina: le opzioni si riscrivono a ogni aggiornamento dei dati e non devono
+# cancellare quello che l'utente cambia qui.
+app.clientside_callback(
+    """function(opzioni) {
+        var nu = window.dash_clientside.no_update;
+        if (!opzioni || !opzioni.length || window._rendParametri) return [nu, nu, nu, nu, nu];
+        window._rendParametri = true;
+        function leggi(k) {
+            try { var v = localStorage.getItem('par-' + k); return v === null ? null : JSON.parse(v); }
+            catch (e) { return null; }
+        }
+        var valori = opzioni.map(function(o) { return o.value; });
+        var bench = leggi('bench');
+        if (valori.indexOf(bench) < 0) {
+            bench = null;
+            ['Az. ACWI', 'Bitcoin USD', 'EUR/USD', 'Crude Oil'].some(function(n) {
+                var t = valori.find(function(v) { return String(v).indexOf(n) === 0; });
+                if (t) { bench = t; return true; }
+                return false;
+            });
+            if (!bench) bench = valori[0];
+        }
+        var rf = leggi('rf'), w = leggi('akr_w'), ma = leggi('akr_ma'), f = leggi('filtro');
+        return [bench,
+                (typeof rf === 'number') ? rf : %s,
+                (typeof w === 'number' && w >= 5) ? w : %d,
+                (typeof ma === 'number' && ma >= 1) ? ma : %d,
+                (['all', 'gt_minus1', 'gt_0'].indexOf(f) >= 0) ? f : 'all'];
+    }""" % (_RF, _AKR_W, _AKR_MA),
+    Output('rend-ir-bench', 'value'),
+    Output('rend-rf-input', 'value'),
+    Output('rend-akr-w', 'value'),
+    Output('rend-akr-ma', 'value'),
+    Output('rend-akr-filter', 'value'),
+    Input('rend-ir-bench', 'options'),
+)
+
+
+# ─── Menu ⚙: numero asset del file e quanti spuntati ─────────────────────────
+@app.callback(
+    Output('rend-info-asset', 'children'),
+    Input('rend-stock-data', 'data'),
+    Input('rend-selected', 'data'),
+)
+def info_asset(stock_json, selected):
+    if not stock_json:
+        return ''
+    try:
+        n = len(_get_df(stock_json).columns)
+    except Exception:
+        return ''
+    sel = [x for x in (selected or []) if x not in _PORT_RIGHE]
+    return html.Div([html.B('Numero asset: '), f'{n}', html.Span(f' · selezionati {len(sel)}',
+                                                               style={'color': '#666'})])
 
 
 # ─── Callback 2: Costruisce la griglia asset ──────────────────────────────────
 @app.callback(
     Output('rend-asset-grid', 'children'),
     Output('rend-ir-bench', 'options'),
+    Output('rend-selected', 'data', allow_duplicate=True),
     Input('rend-stock-data', 'data'),
     State('rend-selected', 'data'),
     State('rend-weights-p1', 'data'),
     State('rend-weights-p2', 'data'),
     State('rend-weights-p3', 'data'),
+    prevent_initial_call='initial_duplicate',
 )
 def build_asset_grid(stock_json, selected, p1, p2, p3):
     if not stock_json:
         return html.Div('Caricamento dati in corso…',
-                        style={'padding': '12px', 'color': '#888', 'fontSize': '12px'}), []
+                        style={'padding': '12px', 'color': '#888', 'fontSize': '12px'}), [], no_update
     try:
         returns = _get_df(stock_json)
-        if returns is not None:
-            returns = returns.clip(-_MAX_DAILY_RET, _MAX_DAILY_RET)   # tick corrotti
     except Exception as _e:
         print(f'[rendimenti] build_asset_grid error: {traceback.format_exc()}')
         return html.Div(f'Errore nel caricamento dei dati: {type(_e).__name__}: {_e}',
-                        style={'padding': '12px', 'color': '#c0392b', 'fontSize': '12px'}), []
+                        style={'padding': '12px', 'color': '#c0392b', 'fontSize': '12px'}), [], no_update
 
     asset_names = list(returns.columns)
-    selected = selected or []
-    p1 = p1 or {}
-    p2 = p2 or {}
-    p3 = p3 or {}
+    # Come in Analisi Portafoglio: all'apertura le spunte salvate in current.json.
+    if not selected:
+        try:
+            selected = [d for d, v in _read_user_json().items()
+                        if not d.startswith('_') and isinstance(v, dict) and v.get('checked')]
+        except Exception:
+            selected = []
+    selected = set(selected or [])
+    pesi = {1: p1 or {}, 2: p2 or {}, 3: p3 or {}}
 
-    def has_weights(w):
-        return bool(w and any(v and v > 0 for v in w.values()))
-
-    defined = [f'P{i}' for i, w in enumerate([p1, p2, p3], 1) if has_weights(w)]
-    if defined:
-        badge = html.Div(
-            f'Portafogli con pesi: {", ".join(defined)}',
-            style={'fontSize': '10px', 'color': '#1b5e20', 'background': '#e8f5e9',
-                   'border': '1px solid #81c784', 'borderRadius': '3px',
-                   'padding': '4px 8px', 'marginBottom': '6px'},
-        )
-    else:
-        badge = html.Div(
-            'Inserisci pesi P1/P2/P3 e clicca Aggiorna',
-            style={'fontSize': '10px', 'color': '#e65100', 'background': '#fff3e0',
-                   'border': '1px solid #ffb74d', 'borderRadius': '3px',
-                   'padding': '4px 8px', 'marginBottom': '6px'},
-        )
-
-    def _col_header(label, btn_id, color, tip):
-        return html.Div([
-            html.Span(label, style={
-                'fontSize': '9px', 'fontWeight': 'bold', 'color': color,
-                'lineHeight': '1', 'fontFamily': 'Inter, sans-serif',
-            }),
-            html.Button('☑', id=btn_id, n_clicks=0, title=tip, style={
-                'fontSize': '7px', 'border': 'none', 'background': 'none',
-                'cursor': 'pointer', 'color': color,
-                'padding': '0', 'margin': '0', 'lineHeight': '1',
-            }),
-        ], style={
-            'display': 'flex', 'flexDirection': 'column',
-            'alignItems': 'center', 'justifyContent': 'center',
-            'overflow': 'hidden', 'gap': '0px',
-        })
-
-    header = html.Div([
-        html.Div('Asset', style={
-            'width': '35%', 'fontWeight': 'bold', 'paddingLeft': '5px',
-            'fontSize': '9px', 'fontFamily': 'Inter, sans-serif',
-        }),
-        html.Div(_col_header('CH', 'rend-deselect-btn', '#1a3a5c', 'Seleziona / Deseleziona'),
-                 style={'width': '10%', 'display': 'flex', 'alignItems': 'center',
-                        'justifyContent': 'center'}),
-        html.Div(_col_header('P1', 'rend-reset-p1-btn', '#e6194b', 'Azzera pesi P1'),
-                 style={'width': '15%', 'display': 'flex', 'alignItems': 'center',
-                        'justifyContent': 'center'}),
-        html.Div(_col_header('P2', 'rend-reset-p2-btn', '#3cb44b', 'Azzera pesi P2'),
-                 style={'width': '15%', 'display': 'flex', 'alignItems': 'center',
-                        'justifyContent': 'center'}),
-        html.Div(_col_header('P3', 'rend-reset-p3-btn', '#4363d8', 'Azzera pesi P3'),
-                 style={'width': '15%', 'display': 'flex', 'alignItems': 'center',
-                        'justifyContent': 'center'}),
-    ], style={
-        'display': 'flex', 'alignItems': 'center', 'minHeight': '18px',
-        'background': '#eaf4fb', 'borderTop': '2px solid #2e6da4',
-        'borderBottom': '1px solid #aed6f1', 'padding': '2px 0',
-    })
-
-    rows = [badge, header]
-
+    rows = []
     for asset in asset_names:
-        asset_val = [asset] if asset in selected else []
-
-        def make_weight(p_idx, a=asset):
-            val = {1: p1, 2: p2, 3: p3}[p_idx].get(a, 0)
-            return dcc.Input(
+        def peso(p_idx, a=asset):
+            return html.Div(dcc.Input(
                 id={'type': 'rend-weight', 'index': f'P{p_idx}-{a}'},
-                type='number', value=val, min=0, max=100, step=0.1, placeholder='0',
-                style={'width': '90%', 'textAlign': 'right', 'fontSize': '8px',
-                       'height': '18px', 'padding': '1px 2px', 'boxSizing': 'border-box'},
-            )
+                type='number', value=pesi[p_idx].get(a, 0), min=0, max=100, step=0.1,
+                placeholder='0',
+                style={'width': '96%', 'textAlign': 'right', 'fontSize': '11px',
+                       'height': '20px', 'padding': '1px 3px', 'boxSizing': 'border-box'},
+            ), style={'width': _LARG_PESO})
 
-        row = html.Div([
+        rows.append(html.Div([
             html.Div(
                 html.Span(asset, id={'type': 'rend-asset-name', 'index': asset},
-                          style={**_RASSET_BASE, 'color': '#1a3a5c'}),
-                style={'width': '35%', 'height': '22px', 'display': 'flex',
-                       'alignItems': 'center', 'paddingLeft': '4px', 'overflow': 'hidden'},
+                          style=_RASSET_BASE),
+                title=asset,
+                style={'width': _LARG_NOME, 'height': '28px', 'display': 'flex',
+                       'alignItems': 'center', 'overflow': 'hidden'},
             ),
-            html.Div(
-                dcc.Checklist(
-                    id={'type': 'rend-check', 'index': asset},
-                    options=[{'label': '', 'value': asset}],
-                    value=asset_val,
-                    inputStyle={'width': '10px', 'height': '10px',
-                                'cursor': 'pointer', 'margin': '0'},
-                    style={'display': 'flex', 'justifyContent': 'center',
-                           'alignItems': 'center', 'width': '100%'},
-                ),
-                style={'width': '10%', 'height': '22px', 'display': 'flex',
-                       'alignItems': 'center', 'justifyContent': 'center'},
-            ),
-            html.Div(make_weight(1), style={'width': '15%'}),
-            html.Div(make_weight(2), style={'width': '15%'}),
-            html.Div(make_weight(3), style={'width': '15%'}),
+            _chk({'type': 'rend-check', 'index': asset}, asset, asset in selected, _LARG_CH),
+            peso(1), peso(2), peso(3),
         ], style={'display': 'flex', 'alignItems': 'center',
-                  'borderBottom': '1px dotted #eee'})
-        rows.append(row)
+                  'borderBottom': '1px dotted #eee'}))
 
-    # Righe portafogli (read-only, mostra totale pesi)
-    for p_num in [1, 2, 3]:
-        p_name  = f'Port{p_num}'
-        p_color = {1: '#e6194b', 2: '#3cb44b', 3: '#4363d8'}[p_num]
-        port_val = [p_name] if p_name in selected else []
-        w_dict = {1: p1, 2: p2, 3: p3}[p_num]
-        total_w = sum(v for v in w_dict.values() if v and v > 0) if w_dict else 0
-        t_color = '#2ca02c' if 99 <= total_w <= 101 else ('#d62728' if total_w > 0 else '#aaa')
-        t_label = f'{total_w:.0f}%'
-
-        port_row = html.Div([
-            html.Div(
-                html.Span(p_name, style={
-                    'color': p_color, **NOME_ASSET,
-                    'overflow': 'hidden', 'whiteSpace': 'nowrap',
-                    'textOverflow': 'ellipsis', 'maxWidth': '100%',
-                    'fontFamily': 'Inter, sans-serif',
-                }),
-                style={'width': '35%', 'height': '22px', 'display': 'flex',
-                       'alignItems': 'center', 'paddingLeft': '4px', 'overflow': 'hidden'},
-            ),
-            html.Div(
-                dcc.Checklist(
-                    id={'type': 'rend-check', 'index': p_name},
-                    options=[{'label': '', 'value': p_name}],
-                    value=port_val,
-                    inputStyle={'width': '10px', 'height': '10px',
-                                'cursor': 'pointer', 'margin': '0'},
-                    style={'display': 'flex', 'justifyContent': 'center',
-                           'alignItems': 'center', 'width': '100%'},
-                ),
-                style={'width': '10%', 'height': '22px', 'display': 'flex',
-                       'alignItems': 'center', 'justifyContent': 'center'},
-            ),
-            html.Div(html.Span(t_label, style={'color': t_color, 'fontWeight': 'bold',
-                                               'fontSize': '9px'}),
-                     style={'width': '15%', 'display': 'flex', 'alignItems': 'center',
-                            'justifyContent': 'center'}),
-            html.Div('', style={'width': '15%'}),
-            html.Div('', style={'width': '15%'}),
+    # Righe dei portafogli: si spuntano per metterli in tabella, i pesi stanno sopra.
+    for p_name in _PORT_RIGHE:
+        rows.append(html.Div([
+            html.Div(html.Span(p_name, style={
+                'color': '#0066cc', **NOME_ASSET, 'overflow': 'hidden',
+                'whiteSpace': 'nowrap', 'textOverflow': 'ellipsis', 'maxWidth': '100%'}),
+                style={'width': _LARG_NOME, 'height': '28px', 'display': 'flex',
+                       'alignItems': 'center', 'paddingLeft': '4px', 'overflow': 'hidden'}),
+            _chk({'type': 'rend-check', 'index': p_name}, p_name, p_name in selected, _LARG_CH),
+            html.Div('', style={'width': _LARG_PESO}),
+            html.Div('', style={'width': _LARG_PESO}),
+            html.Div('', style={'width': _LARG_PESO}),
         ], style={'display': 'flex', 'alignItems': 'center',
-                  'borderBottom': '1px dotted #eee', 'backgroundColor': '#eef4ff'})
-        rows.append(port_row)
+                  'borderBottom': '1px dotted #eee', 'backgroundColor': '#f0f0f0'}))
 
     # Opzioni benchmark: asset + portafogli configurati
     bench_options = [{'label': a, 'value': a} for a in asset_names]
-    for p_num, w_dict in [(1, p1), (2, p2), (3, p3)]:
-        if w_dict and any(v and v > 0 for v in w_dict.values()):
+    for p_num in (1, 2, 3):
+        if any(v and v > 0 for v in pesi[p_num].values()):
             bench_options.append({'label': f'Port{p_num}', 'value': f'Port{p_num}'})
 
-    return rows, bench_options
+    # le spunte disegnate diventano la selezione (collect_selected parte solo ai clic)
+    return rows, bench_options, [a for a in [*asset_names, *_PORT_RIGHE] if a in selected]
 
 
 # ─── Callback 3: Raccoglie asset selezionati ──────────────────────────────────
@@ -735,9 +806,10 @@ def update_weights(all_values, all_ids, p1, p2, p3):
     Input('rend-weights-p3', 'data'),
 )
 def update_weight_sums(p1, p2, p3):
-    base = {'width': '15%', 'textAlign': 'center', 'fontSize': '10px', 'fontWeight': 'bold'}
+    base = {'width': _LARG_PESO, 'textAlign': 'right', 'paddingRight': '5px',
+            'fontSize': '10px', 'fontWeight': 'bold', 'boxSizing': 'border-box'}
     def fmt(w_dict):
-        total = sum(w_dict.values()) if w_dict else 0
+        total = sum(v for v in (w_dict or {}).values() if v) if w_dict else 0
         color = '#2ca02c' if 99 <= total <= 101 else '#d62728'
         return f'{total:.1f}%', {**base, 'color': color}
     t1, s1 = fmt(p1)
@@ -746,47 +818,60 @@ def update_weight_sums(p1, p2, p3):
     return t1, s1, t2, s2, t3, s3
 
 
-# ─── Callback 6: Deseleziona / seleziona tutti ───────────────────────────────
+# ─── Callback 6: ☑ CH — se qualcosa è spuntato toglie tutto, altrimenti spunta
+#     tutti gli asset (non le righe Port1–3), come in Analisi Portafoglio ────────
 @app.callback(
     Output({'type': 'rend-check', 'index': ALL}, 'value'),
-    Output('rend-deselect-btn', 'children'),
     Input('rend-deselect-btn', 'n_clicks'),
     State({'type': 'rend-check', 'index': ALL}, 'value'),
-    State({'type': 'rend-check', 'index': ALL}, 'options'),
+    State({'type': 'rend-check', 'index': ALL}, 'id'),
     prevent_initial_call=True,
 )
-def toggle_all_checks(n, current_values, all_options):
-    if not all_options:
-        return [], 'Deseleziona'
+def toggle_all_checks(n, current_values, ids):
+    if not ids:
+        raise PreventUpdate
     if any(v for v in current_values):
-        return [[] for _ in all_options], 'Seleziona'
-    return [[opts[0]['value']] if opts else [] for opts in all_options], 'Deseleziona'
+        return [[] for _ in ids]
+    return [[] if d['index'] in _PORT_RIGHE else [d['index']] for d in ids]
 
 
-# ─── Callback 6b: Reset pesi P1 / P2 / P3 ───────────────────────────────────
+# ─── Callback 6b: ☑ P1/P2/P3 — se la colonna ha pesi li azzera, se è tutta a zero
+#     dà pesi uguali agli asset spuntati in CH (somma esatta 100) ──────────────
+def _equipesa(n):
+    """n pesi uguali che sommano esattamente 100 (passo 0,1): lo scarto si distribuisce
+    un decimo per asset sui primi. Stessa regola di _pf_equipesa nel Portafoglio."""
+    q, r = divmod(1000, n)
+    return [(q + 1) / 10 if k < r else q / 10 for k in range(n)]
+
+
 @app.callback(
-    Output('rend-weights-p1', 'data', allow_duplicate=True),
+    Output({'type': 'rend-weight', 'index': ALL}, 'value'),
     Input('rend-reset-p1-btn', 'n_clicks'),
-    prevent_initial_call=True,
-)
-def reset_p1(_):
-    return {}
-
-@app.callback(
-    Output('rend-weights-p2', 'data', allow_duplicate=True),
     Input('rend-reset-p2-btn', 'n_clicks'),
-    prevent_initial_call=True,
-)
-def reset_p2(_):
-    return {}
-
-@app.callback(
-    Output('rend-weights-p3', 'data', allow_duplicate=True),
     Input('rend-reset-p3-btn', 'n_clicks'),
+    State({'type': 'rend-weight', 'index': ALL}, 'id'),
+    State({'type': 'rend-weight', 'index': ALL}, 'value'),
+    State('rend-selected', 'data'),
     prevent_initial_call=True,
 )
-def reset_p3(_):
-    return {}
+def reset_pesi(n1, n2, n3, ids, valori, selected):
+    porta = {'rend-reset-p1-btn': 'P1', 'rend-reset-p2-btn': 'P2',
+             'rend-reset-p3-btn': 'P3'}.get(callback_context.triggered_id)
+    if not porta or not ids:
+        raise PreventUpdate
+    mie = [k for k, d in enumerate(ids) if d['index'].split('-', 1)[0] == porta]
+    out = [no_update] * len(ids)
+    if any(valori[k] for k in mie):
+        for k in mie:
+            out[k] = 0
+        return out
+    spuntati = set(selected or []) - set(_PORT_RIGHE)
+    scelti = [k for k in mie if ids[k]['index'].split('-', 1)[1] in spuntati]
+    if not scelti:
+        raise PreventUpdate
+    for k, w in zip(scelti, _equipesa(len(scelti))):
+        out[k] = w
+    return out
 
 
 # ─── Callback 7: Relay stores IR e RF ────────────────────────────────────────
@@ -812,7 +897,7 @@ def relay_rf(val):
     prevent_initial_call=True,
 )
 def relay_akr_w(val):
-    return max(5, int(val)) if val else 30
+    return max(5, int(val)) if val else _AKR_W
 
 @app.callback(
     Output('rend-akr-ma-store', 'data'),
@@ -820,7 +905,7 @@ def relay_akr_w(val):
     prevent_initial_call=True,
 )
 def relay_akr_ma(val):
-    return max(1, int(val)) if val else 1
+    return max(1, int(val)) if val else _AKR_MA
 
 @app.callback(
     Output('rend-akr-filter-store', 'data'),
@@ -862,8 +947,8 @@ def compute_performance(n_clicks, selected_items, stock_json, prices_json,
         print(f'[rendimenti] compute_performance error: {e}')
         raise PreventUpdate
 
-    akr_window = max(5, int(akr_window or 30))
-    akr_ma     = max(1, int(akr_ma     or 1))
+    akr_window = max(5, int(akr_window or _AKR_W))
+    akr_ma     = max(1, int(akr_ma     or _AKR_MA))
 
     # Costruisce prezzi portafogli
     portfolio_prices  = {}
@@ -1008,6 +1093,7 @@ def update_sort_state(n_clicks_list, current_sort):
 # ─── Callback 10: Renderizza la tabella ──────────────────────────────────────
 @app.callback(
     Output('rend-perf-table', 'children'),
+    Output('rend-info-tabella', 'children'),
     Input('rend-perf-data', 'data'),
     Input('rend-sort-state', 'data'),
     Input('rend-akr-filter-store', 'data'),
@@ -1016,9 +1102,9 @@ def update_sort_state(n_clicks_list, current_sort):
 def render_table(perf_data, sort_state, akr_filter):
     if not perf_data or not perf_data.get('rows'):
         return html.Div(
-            'Seleziona gli asset, configura i pesi e clicca "Aggiorna Tabella".',
+            'Seleziona gli asset, configura i pesi e clicca "Crea tabella".',
             style={'padding': '20px', 'color': '#666', 'fontSize': '13px'},
-        )
+        ), no_update
 
     rows_data = perf_data['rows']
     last_date  = perf_data.get('last_date', 'N/D')
@@ -1073,8 +1159,12 @@ def render_table(perf_data, sort_state, akr_filter):
             'border': '1px solid #0d2540', 'whiteSpace': 'nowrap',
         }
         if col_id is None:
-            th_style['textAlign'] = 'left'
-            th_style['minWidth']  = '160px'
+            # angolo in alto a sinistra: fermo sia scorrendo in giù sia di lato
+            th_style.update({'textAlign': 'left', 'minWidth': '0', 'left': '0', 'zIndex': '3'})
+        elif col_id == 'AKR':
+            # ferma accanto ai nomi (left dalla classe rend-akr), ombra sul suo bordo destro
+            th_style.update({'left': '0', 'zIndex': '3', 'minWidth': '0',
+                             'boxShadow': '2px 0 3px rgba(0,0,0,0.12)'})
 
         if col_id is not None:
             btn_style = {
@@ -1088,9 +1178,10 @@ def render_table(perf_data, sort_state, akr_filter):
                 html.Button(f'{label}{arrow}',
                             id={'type': 'rend-col-header', 'index': col_id},
                             n_clicks=0, style=btn_style),
-                style=th_style,
+                className='rend-th rend-akr' if col_id == 'AKR' else 'rend-th', style=th_style,
             )
-        return html.Th(label, style={**th_style, 'padding': '10px 14px'})
+        return html.Th(label, className='rend-th rend-td-nome',
+                       style={**th_style, 'padding': '10px 14px', 'fontSize': '12px'})
 
     header_cells = [make_th('Asset / Portafoglio')]
     # AKR — prima colonna numerica, sfondo viola come IR
@@ -1116,9 +1207,11 @@ def render_table(perf_data, sort_state, akr_filter):
             'color': '#0066cc' if is_portfolio else ('#ffffff' if is_akr_hit else '#222'),
             'backgroundColor': '#e53935' if is_akr_hit else row_bg,
             'position': 'sticky', 'left': '0', 'zIndex': '1',
-            'border': '1px solid #ddd', 'whiteSpace': 'nowrap', 'minWidth': '160px',
+            'border': '1px solid #ddd', 'whiteSpace': 'nowrap',
         }
-        cells = [html.Td(item, style=name_style)]
+        # colonna ferma: il nome lungo si accorcia («…») e il nome intero è nel title
+        cells = [html.Td(html.Div(item, className='rend-nome', title=item),
+                         className='rend-td-nome', style=name_style)]
 
         # Cella AKR
         akr_val = row.get('AKR')
@@ -1136,14 +1229,17 @@ def render_table(perf_data, sort_state, akr_filter):
                        'color': '#4a148c' if akr_val >= 0 else '#880e4f'}
         if sort_col == 'AKR' and akr_val is not None and not (isinstance(akr_val, float) and np.isnan(akr_val)):
             akr_cs['backgroundColor'] = '#d1c4e9' if akr_val >= 0 else '#f8bbd0'
-        cells.append(html.Td(akr_txt, style=akr_cs))
+        # ferma accanto ai nomi: sfondo pieno (già dato sopra), left dalla classe rend-akr
+        akr_cs.update({'position': 'sticky', 'left': '0', 'zIndex': '1',
+                       'boxShadow': '2px 0 3px rgba(0,0,0,0.12)'})
+        cells.append(html.Td(akr_txt, className='rend-td rend-akr', style=akr_cs))
 
         for period in ret_cols:
             val = row.get(period)
             cs = get_cell_style(val, is_portfolio=is_portfolio)
             if sort_col == period and val is not None and not (isinstance(val, float) and np.isnan(val)):
                 cs['backgroundColor'] = '#d0edce' if val >= 0 else '#ffdde0'
-            cells.append(html.Td(format_return(val), style=cs))
+            cells.append(html.Td(format_return(val), className='rend-td', style=cs))
 
         for period in ir_cols:
             val = row.get(period)
@@ -1161,7 +1257,7 @@ def render_table(perf_data, sort_state, akr_filter):
                        'color': '#4a148c' if val >= 0 else '#880e4f'}
             if sort_col == period and val is not None and not (isinstance(val, float) and np.isnan(val)):
                 cs['backgroundColor'] = '#d1c4e9' if val >= 0 else '#f8bbd0'
-            cells.append(html.Td(txt, style=cs))
+            cells.append(html.Td(txt, className='rend-td', style=cs))
 
         for period in sr_cols:
             val = row.get(period)
@@ -1179,36 +1275,24 @@ def render_table(perf_data, sort_state, akr_filter):
                        'color': '#7a5c00' if val >= 0 else '#a03000'}
             if sort_col == period and val is not None and not (isinstance(val, float) and np.isnan(val)):
                 cs['backgroundColor'] = '#ffe082' if val >= 0 else '#ffccbc'
-            cells.append(html.Td(txt, style=cs))
+            cells.append(html.Td(txt, className='rend-td', style=cs))
 
         table_rows.append(html.Tr(cells, style={'backgroundColor': row_bg}))
 
+    # border-collapse separate: con collapse i bordi della colonna ferma scorrerebbero via
     table = html.Table(table_rows, style={
-        'borderCollapse': 'collapse', 'width': '100%',
-        'fontFamily': 'Arial, sans-serif',
+        'borderCollapse': 'separate', 'borderSpacing': '0', 'width': '100%',
     })
 
-    info_parts = [
-        html.Span(f'Dati al: {last_date}',
-                  style={'fontSize': '11px', 'color': '#555', 'marginRight': '16px'}),
-    ]
+    # Descrizione della tabella nel menu ⚙ accanto a Crea tabella.
+    info = [html.Div([html.B('Dati al: '), last_date])]
     if benchmark:
-        info_parts.append(html.Span(
-            f'Benchmark: {benchmark} · AK-W: {akr_window}' + (f' · MA: {akr_ma}' if akr_ma > 1 else ''),
-            style={'fontSize': '11px', 'color': '#4a1a7c', 'fontWeight': '600',
-                   'marginRight': '16px'},
-        ))
-    info_parts.append(html.Span(
-        'Verde = positivo · Rosso = negativo · Clicca intestazione per ordinare',
-        style={'fontSize': '11px', 'color': '#555'},
-    ))
-
-    info_bar = html.Div(info_parts, style={
-        'padding': '8px 12px', 'backgroundColor': '#f0f4fa',
-        'borderBottom': '1px solid #ddd',
-    })
-
-    return html.Div([info_bar, table])
+        info.append(html.Div([html.B('Benchmark: '), f'{benchmark} · AK-W: {akr_window}'
+                              + (f' · MA: {akr_ma}' if akr_ma > 1 else '')],
+                             style={'color': '#4a1a7c'}))
+    info.append(html.Div('Verde = positivo · Rosso = negativo · Clicca intestazione per ordinare',
+                         style={'color': '#555'}))
+    return html.Div(table, className='rend-scorri'), info
 
 
 # ─── Colora di rosso i nomi asset nella griglia di sinistra se passano AKR ───
@@ -1235,7 +1319,8 @@ def color_asset_names(perf_data, akr_filter, ids):
             v = akr_map.get(d['index'])
             if v is not None and not (isinstance(v, float) and np.isnan(v)) and v > threshold:
                 hit = True
-        out.append({**_RASSET_BASE, 'color': '#e53935' if hit else '#1a3a5c'})
+        out.append({**_RASSET_BASE,
+                    'boxShadow': f'inset 0 0 0 1.5px {_ROSSO_AKR}' if hit else 'none'})
     return out
 
 
@@ -1257,14 +1342,6 @@ def rend_live_sync(_, sig):
     op, cr = _reconstruct_from_json(ns)
     if op is None or cr is None:
         raise PreventUpdate
-    n = len(op.columns)
-    label = html.Span([
-        html.I(className='fa-solid fa-circle-info',
-               style={'marginRight': '6px', 'color': '#1a3a6b'}),
-        html.Span(ETICHETTA_PERSONALE, style={'fontWeight': '700', 'color': '#1a5c1a',
-                                          'marginRight': '8px'}),
-        f'{n} asset',
-    ])
     return (op.to_json(orient='split', date_format='iso'),
             cr.to_json(orient='split', date_format='iso'),
-            label, new_sig)
+            None, new_sig)

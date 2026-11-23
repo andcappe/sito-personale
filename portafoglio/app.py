@@ -139,15 +139,37 @@ app.index_string = '''
 // dentro l'iframe della Frontiera (stessa origine).
 document.addEventListener('click', function(e){
   if (!e.target.closest) return;
+  // «Crea tabella» della riga in alto (cellulare): preme il pulsante vero dei Rendimenti.
+  if (e.target.closest('#pf-crea-cell')) {
+    try {
+      var fr = document.getElementById('iframe-rendimenti');
+      var bt = fr && fr.contentDocument && fr.contentDocument.getElementById('rend-update-btn');
+      if (bt) bt.click();
+    } catch (err) {}
+    return;
+  }
   var calc = e.target.closest('#pf-ricalcola-cell'), info = e.target.closest('#pf-info-cell');
   var pop = document.getElementById('pf-info-pop');
   if (pop && !info && !pop.contains(e.target)) pop.remove();
+  // Un clic fuori dall'iframe dei Rendimenti chiude il suo menu ⚙ (il clic non gli arriva).
+  try {
+    var ir = document.getElementById('iframe-rendimenti');
+    if (ir && ir.contentDocument) ir.contentDocument.querySelectorAll('details.rend-menu[open]')
+      .forEach(function(d){ d.removeAttribute('open'); });
+  } catch (err) {}
   if (!calc && !info) return;
   // ⚙ sul tab Analisi: copia del menu «Descrizione dati tabella», che sta nei Parametri
   // (sezione che sul cellulare può essere chiusa). Sola lettura, senza id doppi.
   if (info && info.getAttribute('data-tab') !== 'tab-frontiera') {
     if (pop) { pop.remove(); return; }
     var orig = document.querySelector('.pf-info > .pf-strumenti-menu');
+    // Tab Rendimenti: il menu ⚙ sta nei Parametri dell'iframe (sezione chiusa all'apertura).
+    if (info.getAttribute('data-tab') === 'tab-rendimenti') {
+      try {
+        var irf = document.getElementById('iframe-rendimenti');
+        orig = irf && irf.contentDocument && irf.contentDocument.querySelector('.rend-menu-corpo');
+      } catch (err) { orig = null; }
+    }
     if (!orig) return;
     pop = orig.cloneNode(true);
     pop.id = 'pf-info-pop';
@@ -3702,6 +3724,11 @@ app.layout = html.Div([
                         style={**{k: v for k, v in _PF_BTN_PRINCIPALE.items() if k != 'display'},
                                'background-color': '#0066cc', 'white-space': 'nowrap',
                                'padding': '7px 12px', 'margin-left': '8px'}),
+            # Sul tab Rendimenti Storici, al posto di Update: preme «Crea tabella» nell'iframe.
+            html.Button('Crea tabella', id='pf-crea-cell', className='nb-solo-cell pf-via',
+                        style={**{k: v for k, v in _PF_BTN_PRINCIPALE.items() if k != 'display'},
+                               'white-space': 'nowrap',
+                               'padding': '7px 12px', 'margin-left': '8px'}),
             # ⚙ accanto: sul tab Analisi mostra «Descrizione dati tabella», sul tab Frontiera
             # apre il menu informazioni della Frontiera (fe-info nell'iframe).
             html.Button('⚙', id='pf-info-cell', className='nb-solo-cell', title='Informazioni',
@@ -4232,6 +4259,7 @@ app.layout = html.Div([
     # Larghezza della finestra, letta dal browser: il grafico di Analisi Portafoglio
     # si costruisce sul server e sul cellulare cambia disposizione delle legende.
     dcc.Store(id='pf-larghezza'),
+    dcc.Store(id='pf-parametri-condivisi'),
     # larghezza vera del riquadro del grafico (sul computer allinea la legenda)
     dcc.Store(id='pf-larg-grafico'),
     dcc.Store(id='pf-legenda-adatta'),
@@ -4836,25 +4864,50 @@ def render_tab1(active_tab, options_tickers):
     return get_portfolio_analysis_tab(options_tickers), show, hide, hide, hide, hide, hide
 
 
-# Riga in alto sul cellulare: sul tab Frontiera «Ricalcola Frontiera» prende il posto di Update.
+# Parametri dell'Analisi condivisi con Rendimenti Storici (stessa origine, quindi stesso
+# localStorage anche dentro l'iframe): Rendimenti li legge all'apertura.
+app.clientside_callback(
+    """function(bench, w, ma, filtro) {
+        try {
+            var p = {bench: bench, akr_w: w, akr_ma: ma, filtro: filtro};
+            Object.keys(p).forEach(function(k) {
+                if (p[k] !== null && p[k] !== undefined && p[k] !== '')
+                    localStorage.setItem('par-' + k, JSON.stringify(p[k]));
+            });
+        } catch (e) {}
+        return window.dash_clientside.no_update;
+    }""",
+    Output('pf-parametri-condivisi', 'data'),
+    Input('benchmark-selector', 'value'),
+    Input('ir-window-input', 'value'),
+    Input('ak-ma-input', 'value'),
+    Input('ir-filter-radio', 'value'),
+)
+
+
+# Riga in alto sul cellulare: sul tab Frontiera «Ricalcola Frontiera» e sul tab Rendimenti
+# «Crea tabella» prendono il posto di Update.
 app.clientside_callback(
     """function(tab) {
         var fr = tab === 'tab-frontiera';
         var r = document.getElementById('pf-ricalcola-cell');
         if (r) r.style.backgroundColor = '#0066cc';   // l'iframe riparte senza frontiera
         // ⚙ sul tab Analisi (menu «Descrizione dati tabella») e sul tab Frontiera (fe-info)
-        var info = fr || tab === 'tab-portfolio';
+        var rd = tab === 'tab-rendimenti';
+        var info = fr || rd || tab === 'tab-portfolio';
         var g = document.getElementById('pf-info-cell');
         if (g) g.setAttribute('data-tab', tab || '');
         var pop = document.getElementById('pf-info-pop');
         if (pop) pop.remove();
-        return [fr ? 'nb-solo-cell nb-clicca pf-via' : 'nb-solo-cell nb-clicca',
+        return [(fr || rd) ? 'nb-solo-cell nb-clicca pf-via' : 'nb-solo-cell nb-clicca',
                 fr ? 'nb-solo-cell' : 'nb-solo-cell pf-via',
-                info ? 'nb-solo-cell' : 'nb-solo-cell pf-via'];
+                info ? 'nb-solo-cell' : 'nb-solo-cell pf-via',
+                rd ? 'nb-solo-cell' : 'nb-solo-cell pf-via'];
     }""",
     Output('pf-update-cell', 'className'),
     Output('pf-ricalcola-cell', 'className'),
     Output('pf-info-cell', 'className'),
+    Output('pf-crea-cell', 'className'),
     Input('main-tabs', 'value'),
 )
 
