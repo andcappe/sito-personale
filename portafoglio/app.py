@@ -4185,6 +4185,7 @@ app.layout = html.Div([
     dcc.Store(id='pf-larghezza'),
     # larghezza vera del riquadro del grafico (sul computer allinea la legenda)
     dcc.Store(id='pf-larg-grafico'),
+    dcc.Store(id='pf-legenda-adatta'),
     dcc.Tabs(id='main-tabs', value='tab-portfolio',
              parent_className='nb-nascondi-cell',
              style={'margin': '0 0 0 0'},
@@ -4277,21 +4278,10 @@ app.clientside_callback(
             var r = g ? Math.round(g.getBoundingClientRect().width) : 0;
             if (r > 0) { try { window.dash_clientside.set_props('pf-larg-grafico', {data: r}); } catch (e) {} }
         }
-        // Sul computer il grafico si ridisegna solo passando i 900 px: restringendo
-        // la finestra (pannello laterale, devtools, zoom) Plotly stringeva il grafico ma
-        // le voci della legenda restavano larghe quanto calcolato prima, due non ci
-        // stavano più e la legenda passava a una colonna. Qui si ricalcola la larghezza
-        // della voce come _pf_legenda_unica (area = figura − 80 − 20; voce = (area − 92) / 2)
-        // e la si passa a Plotly, senza ridisegnare dal server.
+        // La legenda si adatta in pf-legenda-adatta (dopo ogni disegno e a ogni cambio
+        // di larghezza del riquadro): qui basta richiamarla.
         function adattaLegenda() {
-            if (window.innerWidth <= MAX) { return; }
-            var gd = document.querySelector('#controls-and-graph .js-plotly-plot');
-            var lg = gd && gd.layout && gd.layout.legend;
-            if (!lg || lg.entrywidthmode !== 'pixels' || !window.Plotly) { return; }
-            var area = Math.max(150, gd.getBoundingClientRect().width - 100);
-            var voce = Math.max(60, Math.floor((area - 92) / 2));
-            if (Math.abs((lg.entrywidth || 0) - voce) < 2) { return; }
-            try { window.Plotly.relayout(gd, {'legend.entrywidth': voce}); } catch (e) {}
+            if (window._pfAdattaLegenda) { window._pfAdattaLegenda(); }
         }
         function serve(w, p) {
             if (!p) { return true; }
@@ -4324,6 +4314,94 @@ app.clientside_callback(
     Output('pf-larghezza', 'data'),
     Input('main-tabs', 'value'),
     State('pf-larghezza', 'data'),
+)
+
+# Legenda su due colonne, garantita dal browser (computer e cellulare).
+# _pf_legenda_unica calcola sul server la larghezza della voce, ma con una larghezza del
+# riquadro misurata prima (all'apertura o all'ultimo resize della finestra). Se poi il
+# riquadro cambia per altri motivi (la griglia asset carica e compare la barra di
+# scorrimento, una sezione si apre o si chiude, Safari misura il testo un po' più
+# largo), le due voci non stanno più nella riga e Plotly le mette una per riga.
+# Qui, dopo ogni figura nuova e a ogni cambio di larghezza del riquadro
+# (ResizeObserver), si ricalcola la voce sull'area vera del grafico (_fullLayout._size.w,
+# così la legenda resta larga quanto i grafici sotto) e si CONTROLLA il risultato: se
+# le voci stanno ancora in una colonna si stringono di 15 px alla volta (max 6 tentativi).
+app.clientside_callback(
+    """function (fig) {
+        if (!window._pfAdattaLegenda) {
+            window._pfAdattaLegenda = function () {
+                if (!window.Plotly) { return; }
+                var cell = window.innerWidth <= 900;
+                var gd = document.querySelector('#controls-and-graph .js-plotly-plot');
+                var fl = gd && gd._fullLayout;
+                var lg = gd && gd.layout && gd.layout.legend;
+                if (!fl || !fl._size || !lg || lg.entrywidthmode !== 'pixels') { return; }
+                if (gd._pfLegInCorso) { return; }
+                // Computer: due voci = area del grafico (legenda da x=0, allineata ai grafici).
+                // Cellulare: la legenda parte dal bordo della figura (x negativo), come in
+                // _pf_legenda_unica: voce = (figura − 20) / 2 − 55.
+                var voce = cell ? Math.max(60, Math.floor((fl.width - 20) / 2) - 55)
+                                : Math.max(60, Math.floor((fl._size.w - 92) / 2));
+                var tentativi = 0;
+                function colonne() {
+                    var xs = {}, n = 0;
+                    gd.querySelectorAll('.legend .traces').forEach(function (e) {
+                        xs[Math.round(e.getBoundingClientRect().left)] = 1; n++;
+                    });
+                    return [Object.keys(xs).length, n];
+                }
+                function verifica() {
+                    var c = colonne();
+                    if (c[1] > 1 && c[0] < 2 && tentativi < 6 && voce > 60) {
+                        tentativi++; voce = Math.max(60, voce - 15); imposta();
+                    }
+                }
+                function imposta() {
+                    if (Math.abs((gd.layout.legend.entrywidth || 0) - voce) < 1) { verifica(); return; }
+                    gd._pfLegInCorso = true;
+                    Promise.resolve(window.Plotly.relayout(gd, {'legend.entrywidth': voce}))
+                        .then(function () { gd._pfLegInCorso = false; verifica(); },
+                              function () { gd._pfLegInCorso = false; });
+                }
+                imposta();
+            };
+        }
+        // Nomi accorciati in legenda («…»): passandoci sopra si apre lo stesso popup dei
+        // nomi nella griglia asset (data-tooltip, script nell'index_string), bordato col
+        // colore dell'asset. Il nome intero è il legendgroup del segnaposto. Plotly
+        // ridisegna le voci a ogni clic/relayout: si rimarcano a ogni plotly_afterplot.
+        function marcaNomi(gd) {
+            gd.querySelectorAll('.legend .traces').forEach(function (e) {
+                var d = e.__data__, tr = d && d[0] && d[0].trace;
+                if (!tr) { return; }
+                var nome = tr.name || '', pieno = tr.legendgroup || '';
+                if (pieno && nome !== pieno && nome.slice(-1) === '\u2026') {
+                    e.setAttribute('data-tooltip', pieno);
+                    e.setAttribute('data-tooltip-color', (tr.line && tr.line.color) || '#1a3a6b');
+                } else {
+                    e.removeAttribute('data-tooltip');
+                }
+            });
+        }
+        var gd = document.querySelector('#controls-and-graph .js-plotly-plot');
+        if (gd && gd.on && !gd._pfMarcaNomi) {
+            gd._pfMarcaNomi = true;
+            gd.on('plotly_afterplot', function () { marcaNomi(gd); });
+        }
+        if (gd) { setTimeout(function () { marcaNomi(gd); }, 350); }
+        var box = document.getElementById('controls-and-graph');
+        if (box && window.ResizeObserver && !box._pfOsserva) {
+            box._pfOsserva = true;
+            var t = null;
+            new ResizeObserver(function () {
+                clearTimeout(t); t = setTimeout(window._pfAdattaLegenda, 250);
+            }).observe(box);
+        }
+        setTimeout(window._pfAdattaLegenda, 300);
+        return window.dash_clientside.no_update;
+    }""",
+    Output('pf-legenda-adatta', 'data'),
+    Input('controls-and-graph', 'figure'),
 )
 
 # Soglia del cellulare, la stessa delle regole CSS di navbar.NAVBAR_CSS.
@@ -6972,6 +7050,12 @@ def toggle_update_hint(stock_data, update_clicks):
     return _hidden
 
 
+# Riquadro del nome asset nella griglia: padding fisso, il filo (box-shadow inset)
+# lo imposta _pf_colora_nomi, quindi il testo non si sposta quando compare.
+_PF_NOME_FILO = {'padding': '3px 6px', 'borderRadius': '5px',
+                 'boxSizing': 'border-box', 'boxShadow': 'none'}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Callback: griglia pesi e asset
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7102,20 +7186,23 @@ def generate_asset_and_weight_inputs(update_clicks, stock_data_json, options_tic
             )
 
         asset_val   = [asset]                       if asset in saved_selected else []
-        _label_color = '#c0392b' if asset in assets_above_threshold else '#1a3a5c'
+        # i fili rosso/blu intorno al nome li mette _pf_colora_nomi (anche al cambio del
+        # filtro AKR, senza Update); il testo resta del colore base
+        _label_color = '#1a3a5c'
 
         row_content = html.Div([
             html.Div(
-                # id per _pf_storia_corta, che lo colora di rosso se l'asset non
-                # copre il range date; '--pf-base' ricorda il colore di partenza.
+                # id per _pf_colora_nomi: filo rosso col filtro AKR, filo blu se la
+                # serie storica non copre il range date (padding fisso: il testo non
+                # si sposta quando il filo compare).
                 html.Span(asset, id={'type': 'pf-nome-asset', 'index': asset}, style={
-                    'color': _label_color, '--pf-base': _label_color, **NOME_ASSET,
+                    'color': _label_color, **NOME_ASSET, **_PF_NOME_FILO,
                     'overflow': 'hidden', 'whiteSpace': 'nowrap',
                     'textOverflow': 'ellipsis', 'maxWidth': '100%',
                 }),
                 **{'data-tooltip': asset, 'data-tooltip-color': _label_color},
                 style={'width': _LARG_NOME, 'height': '28px', 'display': 'flex',
-                       'alignItems': 'center', 'paddingLeft': '4px',
+                       'alignItems': 'center', 'paddingLeft': '0px',
                        'overflow': 'hidden', 'position': 'relative', 'cursor': 'default'},
             ),
             _chk({'type': 'graph-select-checkbox',  'index': asset}, asset, asset_val, _LARG_CH),
@@ -7199,58 +7286,130 @@ def collect_selected_assets(all_values):
 # Callbacks: pulsanti cancella colonna
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
-# Callback: in rosso gli asset che non coprono tutto il range date scelto
+# Callback: colore dei nomi asset nella griglia
+#   filo rosso = AKRatio sopra la soglia del filtro AKR (solo con «>−1» o «>0»; con «Tutti» mai)
+#   filo blu   = serie storica che non copre il range date scelto (parte dopo o finisce prima)
+#   entrambi   = filo rosso fuori e blu dentro; il testo resta sempre del colore base
+# Passandoci sopra, il popup del nome (data-tooltip sullo Span, che vince su quello del
+# Div intorno) dice perché: da quando parte la serie, e il valore dell'AKRatio.
+# Stesso blu della Frontiera (_FE_BLU_STORIA in frontiera-efficiente/app.py).
 # ─────────────────────────────────────────────────────────────────────────────
 _PF_ROSSO = '#c0392b'
+_PF_BLU_STORIA = '#1d6fe0'
+_PF_NOME_BASE = '#1a3a5c'
+
+
+def _pf_fili(rosso, blu):
+    """Fili intorno al nome (box-shadow inset: dentro il riquadro, quindi la cella
+    stretta con overflow hidden non li taglia). Entrambi: rosso fuori, blu dentro."""
+    if rosso and blu:
+        return (f'inset 0 0 0 1.5px {_PF_ROSSO}, inset 0 0 0 2.5px #fff, '
+                f'inset 0 0 0 4px {_PF_BLU_STORIA}')
+    if rosso:
+        return f'inset 0 0 0 1.5px {_PF_ROSSO}'
+    if blu:
+        return f'inset 0 0 0 1.5px {_PF_BLU_STORIA}'
+    return 'none'
 _PF_STORIA_TOLLERANZA = pd.Timedelta(days=7)   # weekend, festivi, date di inizio non di borsa
+
+
+def _pf_akr_sopra_soglia(df, benchmark, finestra, filtro):
+    """{asset: ultimo AKRatio} per gli asset sopra la soglia del filtro AKR
+    (stesso calcolo di generate_asset_and_weight_inputs)."""
+    if not filtro or filtro == 'all' or not benchmark or benchmark not in df.columns:
+        return {}
+    finestra = finestra if (finestra and finestra > 0) else 30
+    soglia = 0.0 if filtro == 'gt_0' else -1.0
+    bench = df[benchmark].dropna()
+    sopra = {}
+    for a in df.columns:
+        if a == benchmark:
+            continue
+        coda = pd.concat([df[a].dropna(), bench], axis=1).dropna().iloc[-finestra:]
+        if len(coda) < finestra:
+            continue
+        v = calculate_rolling_information_ratio(coda.iloc[:, 0], coda.iloc[:, 1],
+                                                window=finestra).iloc[-1]
+        if pd.notna(v) and v > soglia:
+            sopra[a] = float(v)
+    return sopra
 
 
 @app.callback(
     Output({'type': 'pf-nome-asset', 'index': ALL}, 'style'),
-    Output({'type': 'pf-nome-asset', 'index': ALL}, 'title'),
+    Output({'type': 'pf-nome-asset', 'index': ALL}, 'data-tooltip'),
+    Output({'type': 'pf-nome-asset', 'index': ALL}, 'data-tooltip-color'),
+    Output('asset-count-display', 'children', allow_duplicate=True),
     Input('dr-start-tab1', 'date'),
     Input('dr-end-tab1',   'date'),
     Input('weights-grid-container', 'children'),
+    Input('ir-filter-radio',    'value'),
+    Input('benchmark-selector', 'value'),
+    Input('ir-window-input',    'value'),
     State('stock-data', 'data'),
     State({'type': 'pf-nome-asset', 'index': ALL}, 'id'),
     State({'type': 'pf-nome-asset', 'index': ALL}, 'style'),
     prevent_initial_call=True,
 )
-def _pf_storia_corta(start, end, _griglia, stock_data, ids, stili):
-    """Nome in rosso (e spiegazione al passaggio del mouse) per l'asset che ha
-    dati solo da dopo l'inizio del range o si ferma prima della fine. Senza
-    questo gli anni mancanti contano come rendimento 0 senza alcun avviso."""
+def _pf_colora_nomi(start, end, _griglia, filtro, benchmark, finestra, stock_data, ids, stili):
+    """Senza l'avviso blu gli anni mancanti di una serie corta conterebbero come
+    rendimento 0 senza che nulla lo dica (vedi _buyhold_cum)."""
     if not ids:
         raise PreventUpdate
     df = _get_df(stock_data)
     if df is None or df.empty:
         with _DL_LOCK:
             df = _DL_BUFFER.get('close_returns')
-    if df is None or df.empty or not start or not end:
+    if df is None or df.empty:
         raise PreventUpdate
-    ini = max(pd.Timestamp(start[:10]), df.index.min())
-    fin = min(pd.Timestamp(end[:10]), df.index.max())
+    akr = _pf_akr_sopra_soglia(df, benchmark, finestra, filtro)
+    ini = max(pd.Timestamp(start[:10]), df.index.min()) if start else df.index.min()
+    fin = min(pd.Timestamp(end[:10]), df.index.max()) if end else df.index.max()
     g = lambda t: t.strftime('%d/%m/%Y')
-    nuovi, titoli = [], []
+    etichetta = '> 0' if filtro == 'gt_0' else '> −1'
+    nuovi, popup, colori = [], [], []
+    n_rossi = n_blu = 0
     for i, st in zip(ids, stili):
         st = dict(st or {})
-        base = st.get('--pf-base', st.get('color'))
         a = i['index']
-        titolo = None
+        righe = []
+        corta = False
         if a in df.columns:
-            serie = df[a].loc[ini:fin].dropna()
-            if serie.empty:
-                titolo = f'Nessun dato fra il {g(ini)} e il {g(fin)}'
+            tutta = df[a].dropna()
+            serie = tutta.loc[ini:fin]
+            if tutta.empty or serie.empty:
+                corta = True
+                righe.append(f'nessun dato fra il {g(ini)} e il {g(fin)}')
             else:
                 if serie.index[0] > ini + _PF_STORIA_TOLLERANZA:
-                    titolo = f'Dati solo dal {g(serie.index[0])}: il range parte dal {g(ini)}'
+                    corta = True
+                    righe.append(f'serie storica dal {g(tutta.index[0])} '
+                                 f'(il range parte dal {g(ini)})')
                 if serie.index[-1] < fin - _PF_STORIA_TOLLERANZA:
-                    titolo = ((titolo + '; ') if titolo else '') + \
-                             f'dati fermi al {g(serie.index[-1])}: il range finisce il {g(fin)}'
-        st['color'] = _PF_ROSSO if titolo else base
+                    corta = True
+                    righe.append(f'dati fermi al {g(serie.index[-1])} '
+                                 f'(il range finisce il {g(fin)})')
+        if a in akr:
+            righe.insert(0, f'AKRatio {akr[a]:.2f} ({etichetta})')
+        # Testo sempre del colore base; le condizioni sono fili intorno al nome, così si
+        # distinguono tutte e quattro le combinazioni. Bordo del popup: rosso se c'è
+        # l'AKR, altrimenti blu.
+        colore = _PF_ROSSO if a in akr else (_PF_BLU_STORIA if corta else _PF_NOME_BASE)
+        n_rossi += a in akr
+        n_blu += corta
+        st['color'] = _PF_NOME_BASE
+        st['boxShadow'] = _pf_fili(a in akr, corta)
+        st.pop('--pf-base', None)
         nuovi.append(st)
-        titoli.append(titolo)
-    return nuovi, titoli
+        popup.append(f'{a} — ' + '; '.join(righe) if righe else None)
+        colori.append(colore)
+    conta = [_pf_info_riga('Numero asset:', f'{len(ids)}')]
+    if filtro and filtro != 'all':
+        conta.append(_pf_info_riga(f'Filo rosso (AKRatio {etichetta}):', f'{n_rossi}', _PF_ROSSO))
+    if n_blu:
+        conta.append(_pf_info_riga('Filo blu (serie storica più corta del range):',
+                                   f'{n_blu}', _PF_BLU_STORIA))
+    return nuovi, popup, colori, conta
 
 
 # Righe dei portafogli nella griglia (hanno la spunta CH ma non sono asset).
@@ -9271,6 +9430,29 @@ def _scheduled_update_utenti():
             _DL_STATE = stato_prima
 
 
+def _scheduled_arima_utenti():
+    """ARIMA+GARCH notturno di ogni utente (sessions/<u>/arima_garch.json), su tutti
+    gli asset di current.json appena aggiornati dal job dei dati utenti. Frontiera
+    durante il giorno aggiunge soltanto gli asset che mancano."""
+    try:
+        import arima_utenti
+    except Exception as e:
+        print(f"⚠ ARIMA utenti: modulo non disponibile ({e})")
+        return
+    for u in _utenti_con_dati():
+        try:
+            cr, _op, tm = dc.build_dataset(u)
+            if cr is None or cr.empty:
+                continue
+            assets = [a for a in cr.columns if cr[a].notna().any()]
+            t0 = time.time()
+            arima_utenti.aggiorna(u, cr, assets, tickers=tm)
+            arima_utenti.ripulisci(u, list(cr.columns))
+            print(f"✓ ARIMA {u}: {len(assets)} asset in {time.time() - t0:.0f} s")
+        except Exception as e:
+            print(f"⚠ ARIMA {u} fallito: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Callback: reset asset ai default
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9402,6 +9584,7 @@ def _programma_job_notturni(scheduler):
         _aggiungi(_scheduled_update_file, i, f"dati_{nome}", Path(nome).stem, [nome])
     _aggiungi(_scheduled_arima, len(nomi), 'arima', 'ARIMA')
     _aggiungi(_scheduled_update_utenti, len(nomi) + 1, 'dati_utenti', 'utenti')
+    _aggiungi(_scheduled_arima_utenti, len(nomi) + 2, 'arima_utenti', 'ARIMA utenti')
     return ', '.join(righe)
 
 

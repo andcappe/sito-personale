@@ -26,6 +26,8 @@ _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from settings.browser_css import BROWSER_RESET_CSS, FONT
 from settings.caratteri import NOME_ASSET
 import sessions_manager as _sm
+import arima_utenti
+import time
 
 # ─────────────────────────────────────────────────────────────────────────────
 # App
@@ -229,11 +231,11 @@ def _port_cvar(w, returns_df, pct):
     return float(-mean_tail * np.sqrt(252))
 
 _ARIMA_LOCK  = threading.Lock()
-_ARIMA_STATE = {
-    'req_id': None, 'running': False, 'done': False,
-    'pct': 0, 'total': 0, 'error': None, 'mu': None, 'cov': None,
-    'precompute': False, 'sig': '',
-}
+# Calcoli ARIMA in background, uno per richiesta: req_id → {pct, total, done, error}.
+# Prima lo stato era uno solo per tutto il processo (due utenti si rubavano la barra).
+_ARIMA_JOBS = {}
+_ARIMA_FALLITI = {}      # utente → istante dell'ultimo calcolo fallito (niente giri a vuoto)
+_ARIMA_RIPROVA_S = 900
 _ARIMA_CACHE_INFO = {'available': False, 'ts': ''}
 
 # ── Stili barra di avanzamento ARIMA (riusati da più callback) ───────────────
@@ -251,145 +253,23 @@ def _arima_bar_style(pct, color='#1a3a6b'):
             'transition': 'width 0.3s ease'}
 
 
-def _arima_garch_mu_vol(returns_df, window=250, req_id=None):
-    """ARIMA(p,0,q) best-AIC + GARCH(1,1) sui residui.
-    Restituisce (mu_series_daily, cov_df_daily).
-
-    μ  = media incondizionale ARIMA = const/(1-Σφᵢ)
-         → aspettativa a lungo orizzonte, stabile e coerente con Markowitz.
-         La previsione condizionale a 1 passo (forecast) NON va usata:
-         dipende dai residui recenti e annualizzata ×252 produce μ caotici.
-    σ  = volatilità condizionale GARCH 1-step → cattura il regime di rischio corrente.
-    Σ  = D_garch @ corr_resid @ D_garch   (correlazioni sui residui ARIMA).
-    """
-    import warnings
-    try:
-        from statsmodels.tsa.arima.model import ARIMA as _ARIMA_CLS
-    except ImportError:
-        return returns_df.mean(), returns_df.cov()
-    try:
-        from arch import arch_model as _arch_model
-        _has_arch = True
-    except ImportError:
-        _has_arch = False
-
-    mu_dict        = {}
-    vol_daily_dict = {}
-    resid_dict     = {}   # residui ARIMA allineati per calcolo correlazioni
-    cols = returns_df.columns.tolist()
-
-    with _ARIMA_LOCK:
-        if req_id and _ARIMA_STATE.get('req_id') == req_id:
-            _ARIMA_STATE['total'] = len(cols)
-            _ARIMA_STATE['pct']   = 0
-
-    for i, col in enumerate(cols):
-        s = returns_df[col].dropna().tail(window)
-        if len(s) < 30:
-            mu_dict[col]        = float(s.mean())
-            vol_daily_dict[col] = float(s.std())
-            resid_dict[col]     = (s - s.mean()).values
-        else:
-            best_aic   = np.inf
-            best_resid = (s - s.mean()).values
-            best_model = None
-            for p in range(3):
-                for q in range(3):
-                    if p == 0 and q == 0:
-                        continue
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter('ignore')
-                            m = _ARIMA_CLS(s, order=(p, 0, q)).fit()
-                        if m.aic < best_aic:
-                            best_aic   = m.aic
-                            best_resid = m.resid.values
-                            best_model = m
-                    except Exception:
-                        pass
-
-            # ── μ incondizionale: const / (1 - Σ φᵢ) ───────────────────────
-            # Aspettativa a lungo orizzonte del processo ARIMA.
-            # Guard: se Σφᵢ > 0.85 (near-unit-root), denom < 0.15 è mal
-            # identificato e amplifica la costante → fallback a media campionaria.
-            # Sanity cap: se il risultato supera 5× la media storica, è un
-            # artefatto numerico → fallback.
-            best_mu   = float(s.mean())   # default: media campionaria
-            hist_mean = float(s.mean())
-            if best_model is not None:
-                try:
-                    par = best_model.params
-                    ar_coefs = [par[k] for k in par.index if k.startswith('ar.')]
-                    ar_sum   = sum(ar_coefs)
-                    denom    = 1.0 - ar_sum
-                    if 'const' in par.index and abs(denom) > 0.15:
-                        mu_candidate = float(par['const'] / denom)
-                        # Sanity: scarta se > 5× la media storica in valore assoluto
-                        if hist_mean != 0 and abs(mu_candidate) > 5 * abs(hist_mean) + 1e-5:
-                            best_mu = hist_mean
-                        else:
-                            best_mu = mu_candidate
-                    else:
-                        best_mu = float(best_model.fittedvalues.mean())
-                except Exception:
-                    best_mu = float(s.mean())
-
-            mu_dict[col]    = best_mu
-            resid_dict[col] = best_resid
-
-            # ── σ condizionale: GARCH(1,1) 1-step ───────────────────────────
-            if _has_arch and len(best_resid) > 20:
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter('ignore')
-                        scaled = best_resid * 100
-                        gm = _arch_model(scaled, vol='Garch', p=1, q=1, rescale=False)
-                        gf = gm.fit(disp='off')
-                        fc = gf.forecast(horizon=1)
-                    vol_daily_dict[col] = float(np.sqrt(fc.variance.values[-1, 0])) / 100
-                except Exception:
-                    vol_daily_dict[col] = float(np.std(best_resid))
-            else:
-                vol_daily_dict[col] = float(np.std(best_resid))
-
+def _run_arima_thread(req_id, username, returns_all, assets, tickers):
+    """Stima ARIMA+GARCH degli asset mancanti e li aggiunge al file dell'utente
+    (arima_utenti): il job notturno poi li rifà con i dati nuovi."""
+    def _avanza(fatti, totale):
         with _ARIMA_LOCK:
-            if req_id and _ARIMA_STATE.get('req_id') == req_id:
-                _ARIMA_STATE['pct'] = i + 1
-
-    mu_series = pd.Series(mu_dict)
-
-    # ── Σ = D_garch @ corr @ D_garch ─────────────────────────────────────────
-    # Correlazioni sui rendimenti grezzi: allineate per data, robuste a serie
-    # di lunghezza diversa (pandas corr usa osservazioni pairwise complete).
-    r_df = returns_df[cols].tail(window)
-    corr = np.nan_to_num(r_df.corr().values, nan=0.0)
-    np.fill_diagonal(corr, 1.0)
-    vols  = np.array([vol_daily_dict[c] for c in cols])
-    D     = np.diag(vols)
-    cov_matrix = D @ corr @ D + 1e-8 * np.eye(len(cols))   # ensure positive-definite
-    cov_df = pd.DataFrame(cov_matrix, index=cols, columns=cols)
-
-    return mu_series, cov_df
-
-
-def _run_arima_thread(req_id, returns_df, window, source='user'):
+            job = _ARIMA_JOBS.get(req_id)
+            if job is not None:
+                job['pct'], job['total'] = fatti, totale
     try:
-        mu_series, cov_df = _arima_garch_mu_vol(returns_df, window, req_id)
+        arima_utenti.aggiorna(username, returns_all, assets, tickers=tickers, avanzamento=_avanza)
         with _ARIMA_LOCK:
-            if _ARIMA_STATE['req_id'] == req_id:
-                _ARIMA_STATE['mu']      = mu_series
-                _ARIMA_STATE['cov']     = cov_df
-                _ARIMA_STATE['done']    = True
-                _ARIMA_STATE['running'] = False
-        if mu_series is not None and cov_df is not None:
-            _save_arima(mu_series, cov_df, source=source)
+            _ARIMA_JOBS[req_id].update({'done': True, 'fine': time.time()})
     except Exception as e:
+        print(f"⚠ [frontiera] ARIMA {username} fallito: {e}", flush=True)
+        _ARIMA_FALLITI[username] = time.time()
         with _ARIMA_LOCK:
-            if _ARIMA_STATE['req_id'] == req_id:
-                _ARIMA_STATE['error']   = str(e)
-                _ARIMA_STATE['done']    = True
-                _ARIMA_STATE['running'] = False
-
+            _ARIMA_JOBS[req_id].update({'done': True, 'error': str(e), 'fine': time.time()})
 
 
 def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_override=None, cov_override=None):
@@ -834,8 +714,8 @@ def _get_returns(data_json):
 # Stili
 # ─────────────────────────────────────────────────────────────────────────────
 # Colori frontiere
-_FC = {'F1': '#0066cc', 'F2': '#2ca02c', 'F3': '#e6550d'}
-_CML_C = {'F1': '#6633cc', 'F2': '#007700', 'F3': '#cc4400'}
+_FC = {'F1': '#0066cc', 'F2': '#2ca02c', 'F3': '#d62728'}   # blu, verde, rosso = P1, P2, P3
+_CML_C = {'F1': '#004c99', 'F2': '#1e7a1e', 'F3': '#a01b1c'}
 _PALETTE = [
     '#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd',
     '#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf',
@@ -855,16 +735,25 @@ def _short_history(returns_df):
             for asset, d in first_dates.items()
             if d is not None and d > dataset_start}
 
+# Filo blu intorno al nome = serie storica più corta del dataset: stesso filo
+# dell'Analisi Portafoglio (_PF_BLU_STORIA / _pf_fili), testo sempre del colore base.
+_FE_BLU_STORIA = '#1d6fe0'
+
+
 def _asset_name_div(asset, short_map):
-    color   = '#cc2200' if asset in short_map else '#1a3a5c'
-    tooltip = f'{asset} — dati dal {short_map[asset]}' if asset in short_map else asset
+    corta   = asset in short_map
+    color   = _FE_BLU_STORIA if corta else '#1a3a5c'
+    tooltip = f'{asset} — serie storica dal {short_map[asset]}' if corta else asset
     return html.Div(
         html.Span(asset, style={'overflow':'hidden','whiteSpace':'nowrap',
                                 'textOverflow':'ellipsis','maxWidth':'100%',
-                                **NOME_ASSET,'color':color}),
+                                **NOME_ASSET,'color':'#1a3a5c',
+                                'padding':'2px 6px','borderRadius':'5px',
+                                'boxSizing':'border-box',
+                                'boxShadow': f'inset 0 0 0 1.5px {_FE_BLU_STORIA}' if corta else 'none'}),
         **{'data-tooltip': tooltip, 'data-tooltip-color': color},
         style={'width':'25%','height':'24px','display':'flex','alignItems':'center',
-               'paddingLeft':'4px','overflow':'hidden','position':'relative','cursor':'default'}
+               'paddingLeft':'0px','overflow':'hidden','position':'relative','cursor':'default'}
     )
 
 def _w_cell(w, color):
@@ -923,9 +812,12 @@ def _fe_serie(prices_data, chart_assets, frontier_weights, show_frontiers,
         if len(s) <= 1:
             continue
         cum = (1 + s.pct_change().clip(-_MAX_DAILY_RET, _MAX_DAILY_RET).fillna(0)).cumprod()
-        out.append((asset, _FE_COLORI_ASSET[i % len(_FE_COLORI_ASSET)], 1.5, trasforma(cum)))
+        out.append((asset, _FE_COLORI_ASSET[i % len(_FE_COLORI_ASSET)], 1.5, trasforma(cum), None))
         i += 1
-    for fname, fcolor in _FC.items():
+    # linee continue: F1/F2/F3 a 3 px, i portafogli dell'Analisi a 2 px
+    voci = [(f, c, f'Portafoglio {f}', 3) for f, c in _FC.items()]
+    voci += [(p, c, f'Portafoglio {p} (Analisi)', 2) for p, c in _P_COLORS.items()]
+    for fname, fcolor, nome, larg in voci:
         if not (show_frontiers or {}).get(fname, False):
             continue
         fw = (frontier_weights or {}).get(fname, {})
@@ -939,16 +831,17 @@ def _fe_serie(prices_data, chart_assets, frontier_weights, show_frontiers,
         if len(sub_ret) < 2:
             continue
         cum = (1 + pd.Series(sub_ret.values @ w_raw, index=sub_ret.index)).cumprod()
-        out.append((f'Portafoglio {fname}', fcolor, 3, trasforma(cum)))
+        out.append((nome, fcolor, larg, trasforma(cum), None))
     return out
 
 
 def _fe_figura(serie, titolo, asse_y, con_legenda):
     fig = go.Figure()
-    for nome, colore, larg, s in serie:
+    for nome, colore, larg, s, *tratto in serie:
         fig.add_trace(go.Scatter(
             x=s.index, y=s.values, mode='lines', name=nome, legendgroup=nome,
-            showlegend=con_legenda, line=dict(width=larg, color=colore),
+            showlegend=con_legenda,
+            line=dict(width=larg, color=colore, dash=(tratto[0] if tratto else None)),
             hoverlabel=dict(bgcolor='white', bordercolor=colore,
                             font=dict(color='black', size=11)),
             hovertemplate=f'<b>{nome}</b><br>%{{x|%d/%m/%Y}}<br>%{{y:.2f}}%<extra></extra>',
@@ -1029,6 +922,19 @@ _FE_CAMPO = {'display':'flex','flexDirection':'column','gap':'2px'}
 _FE_INPUT = {'width':'64px','fontSize':FONT['sm'],'padding':'3px 5px','height':'30px',
              'border':'1px solid #ccd9ee','borderRadius':'4px','boxSizing':'border-box'}
 
+# Misure di rischio delle tendine P1/P2/P3 e colori dei portafogli
+_MISURE = [('standard', 'Standard'), ('cvar90', 'CVaR 90%'), ('cvar95', 'CVaR 95%'),
+           ('arima_garch', 'ARIMA+GARCH'), ('vol', 'Vol (fin.)')]
+_P_COLORS = {'P1': '#0066cc', 'P2': '#2ca02c', 'P3': '#d62728'}   # = _FC
+
+_FE_CALC_STILE = {'background':'#0066cc','color':'white','border':'none',
+                  'padding':'8px 16px','borderRadius':'4px','cursor':'pointer',
+                  'fontWeight':'bold','fontSize':'12px','marginTop':'auto',
+                  'boxShadow':'0 2px 6px rgba(0,102,204,0.35)'}
+_FE_CALC_DA_RIFARE = {**_FE_CALC_STILE, 'background':'#e67e22',
+                      'boxShadow':'0 2px 6px rgba(230,126,34,0.45)'}
+
+
 app.layout = html.Div([
     _navbar(),
 
@@ -1063,20 +969,17 @@ app.layout = html.Div([
                         dcc.Input(id='fe-rf', type='number', value=2.0, min=0, max=20, step=0.1,
                                   style=_FE_INPUT),
                     ], style=_FE_CAMPO),
-                    html.Div([
-                        html.Span('Misura di rischio', style=_FE_ETICHETTA),
-                        dcc.RadioItems(id='fe-risk-measure',
-                            options=[
-                                {'label': ' Standard',    'value': 'standard'},
-                                {'label': ' CVaR 90%',    'value': 'cvar90'},
-                                {'label': ' CVaR 95%',    'value': 'cvar95'},
-                                {'label': ' ARIMA+GARCH', 'value': 'arima_garch'},
-                                {'label': ' Vol (fin.)',   'value': 'vol'},
-                            ],
-                            value='standard', inline=True,
-                            inputStyle={'marginRight':'3px','cursor':'pointer'},
-                            labelStyle={'marginRight':'10px','fontSize':FONT['sm'],'cursor':'pointer'}),
-                    ], style=_FE_CAMPO),
+                    # Una misura di rischio per ogni portafoglio (F1 usa quella di P1, …)
+                    *[html.Div([
+                        html.Span(f'Rischio {p}', style={**_FE_ETICHETTA, 'color': _P_COLORS[p]}),
+                        dcc.Dropdown(id=f'fe-risk-{p.lower()}',
+                                     options=[{'label': n, 'value': v} for v, n in _MISURE],
+                                     value='standard', clearable=False, searchable=False,
+                                     className='fe-rischio',
+                                     style={'width': '128px', 'fontSize': FONT['sm'],
+                                            'borderLeft': f'3px solid {_P_COLORS[p]}',
+                                            'borderRadius': '4px'}),
+                    ], style=_FE_CAMPO) for p in ('P1', 'P2', 'P3')],
                     html.Div([
                         html.Span('Finestra gg', style=_FE_ETICHETTA),
                         dcc.Input(id='fe-arima-window', type='number', value=250, min=20, max=1260,
@@ -1117,10 +1020,8 @@ app.layout = html.Div([
                 html.Span(id='fe-last-updated',
                           style={'fontSize':FONT['xs'],'color':'#6b7a99','fontStyle':'italic'}),
                 html.Button('Calcola Frontiera', id='fe-calc-btn', n_clicks=0,
-                            style={'background':'#0066cc','color':'white','border':'none',
-                                   'padding':'8px 16px','borderRadius':'4px','cursor':'pointer',
-                                   'fontWeight':'bold','fontSize':'12px','marginTop':'auto',
-                                   'boxShadow':'0 2px 6px rgba(0,102,204,0.35)'}),
+                            title='Calcola le frontiere coi parametri impostati',
+                            style=_FE_CALC_STILE),
             ], className='fe-box', style={**_FE_BOX, 'flex':'0 0 auto'}),
 
         ], style={'display':'flex','gap':'8px','flexWrap':'wrap','alignItems':'stretch',
@@ -1156,10 +1057,10 @@ app.layout = html.Div([
                     ], style={'width':'8%','textAlign':'center','display':'flex','alignItems':'center',
                               'justifyContent':'center','gap':'2px','position':'relative'}),
                     html.Div([
-                        html.Span('P3', style={'fontWeight':'bold','fontSize':FONT['xs'],'color':'#e6550d'}),
+                        html.Span('P3', style={'fontWeight':'bold','fontSize':FONT['xs'],'color':'#d62728'}),
                         html.Button('☑', id='fe-selall-p3', n_clicks=0, title='Seleziona / Deseleziona tutto P3',
                                     style={'fontSize':FONT['icon'],'border':'none','background':'none','cursor':'pointer',
-                                           'color':'#e6550d','padding':'0 2px','lineHeight':'1'}),
+                                           'color':'#d62728','padding':'0 2px','lineHeight':'1'}),
                     ], style={'width':'8%','textAlign':'center','display':'flex','alignItems':'center',
                               'justifyContent':'center','gap':'2px','position':'relative'}),
                     html.Div('F1 %', **{'data-tooltip':'Peso Max-Sharpe Frontiera 1'},
@@ -1170,7 +1071,7 @@ app.layout = html.Div([
                                     'fontSize':FONT['xs'],'color':'#2ca02c','position':'relative','cursor':'default'}),
                     html.Div('F3 %', **{'data-tooltip':'Peso Max-Sharpe Frontiera 3'},
                              style={'width':'14%','textAlign':'center','fontWeight':'bold',
-                                    'fontSize':FONT['xs'],'color':'#e6550d','position':'relative','cursor':'default'}),
+                                    'fontSize':FONT['xs'],'color':'#d62728','position':'relative','cursor':'default'}),
                 ], style={'display':'flex','alignItems':'center','minHeight':'28px',
                           'background':'#e8f0fb','borderBottom':'1px solid #aed6f1',
                           'position':'sticky','top':'0','zIndex':'2'}),
@@ -1295,6 +1196,7 @@ app.layout = html.Div([
     dcc.Store(id='fe-f2-weights',      data=None),
     dcc.Store(id='fe-f3-weights',      data=None),
     dcc.Store(id='fe-frontier-rawdata',data=None),
+    dcc.Store(id='fe-param-calcolo',  data=None),   # parametri dell'ultima frontiera disegnata
     dcc.Store(id='fe-selected-pt',     data=None),
     dcc.Store(id='fe-arima-reqid',     data=None),
     dcc.Interval(id='fe-arima-poll',   interval=600, n_intervals=0, disabled=True),
@@ -1421,19 +1323,6 @@ def on_page_load(_):
     # subito i dati appena caricati (causa del doppio/triplo caricamento all'apertura).
     _sig0 = _fe_current_sig(_read_user_json())
 
-    def _restore_arima(arima_raw):
-        if arima_raw and isinstance(arima_raw, dict):
-            mu_raw  = arima_raw.get('mu')
-            cov_raw = arima_raw.get('cov')
-            if mu_raw and cov_raw:
-                _rid = str(_uuid.uuid4())
-                with _ARIMA_LOCK:
-                    _ARIMA_STATE.update({
-                        'req_id': _rid, 'done': True, 'running': False,
-                        'mu': pd.Series(mu_raw), 'cov': pd.DataFrame(cov_raw),
-                        'pct': 0, 'total': 0, 'error': None,
-                    })
-
     # 1. Dati di portafoglio condivisi (portafoglio app connessa)
     prices, returns, saved_at = _read_shared_data()
     if prices is not None:
@@ -1448,7 +1337,6 @@ def on_page_load(_):
     if u_prices is not None:
         n = len(u_prices.columns)
         label = f'Dati personali ({n} asset) — {u_saved_at}'
-        _restore_arima(u_arima)
         return (u_returns.to_json(orient='split', date_format='iso'),
                 u_prices.to_json(orient='split', date_format='iso'),
                 True, label, 'user', _sig0)
@@ -1456,90 +1344,7 @@ def on_page_load(_):
     raise PreventUpdate
 
 
-# ── ARIMA: avvio automatico al caricamento dati / passaggio in modalità ARIMA ──
-# Il calcolo gira lato server (thread nel processo gunicorn) e NON si interrompe
-# se l'utente naviga altrove: lo stato è nella globale _ARIMA_STATE, la barra è
-# solo un "visore". Si attiva quando cambiano i dati (sincronizzati dall'unico
-# current.json) o quando si passa in modalità ARIMA+GARCH. Una "firma" degli
-# asset evita ricalcoli/loop inutili. Quando è pronto, on_arima_done disegna la
-# frontiera (suffisso ':done').
-_ARIMA_TOAST_SHOWN = {'display': 'block'}
 _ARIMA_TOAST_HIDDEN = {'display': 'none'}
-
-@app.callback(
-    Output('fe-arima-reqid',         'data',     allow_duplicate=True),
-    Output('fe-arima-poll',          'disabled', allow_duplicate=True),
-    Output('fe-arima-progress-div',  'style',    allow_duplicate=True),
-    Output('fe-arima-progress-text', 'children', allow_duplicate=True),
-    Output('fe-arima-progress-bar',  'style',    allow_duplicate=True),
-    Output('fe-arima-toast',         'style',    allow_duplicate=True),
-    Input('fe-stock-data',           'data'),
-    Input('fe-risk-measure',         'value'),
-    State('fe-data-source',          'data'),
-    prevent_initial_call=True,
-)
-def auto_start_arima(stock_data, risk, data_source):
-    # Solo in modalità ARIMA+GARCH: negli altri rischi la frontiera non usa ARIMA.
-    if risk != 'arima_garch' or not stock_data:
-        raise PreventUpdate
-    returns_df = _get_returns(stock_data)
-    if returns_df is None or returns_df.empty:
-        raise PreventUpdate
-    assets = sorted(set(map(str, returns_df.dropna(how='all', axis=1).columns)))
-    if len(assets) < 2:
-        raise PreventUpdate
-    sig = ','.join(assets)
-
-    with _ARIMA_LOCK:
-        st = dict(_ARIMA_STATE)
-
-    # Calcolo già in corso per QUESTI asset → ri-aggancia la barra, no toast (già visto)
-    if st.get('running') and st.get('sig') == sig:
-        total = st.get('total') or 1
-        pct   = int((st.get('pct') or 0) / total * 100)
-        return (st.get('req_id'), False, _ARIMA_PROG_SHOWN,
-                f"ARIMA: {st.get('pct')}/{total} titoli ({pct}%)",
-                _arima_bar_style(pct), _ARIMA_TOAST_HIDDEN)
-
-    # Già completato per QUESTI asset → la frontiera è (o sarà) già disegnata.
-    if st.get('done') and not st.get('error') and st.get('sig') == sig:
-        raise PreventUpdate
-
-    import uuid as _uuid
-    req_id = str(_uuid.uuid4())[:8]
-    _src = data_source if data_source in ('default', 'user') else 'user'
-
-    # Cache su disco già completa → iniettala e disegna subito (no ricalcolo).
-    mu_c, cov_c = _get_arima_cache(_src)
-    cached = (set(map(str, mu_c.index)) & set(map(str, cov_c.index))) \
-             if (mu_c is not None and cov_c is not None) else set()
-    if set(assets).issubset(cached):
-        with _ARIMA_LOCK:
-            _ARIMA_STATE.update({
-                'req_id': req_id, 'running': False, 'done': True,
-                'pct': len(assets), 'total': len(assets), 'error': None,
-                'mu': mu_c, 'cov': cov_c, 'sig': sig, 'precompute': False,
-            })
-        # ':done' → on_arima_done costruisce e disegna la frontiera.
-        return (req_id + ':done', True, _ARIMA_PROG_HIDDEN,
-                '✓ ARIMA pronto', _arima_bar_style(100), _ARIMA_TOAST_HIDDEN)
-
-    # Altrimenti calcola in background (ARIMA per tutti gli asset caricati).
-    with _ARIMA_LOCK:
-        _ARIMA_STATE.update({
-            'req_id': req_id, 'running': True, 'done': False,
-            'pct': 0, 'total': len(assets), 'error': None,
-            'mu': None, 'cov': None, 'sig': sig, 'precompute': False,
-        })
-    t = threading.Thread(target=_run_arima_thread,
-                         args=(req_id, returns_df, 250, _src), daemon=True)
-    t.start()
-    # Mostra toast: avvisa che ARIMA parte in background e nel frattempo
-    # si possono usare gli altri proxy di rischio.
-    return (req_id, False, _ARIMA_PROG_SHOWN,
-            'Calcolo ARIMA+GARCH in background…', _arima_bar_style(0),
-            _ARIMA_TOAST_SHOWN)
-
 
 @app.callback(
     Output('fe-arima-toast', 'style', allow_duplicate=True),
@@ -1550,6 +1355,70 @@ def close_arima_toast(n):
     if not n:
         raise PreventUpdate
     return _ARIMA_TOAST_HIDDEN
+
+
+def _pesi_analisi():
+    """Pesi P1/P2/P3 dell'Analisi Portafoglio (current.json): {P: {asset: peso}}."""
+    ns = _read_user_json() or {}
+    out = {}
+    for p in ('P1', 'P2', 'P3'):
+        d = {k: float(v.get(p) or 0) for k, v in ns.items()
+             if isinstance(v, dict) and float(v.get(p) or 0) > 0}
+        if d:
+            out[p] = d
+    return out
+
+
+def _righe_portafogli_analisi(pesi, spuntati=()):
+    """Righe «Portafoglio P1/P2/P3 · Analisi» in fondo alla griglia, prima e dopo il
+    calcolo: i portafogli dell'Analisi Portafoglio, da confrontare (spunta 📊) con
+    gli asset e con i portafogli F1/F2/F3 della frontiera in andamento e drawdown.
+    Checkbox `fe-chart-port` con indice P1/P2/P3 (le frontiere usano F1/F2/F3)."""
+    pesi = pesi or {}
+    righe = []
+    for pkey, fidx in (('P1', 'F1'), ('P2', 'F2'), ('P3', 'F3')):
+        pw = pesi.get(pkey)
+        if not pw:
+            continue
+        colore = _P_COLORS[pkey]
+        tot = round(sum(float(x or 0) for x in pw.values()), 1)
+        celle = [html.Div(_w_cell(tot if f == fidx else None, _FC[f]),
+                          style={'width': w, 'display':'flex','alignItems':'center',
+                                 'justifyContent':'center'})
+                 for f, w in (('F1', '15%'), ('F2', '15%'), ('F3', '14%'))]
+        righe.append(html.Div([
+            html.Div(
+                html.Span(f'Portafoglio {pkey} · Analisi',
+                          title=f'Portafoglio {pkey} dell\'Analisi Portafoglio ({len(pw)} asset): '
+                                'linea continua sottile in andamento e drawdown',
+                          style={'fontSize':'8px','color':colore,'fontWeight':'700',
+                                 'overflow':'hidden','whiteSpace':'nowrap','textOverflow':'ellipsis'}),
+                style={'width':'25%','height':'28px','display':'flex','alignItems':'center','paddingLeft':'4px'}
+            ),
+            html.Div(
+                dcc.Checklist(
+                    id={'type':'fe-chart-port','index':pkey},
+                    options=[{'label':'','value':pkey}],
+                    value=[pkey] if pkey in spuntati else [],
+                    inputStyle={'accentColor': colore},
+                    style={'display':'flex','justifyContent':'center'},
+                ),
+                style={'width':'7%','display':'flex','justifyContent':'center','alignItems':'center'}
+            ),
+            *[html.Div('—', style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'})
+              for _ in range(3)],
+            *celle,
+        ], style={'display':'flex','alignItems':'center','height':'28px',
+                  'borderBottom':'1px solid #e0e8f8', 'background':'#fbfbf7'}))
+    if not righe:
+        return []
+    return [html.Div(style={'height':'3px','background':'#ccd9ee','margin':'2px 0'}),
+            html.Div(html.Span("Portafogli dell'Analisi Portafoglio — spunta per confrontarne "
+                               "andamento e drawdown con asset e frontiere",
+                               style={'fontSize':'7px','color':'#8899bb','fontStyle':'italic'}),
+                     style={'padding':'2px 4px','background':'#f8faff',
+                            'borderBottom':'1px solid #e0e8f8'}),
+            *righe]
 
 
 def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
@@ -1587,7 +1456,7 @@ def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
             html.Div(
                 dcc.Checklist(id={'type':'fe-p3','index':asset},
                               options=[{'label':'','value':asset}], value=[asset] if pre_p3.get(asset, 0) else [],
-                              inputStyle={'accentColor':'#e6550d'},
+                              inputStyle={'accentColor':'#d62728'},
                               style={'display':'flex','justifyContent':'center'}),
                 style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}
             ),
@@ -1595,60 +1464,15 @@ def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
                      style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
             html.Div(id={'type':'fe-wgt-f2','index':asset}, children=_w_cell(pre_p2.get(asset),'#2ca02c'),
                      style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(pre_p3.get(asset),'#e6550d'),
+            html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(pre_p3.get(asset),'#d62728'),
                      style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
         ], style={'display':'flex','alignItems':'center','height':'24px',
                   'borderBottom':'1px solid #f0f4fb',
                   'background':'white' if i % 2 == 0 else '#fafcff'})
         rows.append(row)
 
-    # ── Righe portafoglio: P1/P2/P3 creati in Analisi Portafoglio ────────────
-    # Mostrati SOTTO gli asset già all'ingresso (prima di calcolare la frontiera):
-    # spuntandoli si mostra il loro andamento nel grafico sotto la frontiera.
-    # L'indice checkbox F1/F2/F3 è lo slot usato da update_perf_chart; pre-calcolo
-    # i pesi F1/F2/F3 sono già P1/P2/P3 (ripristinati da _clear_stale_frontier).
-    _PORT_ROWS = [('P1', 'F1', '#0066cc', pre_p1, '#f0f6ff'),
-                  ('P2', 'F2', '#2ca02c', pre_p2, '#f0fff4'),
-                  ('P3', 'F3', '#e6550d', pre_p3, '#fff5f0')]
-    port_rows = []
-    for pkey, fidx, pcolor, pw, pbg in _PORT_ROWS:
-        if not pw:
-            continue
-        tot = round(sum(float(x or 0) for x in pw.values()), 1)
-        port_rows.append(html.Div([
-            html.Div(
-                html.Span(f'Portafoglio {pkey}',
-                          style={'fontSize':'8px','color':pcolor,'fontWeight':'700',
-                                 'overflow':'hidden','whiteSpace':'nowrap','textOverflow':'ellipsis'}),
-                style={'width':'25%','height':'28px','display':'flex','alignItems':'center','paddingLeft':'4px'}
-            ),
-            html.Div(
-                dcc.Checklist(
-                    id={'type':'fe-chart-port','index':fidx},
-                    options=[{'label':'','value':fidx}], value=[],
-                    inputStyle={'accentColor': pcolor},
-                    style={'display':'flex','justifyContent':'center'},
-                ),
-                style={'width':'7%','display':'flex','justifyContent':'center','alignItems':'center'}
-            ),
-            html.Div('—', style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'}),
-            html.Div('—', style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'}),
-            html.Div('—', style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'}),
-            html.Div(_w_cell(tot if fidx == 'F1' else None, '#0066cc'),
-                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            html.Div(_w_cell(tot if fidx == 'F2' else None, '#2ca02c'),
-                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            html.Div(_w_cell(tot if fidx == 'F3' else None, '#e6550d'),
-                     style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
-        ], style={'display':'flex','alignItems':'center','height':'28px',
-                  'borderBottom':'1px solid #e0e8f8', 'background': pbg}))
-    if port_rows:
-        rows.append(html.Div(style={'height':'3px','background':'#ccd9ee','margin':'2px 0'}))
-        rows.append(html.Div(
-            html.Span("Portafogli creati — spunta per confrontarne l'andamento",
-                      style={'fontSize':'7px','color':'#8899bb','fontStyle':'italic'}),
-            style={'padding':'2px 4px','background':'#f8faff','borderBottom':'1px solid #e0e8f8'}))
-        rows.extend(port_rows)
+    # all'ingresso i portafogli dell'Analisi sono già spuntati: si vedono subito
+    rows.extend(_righe_portafogli_analisi(pre_weights, spuntati=tuple((pre_weights or {}).keys())))
 
     return rows, f'{len(assets)} asset'
 
@@ -1691,29 +1515,48 @@ def build_grid_on_load(loaded, stock_data, _sync_sig, rawdata):
     return _build_grid_rows(returns_df, pre_select=pre_select, pre_weights=pre_weights)
 
 
-# ── Calcolo AUTOMATICO della frontiera all'apertura ──────────────────────────
-# Appena la griglia (con i pesi P1/P2/P3 letti da current.json) è pronta, "preme"
-# Calcola Frontiera una volta sola: così all'apertura si vedono subito la frontiera
-# e i portafogli, senza click. Il flag fe-auto-calc-flag impedisce il loop, perché
-# calc_and_render riscrive la griglia (→ fe-asset-count) e ri-triggererebbe questa.
+# Niente calcolo automatico all'apertura (scelta dell'utente, 23/11/2026): si vedono
+# i pesi P1/P2/P3 dell'Analisi e il loro andamento; la frontiera parte solo dal clic
+# su Calcola Frontiera. (Era auto_calc_on_open; fe-auto-calc-flag resta nel layout.)
+
+
+# Cambio di parametri (date, «Finestra gg», rischio P1/P2/P3, punti, pesi, risk free)
+# con una frontiera già disegnata: NON si ricalcola (scelta dell'utente, più calcoli di
+# fila appesantivano il server). Il pulsante diventa arancione finché non si ripreme
+# Calcola Frontiera; torna blu quando arriva la frontiera nuova (fe-frontier-rawdata).
+_FE_PARAMETRI = [('fe-date-start', 'date'), ('fe-date-end', 'date'), ('fe-arima-window', 'value'),
+                 ('fe-risk-p1', 'value'), ('fe-risk-p2', 'value'), ('fe-risk-p3', 'value'),
+                 ('fe-n-portfolios', 'value'), ('fe-min-weight', 'value'), ('fe-max-weight', 'value'),
+                 ('fe-rf', 'value'), ({'type':'fe-p1','index':ALL}, 'value'),
+                 ({'type':'fe-p2','index':ALL}, 'value'), ({'type':'fe-p3','index':ALL}, 'value')]
+
+
+def _firma_parametri(valori):
+    return json.dumps(valori, sort_keys=True, default=str)
+
+
+# Arriva una frontiera nuova: si annotano i parametri con cui è stata disegnata.
 @app.callback(
-    Output('fe-calc-btn',       'n_clicks', allow_duplicate=True),
-    Output('fe-auto-calc-flag', 'data',     allow_duplicate=True),
-    Input('fe-asset-count',     'children'),
-    State('fe-auto-calc-flag',  'data'),
-    State('fe-stock-data',      'data'),
-    State('fe-calc-btn',        'n_clicks'),
+    Output('fe-param-calcolo', 'data'),
+    Input('fe-frontier-rawdata', 'data'),
+    *[State(i, pr) for i, pr in _FE_PARAMETRI],
     prevent_initial_call=True,
 )
-def auto_calc_on_open(_asset_count, done, stock_data, cur_clicks):
-    if done or not stock_data:
-        raise PreventUpdate
-    # Calcolo automatico solo se l'Analisi Portafoglio ha pesi in P1/P2/P3:
-    # senza portafogli niente frontiera, finché non si spunta e si preme Calcola.
-    if not any(float(v.get(k) or 0) > 0 for v in _read_user_json().values()
-               for k in ('P1', 'P2', 'P3')):
-        raise PreventUpdate
-    return (cur_clicks or 0) + 1, True
+def _annota_parametri(rawdata, *valori):
+    return _firma_parametri(list(valori)) if rawdata else None
+
+
+@app.callback(
+    Output('fe-calc-btn', 'children'),
+    Output('fe-calc-btn', 'style'),
+    Input('fe-param-calcolo', 'data'),
+    *[Input(i, pr) for i, pr in _FE_PARAMETRI],
+    prevent_initial_call=True,
+)
+def _calcola_da_rifare(firma, *valori):
+    if not firma or _firma_parametri(list(valori)) == firma:
+        return 'Calcola Frontiera', _FE_CALC_STILE
+    return '⟳ Ricalcola Frontiera', _FE_CALC_DA_RIFARE
 
 
 # Quando cambia la LISTA asset (es. cancelli un asset in Analisi Portafoglio),
@@ -1763,30 +1606,121 @@ def _asset_nei_portafogli(*liste):
     return {a for vals in liste for v in (vals or []) if v for a in v}
 
 
-# Punti asset e P1/P2/P3 sullo STESSO campione della frontiera: periodo comune
-# agli asset del portafoglio (dropna) e poi la finestra. Prima ogni punto usava la
-# storia intera del singolo asset e un P poteva finire sopra la propria frontiera.
-def _campione_comune(returns_df, assets, win):
+# ── Misura di rischio per portafoglio (tendine P1/P2/P3, 23/11/2026) ────────
+# Ogni portafoglio ha la sua misura; la frontiera F1 usa quella di P1, ecc.
+#   Standard / CVaR 90-95: giorni comuni a tutti gli asset del portafoglio dentro le
+#     date scelte (se un asset è più giovane la frontiera parte da lui; se tutti
+#     coprono la finestra, si usa la finestra intera).
+#   Vol (fin.): stessi giorni comuni, ultimi «Finestra gg» (250 di default).
+#   ARIMA+GARCH: μ e σ dal file personale arima_garch.json (ultimi 250 rendimenti di
+#     ogni asset, date ignorate), correlazioni sugli ultimi 250 giorni.
+_NOME_MISURA = dict(_MISURE)
+_ASSE_MISURA = {'standard': 'Volatilità', 'vol': 'Volatilità [fin.]', 'cvar90': 'CVaR 90%',
+                'cvar95': 'CVaR 95%', 'arima_garch': 'Vol GARCH'}
+_P_DI = {'F1': 'P1', 'F2': 'P2', 'F3': 'P3'}
+
+
+def _cvar_di(misura):
+    return 10 if misura == 'cvar90' else (5 if misura == 'cvar95' else None)
+
+
+def _stima(returns_df, assets, misura, finestra_vol, arima=None, returns_all=None):
+    """(df, mu, cov) giornalieri per un gruppo di asset con la misura scelta, o None.
+    df = campione dei rendimenti (scenari del CVaR); returns_df è già filtrato sulle date."""
     valid = [a for a in assets if a in returns_df.columns]
     if not valid:
         return None
+    if misura == 'arima_garch':
+        ra = returns_all if returns_all is not None else returns_df
+        valid = [a for a in valid if a in ra.columns]
+        if not valid:
+            return None
+        mu, cov = arima_utenti.mu_cov(arima or {}, ra, valid)
+        return ra[valid].tail(arima_utenti.FINESTRA), mu, cov
     df = returns_df[valid].dropna()
+    win = int(finestra_vol or 250) if misura == 'vol' else None
     if win and win < len(df):
         df = df.tail(win)
-    return df if len(df) >= 10 else None
+    if len(df) < 10:
+        return None
+    return df, df.mean(), df.cov()
 
 
-def _serie_asset(returns_df, asset, campioni, win):
-    """Rendimenti del punto di un asset: il campione della prima frontiera (P1,
-    P2, P3) che lo contiene; fuori dai portafogli, la sua storia con la finestra."""
-    for df in campioni:
-        if df is not None and asset in df.columns:
-            return df[asset]
-    s = returns_df[asset].dropna()
-    return s.tail(win) if win and win < len(s) else s
+def _rend_rischio(w, stima, misura):
+    """(rendimento, rischio) annui del portafoglio w sulla stima."""
+    df, mu, cov = stima
+    ret, vol = _port_perf(np.asarray(w, dtype=float), mu.values, cov.values)
+    pct = _cvar_di(misura)
+    if pct is not None:
+        vol = _port_cvar(np.asarray(w, dtype=float), df.dropna(), pct)
+    return ret, vol
 
 
-_P_COLORS = {'P1': '#0066cc', 'P2': '#2ca02c', 'P3': '#e6550d'}
+def _etichetta_rischio(misura, rischio):
+    pct = _cvar_di(misura)
+    nome = f'CVaR {100 - pct}%' if pct else ('Vol GARCH' if misura == 'arima_garch' else 'Vol')
+    return f'{nome}: {rischio * 100:.2f}%'
+
+
+def _etichetta_asse(usate):
+    """Titolo dell'asse x: una misura sola → il suo nome; più misure → elenco per P."""
+    uniche = list(dict.fromkeys(m for _, m in usate))
+    if not uniche:
+        return 'Rischio Ann. (%)'
+    if len(uniche) == 1:
+        return f'{_ASSE_MISURA[uniche[0]]} Ann. (%)'
+    return 'Rischio Ann. (%) — ' + ' · '.join(f'{p}: {_ASSE_MISURA[m]}' for p, m in usate)
+
+
+def _punti_asset(fig, returns_df, assets, gruppi, misure, finestra_vol, arima, returns_all,
+                 visibili, grande=False):
+    """Punti degli asset, uno per ogni portafoglio P1/P2/P3, nel colore del portafoglio
+    (blu, verde, rosso), con la misura di rischio e il campione di quel portafoglio: un
+    asset in due portafogli compare due volte, e le due posizioni mostrano come cambia
+    il rischio. `visibili` = {P: asset spuntati}; tutti gli asset entrano comunque nella
+    figura (spenti), così spuntarne uno dopo il calcolo è solo un cambio di visibilità.
+    Una voce di legenda per portafoglio («Asset P1»…) li mostra/nasconde tutti insieme."""
+    for p in ('P1', 'P2', 'P3'):
+        sel = list(gruppi.get(p) or [])
+        misura = misure[p]
+        colore = _P_COLORS[p]
+        gruppo = f'asset-{p}'
+        st_p = (_stima(returns_df, sel, misura, finestra_vol, arima, returns_all)
+                if len(sel) >= 2 else None)
+        visti = set(visibili.get(p) or ())
+        if visti:
+            # voce di legenda del gruppo (segnaposto senza punti: resta anche se
+            # gli asset vengono spenti uno per uno dalla griglia)
+            fig.add_trace(go.Scatter(
+                x=[None], y=[None], mode='markers', name=f'Asset {p}',
+                legendgroup=gruppo, showlegend=True, hoverinfo='skip',
+                marker=dict(size=8, symbol='circle', color=colore, opacity=0.8)))
+        for asset in assets:
+            st = st_p if (st_p is not None and asset in st_p[0].columns) else None
+            if st is None:
+                st = _stima(returns_df, [asset], misura, finestra_vol, arima, returns_all)
+            if st is None:
+                continue
+            cols = list(st[0].columns)
+            w = np.zeros(len(cols)); w[cols.index(asset)] = 1.0
+            ret_a, risk_a = _rend_rischio(w, st, misura)
+            fig.add_trace(go.Scatter(
+                x=[risk_a * 100], y=[ret_a * 100],
+                mode='markers+text', name=asset,
+                meta={'punto_asset': asset, 'portafoglio': p},
+                legendgroup=gruppo, showlegend=False,
+                visible=(asset in visti),
+                marker=dict(size=7 if not grande else 8, symbol='circle',
+                            opacity=0.8, color=colore,
+                            line=dict(color='white', width=0.5)),
+                text=[asset[:9]], textposition='top center',
+                textfont=dict(size=7 if not grande else 8, color=colore),
+                hoverlabel=dict(bgcolor='white', bordercolor=colore,
+                                font=dict(color='black', size=11)),
+                hovertemplate=(f'<b>{asset}</b> · {p}<br>{_etichetta_rischio(misura, risk_a)}'
+                               f'<br>Rendimento: {ret_a*100:.2f}%'
+                               f'<br><i>{_NOME_MISURA[misura]}</i><extra></extra>'),
+            ))
 
 
 def _fig_senza_portafogli():
@@ -1800,31 +1734,24 @@ def _fig_senza_portafogli():
                           showarrow=False, font=dict(size=13, color='#6b7a99'))])
 
 
-def _punti_portafogli(fig, returns_df, win, cvar_pct, mu=None, cov=None):
-    """P1/P2/P3 dell'Analisi Portafoglio (pesi di current.json) come rombi, sul
-    campione con cui si calcola la frontiera dei loro asset. Con ARIMA+GARCH
-    rendimento e rischio vengono da mu/cov stimati (giornalieri)."""
+def _punti_portafogli(fig, returns_df, misure, finestra_vol, arima=None, returns_all=None):
+    """P1/P2/P3 dell'Analisi Portafoglio (pesi di current.json) come rombi, ognuno con
+    la misura di rischio e il campione del proprio portafoglio. Restituisce i P disegnati."""
     ns = _read_user_json()
+    disegnati = []
     for pname, pcolor in _P_COLORS.items():
         raw = {d: float(v.get(pname) or 0) for d, v in ns.items() if float(v.get(pname) or 0) > 0}
-        df = _campione_comune(returns_df, list(raw), win)
-        if df is None:
+        misura = misure[pname]
+        st = _stima(returns_df, list(raw), misura, finestra_vol, arima, returns_all)
+        if st is None:
             continue
-        assets = list(df.columns)
+        assets = list(st[0].columns)
         tot = sum(raw[a] for a in assets)
         if tot <= 0:
             continue
         w = np.array([raw[a] / tot for a in assets])
-        if (mu is not None and cov is not None
-                and all(a in mu.index and a in cov.columns for a in assets)):
-            r_p   = float(w @ mu.reindex(assets).values) * 252
-            var_p = float(w @ cov.loc[assets, assets].values @ w) * 252
-        else:
-            r_p   = float(w @ df.mean().values) * 252
-            var_p = float(w @ df.cov().values @ w) * 252
-        v_p = float(np.sqrt(max(var_p, 0)))
-        if cvar_pct is not None:
-            v_p = _port_cvar(w, df, cvar_pct)
+        r_p, v_p = _rend_rischio(w, st, misura)
+        disegnati.append(pname)
         hover_lines = '<br>'.join(f'{a}: {wi*100:.1f}%' for a, wi in zip(assets, w))
         fig.add_trace(go.Scatter(
             x=[v_p * 100], y=[r_p * 100],
@@ -1834,11 +1761,25 @@ def _punti_portafogli(fig, returns_df, win, cvar_pct, mu=None, cov=None):
             text=[pname], textposition='top center',
             textfont=dict(size=9, color=pcolor, family='Inter, sans-serif'),
             showlegend=True,
-            hovertemplate=(f'<b>{pname} (portafoglio)</b><br>'
-                           f'Rischio: {v_p*100:.2f}%<br>'
+            hovertemplate=(f'<b>{pname} (portafoglio) · {_NOME_MISURA[misura]}</b><br>'
+                           f'{_etichetta_rischio(misura, v_p)}<br>'
                            f'Rendimento: {r_p*100:.2f}%<br>'
                            f'{hover_lines}<extra></extra>'),
         ))
+    return disegnati
+
+
+def _gruppi_spuntati(p1_vals, p2_vals, p3_vals):
+    """Asset spuntati in ogni colonna P1/P2/P3 della griglia."""
+    return {p: [a for v in (vals or []) if v for a in v]
+            for p, vals in (('P1', p1_vals), ('P2', p2_vals), ('P3', p3_vals))}
+
+
+def _misure_scelte(r1, r2, r3):
+    return {'P1': r1 or 'standard', 'P2': r2 or 'standard', 'P3': r3 or 'standard'}
+
+
+_TENDINE_RISCHIO = ('fe-risk-p1', 'fe-risk-p2', 'fe-risk-p3')
 
 
 @app.callback(
@@ -1846,7 +1787,9 @@ def _punti_portafogli(fig, returns_df, win, cvar_pct, mu=None, cov=None):
     Input({'type':'fe-p1','index':ALL}, 'value'),
     Input({'type':'fe-p2','index':ALL}, 'value'),
     Input({'type':'fe-p3','index':ALL}, 'value'),
-    Input('fe-risk-measure',     'value'),
+    Input('fe-risk-p1',          'value'),
+    Input('fe-risk-p2',          'value'),
+    Input('fe-risk-p3',          'value'),
     State('fe-stock-data',       'data'),
     State('fe-frontier-rawdata', 'data'),
     State('fe-date-start',       'date'),
@@ -1855,19 +1798,21 @@ def _punti_portafogli(fig, returns_df, win, cvar_pct, mu=None, cov=None):
     State('fe-frontier-chart',   'figure'),
     prevent_initial_call=True,
 )
-def preview_asset_points(p1_vals, p2_vals, p3_vals, risk, stock_data, rawdata, date_start, date_end, arima_window,
-                         fig_attuale=None):
-    # Frontiera già calcolata → il grafico lo disegna calc_and_render; qui si
-    # accendono/spengono soltanto i punti degli asset secondo le spunte P1/P2/P3.
+def preview_asset_points(p1_vals, p2_vals, p3_vals, r1, r2, r3, stock_data, rawdata,
+                         date_start, date_end, arima_window, fig_attuale=None):
+    # Frontiera già calcolata → il grafico lo disegna calc_and_render (un cambio di
+    # misura non ricalcola: si ripreme Calcola); qui si accendono/spengono soltanto
+    # i punti degli asset secondo le spunte P1/P2/P3.
     scelti = _asset_nei_portafogli(p1_vals, p2_vals, p3_vals)
+    gruppi_ora = {p: set(v) for p, v in _gruppi_spuntati(p1_vals, p2_vals, p3_vals).items()}
     if rawdata:
-        if ctx.triggered_id == 'fe-risk-measure' or not fig_attuale:
+        if ctx.triggered_id in _TENDINE_RISCHIO or not fig_attuale:
             raise PreventUpdate
         patch, cambiati = Patch(), 0
         for i, tr in enumerate(fig_attuale.get('data') or []):
             meta = tr.get('meta')
             if isinstance(meta, dict) and 'punto_asset' in meta:
-                vis = meta['punto_asset'] in scelti
+                vis = meta['punto_asset'] in gruppi_ora.get(meta.get('portafoglio'), ())
                 if (tr.get('visible', True) is not False) != vis:
                     patch['data'][i]['visible'] = vis
                     cambiati += 1
@@ -1876,74 +1821,36 @@ def preview_asset_points(p1_vals, p2_vals, p3_vals, risk, stock_data, rawdata, d
         return patch
     if not stock_data:
         raise PreventUpdate
-    returns_df = _get_returns(stock_data)
-    if returns_df is None or returns_df.empty:
+    returns_all = _get_returns(stock_data)
+    if returns_all is None or returns_all.empty:
         raise PreventUpdate
+    returns_df = returns_all
     if date_start: returns_df = returns_df.loc[date_start:]
     if date_end:   returns_df = returns_df.loc[:date_end]
     returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-    chart_assets = [a for a in returns_df.columns if a in scelti]
-
-    # Stessa finestra usata in calcolo: Vol→configurabile, ARIMA→250, altri→tutta la storia.
-    if risk == 'vol':
-        win = int(arima_window or 250)
-    elif risk == 'arima_garch':
-        win = 250
-    else:
-        win = None
-    _cvar_pct = 10 if risk == 'cvar90' else (5 if risk == 'cvar95' else None)
+    misure = _misure_scelte(r1, r2, r3)
+    gruppi = _gruppi_spuntati(p1_vals, p2_vals, p3_vals)
+    # Nell'anteprima l'ARIMA non si calcola: si usa quello che c'è nel file
+    # (gli asset senza stima prendono media e deviazione degli ultimi 250 giorni).
+    arima = (arima_utenti.leggi(_get_username())
+             if 'arima_garch' in misure.values() else None)
 
     fig = go.Figure()
-    campioni = [_campione_comune(returns_df, [a for v in (vals or []) if v for a in v], win)
-                for vals in (p1_vals, p2_vals, p3_vals)]
-    for ai, asset in enumerate(chart_assets):
-        if asset not in returns_df.columns:
-            continue
-        s = _serie_asset(returns_df, asset, campioni, win)
-        if len(s) < 10:
-            continue
-        ret_a = float(s.mean() * 252)
-        vol_a = float(s.std() * np.sqrt(252))
-        if _cvar_pct is not None:
-            risk_a   = _port_cvar(np.array([1.0]), s.to_frame(), _cvar_pct)
-            risk_lbl = f'CVaR {100-_cvar_pct}%: {risk_a*100:.2f}%'
-        else:
-            risk_a   = vol_a
-            risk_lbl = f'Vol: {vol_a*100:.2f}%'
-        color = _PALETTE[ai % len(_PALETTE)]
-        fig.add_trace(go.Scatter(
-            x=[risk_a * 100], y=[ret_a * 100],
-            mode='markers+text', name=asset, meta={'punto_asset': asset},
-            marker=dict(size=8, symbol='circle', opacity=0.8, color=color),
-            text=[asset[:9]], textposition='top center',
-            textfont=dict(size=8, color=color), showlegend=False,
-            hoverlabel=dict(bgcolor='white', bordercolor=color,
-                            font=dict(color='black', size=11)),
-            hovertemplate=f'<b>{asset}</b><br>{risk_lbl}<br>Rendimento: {ret_a*100:.2f}%<extra></extra>',
-        ))
-
+    chart_assets = [a for a in returns_df.columns if a in scelti]
+    _punti_asset(fig, returns_df, chart_assets, gruppi, misure, arima_window, arima,
+                 returns_all, gruppi_ora, grande=True)
     # ── P1/P2/P3 dell'Analisi Portafoglio come punti, anche PRIMA del calcolo ──
-    _punti_portafogli(fig, returns_df, win, _cvar_pct)
+    disegnati = _punti_portafogli(fig, returns_df, misure, arima_window, arima, returns_all)
 
     if not fig.data:
-        return go.Figure().update_layout(
-            paper_bgcolor='white', plot_bgcolor='#f8faff',
-            font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
-            annotations=[dict(text='Nessun portafoglio: spunta almeno 2 asset in P1, P2 o P3 e premi Calcola Frontiera',
-                              xref='paper', yref='paper', x=0.5, y=0.5,
-                              showarrow=False, font=dict(size=13, color='#6b7a99'))])
+        return _fig_senza_portafogli()
 
-    risk_label = {
-        'standard':    'Volatilità Ann. (%)',
-        'vol':         'Volatilità Ann. (%) [fin.]',
-        'cvar90':      'CVaR 90% Ann. (%)',
-        'cvar95':      'CVaR 95% Ann. (%)',
-        'arima_garch': 'Volatilità Ann. (%)',
-    }.get(risk, 'Rischio Ann. (%)')
+    usati = [p for p in ('P1', 'P2', 'P3') if p in disegnati or gruppi.get(p)]
     fig.update_layout(
         title=dict(text='Rendimento / Rischio — asset selezionati',
                    font=dict(size=14, color='#1a3a6b'), x=0.02),
-        xaxis=dict(title=risk_label, gridcolor='#e8eef8', zeroline=False),
+        xaxis=dict(title=_etichetta_asse([(p, misure[p]) for p in usati]),
+                   gridcolor='#e8eef8', zeroline=False),
         yaxis=dict(title='Rendimento Atteso Ann. (%)', gridcolor='#e8eef8', zeroline=False),
         paper_bgcolor='white', plot_bgcolor='#f8faff',
         font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
@@ -1956,30 +1863,29 @@ def preview_asset_points(p1_vals, p2_vals, p3_vals, risk, stock_data, rawdata, d
     Output('fe-arima-window-div',    'style'),
     Output('fe-arima-cache-status',  'children'),
     Output('fe-arima-cache-status',  'style'),
-    Input('fe-risk-measure', 'value'),
+    Input('fe-risk-p1', 'value'),
+    Input('fe-risk-p2', 'value'),
+    Input('fe-risk-p3', 'value'),
+    Input('fe-arima-reqid', 'data'),
 )
-def toggle_window_div(risk):
+def toggle_window_div(r1, r2, r3, _req):
     base = {'flexDirection':'column','gap':'2px'}   # come gli altri campi del riquadro Frontiere
-    # Finestra configurabile solo per Vol (fin.)
-    win_style = {'display':'flex', **base} if risk == 'vol' else {'display':'none', **base}
-
-    if risk != 'arima_garch':
+    misure = _misure_scelte(r1, r2, r3).values()
+    # «Finestra gg» serve solo se almeno un portafoglio usa Vol (fin.)
+    win_style = {'display':'flex', **base} if 'vol' in misure else {'display':'none', **base}
+    if 'arima_garch' not in misure:
         return win_style, '', {'display':'none'}
-
-    if _ARIMA_CACHE_INFO['available']:
-        txt   = f'⚡ cache {_ARIMA_CACHE_INFO["ts"]}'
-        style = {'display':'inline-block','fontSize':'9px','padding':'2px 6px',
-                 'borderRadius':'3px','fontWeight':'600','alignSelf':'flex-end',
-                 'background':'#d4edda','color':'#155724','border':'1px solid #c3e6cb'}
+    dati = arima_utenti.leggi(_get_username())
+    n = sum(1 for v in dati.get('asset', {}).values() if v.get('mu') is not None)
+    stile = {'display':'inline-block','fontSize':'9px','padding':'2px 6px',
+             'borderRadius':'3px','fontWeight':'600','alignSelf':'flex-end'}
+    if n:
+        txt = f'⚡ ARIMA {n} asset · {dati.get("aggiornato", "")}'
+        stile.update({'background':'#d4edda','color':'#155724','border':'1px solid #c3e6cb'})
     else:
-        txt   = '⏳ nessuna cache — calcolo in background'
-        style = {'display':'inline-block','fontSize':'9px','padding':'2px 6px',
-                 'borderRadius':'3px','fontWeight':'600','alignSelf':'flex-end',
-                 'background':'#fff3cd','color':'#856404','border':'1px solid #ffc107'}
-    return win_style, txt, style
-
-
-
+        txt = '⏳ ARIMA da calcolare (al primo Calcola Frontiera)'
+        stile.update({'background':'#fff3cd','color':'#856404','border':'1px solid #ffc107'})
+    return win_style, txt, stile
 
 
 @app.callback(
@@ -2053,6 +1959,8 @@ def update_perf_chart(chart_vals, port_chart_vals, date_start, date_end, f1j, f2
                 fw[fname] = json.loads(jdata)
             except Exception:
                 pass
+    if any(show_frontiers.get(p) for p in ('P1', 'P2', 'P3')):
+        fw.update(_pesi_analisi())
     return (
         _build_perf_chart(prices_data, chart_assets, fw, show_frontiers, date_start, date_end),
         _build_drawdown_chart(prices_data, chart_assets, fw, show_frontiers, date_start, date_end),
@@ -2087,7 +1995,9 @@ def update_perf_chart(chart_vals, port_chart_vals, date_start, date_end, f1j, f2
     State('fe-min-weight',       'value'),
     State('fe-max-weight',       'value'),
     State('fe-rf',               'value'),
-    State('fe-risk-measure',     'value'),
+    State('fe-risk-p1',          'value'),
+    State('fe-risk-p2',          'value'),
+    State('fe-risk-p3',          'value'),
     State('fe-date-start',       'date'),
     State('fe-date-end',         'date'),
     State({'type':'fe-chart-port','index':ALL}, 'value'),
@@ -2099,7 +2009,7 @@ def update_perf_chart(chart_vals, port_chart_vals, date_start, date_end, f1j, f2
 )
 def calc_and_render(n, stock_data, prices_data,
                     p1_vals, p2_vals, p3_vals, p_ids, chart_vals,
-                    n_port, wmin, wmax, rf, risk,
+                    n_port, wmin, wmax, rf, r1, r2, r3,
                     date_start, date_end, port_chart_vals, port_chart_ids, sel_pt_cur,
                     arima_window, data_source):
     _EMPTY_FIG = go.Figure().update_layout(
@@ -2117,19 +2027,14 @@ def calc_and_render(n, stock_data, prices_data,
     if returns_df is None or returns_df.empty:
         return [_PH], '', _EMPTY_FIG, _EMPTY_FIG, _EMPTY_FIG, '', None, None, None, None, None, True, None, {'display':'none'}
 
+    returns_all = returns_df   # tutto current.json: l'ARIMA ignora le date scelte
     if date_start: returns_df = returns_df.loc[date_start:]
     if date_end:   returns_df = returns_df.loc[:date_end]
-    # Rimuove solo colonne/righe interamente NaN — NON il dropna globale che
-    # taglierebbe il dataset al periodo del titolo più recente (es. crypto/futures).
+    # Rimuove solo colonne/righe interamente NaN: il periodo comune si sceglie per
+    # ogni portafoglio in _stima (dropna sui suoi asset).
     returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-    # Standard/CVaR: tutta la storia. ARIMA: 250 fissi. Vol: finestra configurabile.
-    if risk == 'vol':
-        win = int(arima_window or 250)
-    elif risk == 'arima_garch':
-        win = 250
-    else:
-        win = None  # standard, cvar90, cvar95 → tutta la storia
     all_assets = returns_df.columns.tolist()
+    misure = _misure_scelte(r1, r2, r3)
 
     # P1: default tutti gli asset; P2/P3: solo se l'utente ha spuntato almeno 2 asset
     def _p_assets(vals, ids, default_all=False):
@@ -2145,6 +2050,7 @@ def calc_and_render(n, stock_data, prices_data,
     p1_sel = _p_assets(p1_vals, p_ids, default_all=False)
     p2_sel = _p_assets(p2_vals, p_ids, default_all=False)
     p3_sel = _p_assets(p3_vals, p_ids, default_all=False)
+    gruppi = {'P1': p1_sel, 'P2': p2_sel, 'P3': p3_sel}
 
     chart_assets = [a for v in (chart_vals or []) if v for a in v]
     port_chart_checked = {
@@ -2162,106 +2068,71 @@ def calc_and_render(n, stock_data, prices_data,
     rf_f   = (rf or 2.0) / 100
     n_f    = int(n_port or 15)
 
-    arima_label = ''
-    def _mu(df_sub):
-        return None
-
-    # ── Calcola le 3 frontiere ───────────────────────────────────────────────
-    frontier_res  = {}   # fname → (df_f, max_sharpe, min_vol, names)
-    frontier_wgts = {}   # fname → {asset: weight%}
-
-    _existing_sel = json.loads(sel_pt_cur) if sel_pt_cur else {}
-
-    # ── ARIMA+GARCH: prova cache pre-calcolata, altrimenti avvia thread ────────
-    if risk == 'arima_garch':
-        arima_win = int(arima_window or 250)
-        _src = data_source if data_source in ('default', 'user') else 'user'
-        # Legge la cache ARIMA dalla sorgente corretta: utente o default
-        if _src == 'user':
-            u_raw = _read_user_data()[3]   # arima block dal pkl utente
-            if u_raw and isinstance(u_raw, dict):
-                from functools import reduce as _r
-                _parse = lambda d: (pd.Series(d.get('mu', {})), pd.DataFrame(d.get('cov', {})), d.get('computed_at','')) if d and d.get('mu') and d.get('cov') else (None, None, None)
-                mu_cached, cov_cached, arima_ts = _parse(u_raw)
-            else:
-                mu_cached, cov_cached, arima_ts = None, None, None
-        else:
-            cache_path = _PORT_PKL
-            mu_cached, cov_cached, arima_ts = _read_arima_from_pkl(cache_path)
-            if mu_cached is None:
-                mu_cached, cov_cached, arima_ts = _read_arima_cache()
-        # La cache va usata solo se copre TUTTI gli asset selezionati per le frontiere.
-        # Se sono stati caricati/selezionati titoli nuovi non presenti nella cache ARIMA,
-        # questa è incompleta → va ricalcolata in background (altrimenti i nuovi titoli
-        # verrebbero esclusi dalla frontiera per covarianza mancante).
-        _required = set()
-        for _sel in (p1_sel, p2_sel, p3_sel):
-            _required.update(str(a) for a in _sel if a in returns_df.columns)
-        if mu_cached is not None and cov_cached is not None and _required:
-            _cached_assets = set(map(str, mu_cached.index)) & set(map(str, cov_cached.index))
-            _missing = _required - _cached_assets
-        else:
-            _missing = _required
-        _cache_ok = (mu_cached is not None and cov_cached is not None and not _missing)
-        print(f"[calc_and_render] ARIMA cache ({_src}): "
-              f"{'trovata' if mu_cached is not None else 'VUOTA'}; "
-              f"richiesti={len(_required)} mancanti={len(_missing)} → "
-              f"{'uso cache' if _cache_ok else 'ricalcolo background'}")
-        if _cache_ok:
-            # Cache disponibile e completa → inietta nel _ARIMA_STATE e scatta on_arima_done subito
+    # ── ARIMA+GARCH: stime dal file personale; gli asset che mancano si calcolano
+    # in background (barra di avanzamento), poi on_arima_done ripreme Calcola.
+    arima, senza_arima = None, []
+    if 'arima_garch' in misure.values():
+        username = _get_username()
+        arima = arima_utenti.leggi(username)
+        ns = _read_user_json()
+        pesi_json = {p: [d for d, v in ns.items() if float(v.get(p) or 0) > 0] for p in gruppi}
+        servono = sorted({a for p in gruppi if misure[p] == 'arima_garch'
+                          for a in list(gruppi[p]) + pesi_json[p]
+                          if a in returns_all.columns and returns_all[a].notna().any()})
+        tickers = {d: v.get('ticker') for d, v in ns.items()}
+        manc = arima_utenti.mancanti(arima, servono, tickers)
+        recente = time.time() - _ARIMA_FALLITI.get(username, 0) < _ARIMA_RIPROVA_S
+        if manc and not recente:
             import uuid as _uuid
-            req_id = str(_uuid.uuid4())[:8]
             with _ARIMA_LOCK:
-                _ARIMA_STATE.update({
-                    'req_id': req_id, 'running': False, 'done': True,
-                    'pct': len(all_assets), 'total': len(all_assets),
-                    'error': None, 'mu': mu_cached, 'cov': cov_cached,
-                    'precompute': False,
-                    'sig': ','.join(sorted(map(str, all_assets))),
-                })
-            _nu = no_update
-            # Restituisce req_id + ':done' così on_arima_done scatta immediatamente
-            # Clessidra nascosta: la cache è già disponibile, non serve mostrare il progresso
-            return (_nu, _nu, _nu, _nu, _nu, _nu,
-                    _nu, _nu, _nu, _nu, _nu,
-                    True, req_id + ':done', {'display':'none'})
-        else:
-            # Nessuna cache → calcolo in background
-            import uuid as _uuid
-            req_id = str(_uuid.uuid4())[:8]
-            with _ARIMA_LOCK:
-                _ARIMA_STATE.update({
-                    'req_id': req_id, 'running': True, 'done': False,
-                    'pct': 0, 'total': len(all_assets), 'error': None, 'mu': None, 'cov': None,
-                    'precompute': False,
-                    'sig': ','.join(sorted(map(str, all_assets))),
-                })
-            t = threading.Thread(
-                target=_run_arima_thread,
-                args=(req_id, returns_df, arima_win, _src),
-                daemon=True,
-            )
-            t.start()
+                # un calcolo già in corso per questo utente (doppio clic, due schede):
+                # si segue quello invece di farne partire un secondo
+                req_id = next((r for r, j in _ARIMA_JOBS.items()
+                               if j.get('utente') == username and not j.get('done')), None)
+                nuovo = req_id is None
+                if nuovo:
+                    req_id = str(_uuid.uuid4())[:8]
+                    _ARIMA_JOBS[req_id] = {'pct': 0, 'total': len(manc), 'done': False,
+                                           'error': None, 'utente': username}
+            if nuovo:
+                print(f"[calc_and_render] ARIMA {username}: {len(servono)} asset, "
+                      f"{len(manc)} da calcolare in background")
+                threading.Thread(target=_run_arima_thread,
+                                 args=(req_id, username, returns_all, manc, tickers),
+                                 daemon=True).start()
             _nu = no_update
             return (_nu, _nu, _nu, _nu, _nu, _nu,
                     _nu, _nu, _nu, _nu, _nu,
                     False, req_id, _ARIMA_PROG_SHOWN)
+        senza_arima = [a for a in servono if arima_utenti.mu_vol(arima, a) is None]
+
+    # ── Calcola le 3 frontiere, ognuna con la misura del suo portafoglio ────────
+    frontier_res  = {}   # fname → (df_f, max_sharpe, min_vol, names)
+    frontier_wgts = {}   # fname → {asset: weight%}
+    # ogni calcolo riparte senza portafogli F scelti: F1/F2/F3 compaiono solo
+    # cliccando un punto della frontiera (on_frontier_click)
+    _existing_sel = {}
 
     for fname, assets_sel in [('F1', p1_sel), ('F2', p2_sel), ('F3', p3_sel)]:
-        valid = [a for a in assets_sel if a in returns_df.columns]
-        if len(valid) < 2:
+        misura = misure[_P_DI[fname]]
+        st = _stima(returns_df, assets_sel, misura, arima_window, arima, returns_all)
+        if st is None or len(st[0].columns) < 2:
             continue
-        # dropna solo sugli asset selezionati per questa frontiera,
-        # poi applica la finestra temporale
-        df_sub = returns_df[valid].dropna()
-        if win and win < len(df_sub):
-            df_sub = df_sub.tail(win)
-        if len(df_sub) < 10:
-            continue
+        df_sub, mu_sub, cov_sub = st
+        if misura == 'arima_garch':
+            # asset a varianza nulla fuori; μ estremi winsorizzati (±3σ fra gli
+            # asset) per non avere frontiere verticali
+            ok = [a for a in df_sub.columns if cov_sub.loc[a, a] > 1e-10]
+            if len(ok) < 2:
+                continue
+            df_sub, mu_sub, cov_sub = df_sub[ok], mu_sub[ok], cov_sub.loc[ok, ok]
+            if mu_sub.std() > 0:
+                mu_sub = mu_sub.clip(mu_sub.mean() - 3 * mu_sub.std(),
+                                     mu_sub.mean() + 3 * mu_sub.std())
         try:
             df_f, ms, mv, names = calc_frontier(
                 df_sub, n=n_f, wmin=wmin_f, wmax=wmax_f,
-                rf=rf_f, risk=risk, mu_override=_mu(df_sub))
+                rf=rf_f, risk=misura, mu_override=mu_sub, cov_override=cov_sub)
             frontier_res[fname] = (df_f, ms, mv, names)
             ex = _existing_sel.get(fname, {})
             pt_idx = ex.get('pt_idx', -1)
@@ -2274,57 +2145,30 @@ def calc_and_render(n, stock_data, prices_data,
             else:
                 continue
             frontier_wgts[fname] = {names[i]: round(wvec[i] * 100, 2) for i in range(len(names))}
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[calc_and_render] frontiera {fname} ({misura}) fallita: {e}")
 
     # ── Grafico frontiera ────────────────────────────────────────────────────
     fig = go.Figure()
-    _cvar_pct = 10 if risk == 'cvar90' else (5 if risk == 'cvar95' else None)
-
-    # Singoli asset: media e rischio calcolati sulla serie propria di ogni asset
-    # (finestra applicata individualmente, no dropna globale su tutti gli asset)
     # Tutti gli asset entrano nella figura, ma si vedono solo quelli spuntati in
     # P1/P2/P3: così togliere/rimettere una spunta dopo il calcolo è solo un cambio
     # di visibilità (preview_asset_points), con i valori già calcolati (anche ARIMA).
-    _chart_set = _asset_nei_portafogli(p1_vals, p2_vals, p3_vals)
-    _campioni = [_campione_comune(returns_df, sel, win) for sel in (p1_sel, p2_sel, p3_sel)]
-    for ai, asset in enumerate(all_assets):
-        s = _serie_asset(returns_df, asset, _campioni, win)
-        if len(s) < 10:
-            continue
-        ret_a = float(s.mean() * 252)
-        vol_a = float(s.std() * np.sqrt(252))
-        if _cvar_pct is not None:
-            risk_a = _port_cvar(np.array([1.0]), s.to_frame(), _cvar_pct)
-            risk_lbl = f'CVaR {100-_cvar_pct}%: {risk_a*100:.2f}%'
-        else:
-            risk_a = vol_a
-            risk_lbl = f'Vol: {vol_a*100:.2f}%'
-        color = _PALETTE[ai % len(_PALETTE)]
-        fig.add_trace(go.Scatter(
-            x=[risk_a * 100], y=[ret_a * 100],
-            mode='markers+text', name=asset,
-            meta={'punto_asset': asset}, visible=(asset in _chart_set),
-            marker=dict(size=6, symbol='circle', opacity=0.75, color=color),
-            text=[asset[:9]], textposition='top center',
-            textfont=dict(size=7, color=color), showlegend=False,
-            hoverlabel=dict(bgcolor='white', bordercolor=color,
-                            font=dict(color='black', size=11)),
-            hovertemplate=f'<b>{asset}</b><br>{risk_lbl}<br>Rendimento: {ret_a*100:.2f}%<extra></extra>',
-        ))
+    _punti_asset(fig, returns_df, all_assets, gruppi, misure, arima_window, arima,
+                 returns_all, {p: set(v) for p, v in gruppi.items()})
 
     for fname, (df_f, ms, mv, names) in frontier_res.items():
         fcolor  = _FC[fname]
         cml_col = _CML_C[fname]
+        nome_m  = _NOME_MISURA[misure[_P_DI[fname]]]
         if not df_f.empty:
             cd = [[fname, i, i + 1] for i in range(len(df_f))]
             fig.add_trace(go.Scatter(
                 x=df_f['Volatility'] * 100, y=df_f['Return'] * 100,
-                mode='lines+markers', name=f'Frontiera {fname}',
+                mode='lines+markers', name=f'Frontiera {fname} · {nome_m}',
                 line=dict(color=fcolor, width=2),
                 marker=dict(size=6),
                 customdata=cd,
-                hovertemplate=f'<b>{fname} · Portafoglio %{{customdata[2]}}</b>'
+                hovertemplate=f'<b>{fname} ({nome_m}) · Portafoglio %{{customdata[2]}}</b>'
                               f'<br>Rischio: %{{x:.2f}}%<br>Rendimento: %{{y:.2f}}%<extra></extra>',
             ))
         if ms is not None and ms['Sharpe'] > 0:
@@ -2340,8 +2184,8 @@ def calc_and_render(n, stock_data, prices_data,
             fig.add_trace(go.Scatter(
                 x=[ms['Volatility'] * 100], y=[ms['Return'] * 100],
                 mode='markers', name=f'Max Sharpe {fname}',
-                marker=dict(symbol='circle', size=12, color='red',
-                            line=dict(color='#880000', width=1.5)),
+                marker=dict(symbol='circle', size=14, color=fcolor,
+                            line=dict(color='#1a1a1a', width=1.2)),
                 customdata=[[fname, idx_ms, 'sharpe']],
                 hovertemplate=(f'<b>Max Sharpe {fname}: {ms["Sharpe"]:.2f}</b>'
                                f'<br>Rischio: {ms["Volatility"]*100:.2f}%'
@@ -2349,19 +2193,15 @@ def calc_and_render(n, stock_data, prices_data,
             ))
 
     # ── P1/P2/P3 dell'Analisi Portafoglio come punti di confronto ─────────────
-    _punti_portafogli(fig, returns_df, win, _cvar_pct)
+    disegnati = _punti_portafogli(fig, returns_df, misure, arima_window, arima, returns_all)
 
-    risk_label = {
-        'standard':    'Volatilità Ann. (%)',
-        'vol':         'Volatilità Ann. (%) [fin.]',
-        'cvar90':      'CVaR 90% Ann. (%)',
-        'cvar95':      'CVaR 95% Ann. (%)',
-        'arima_garch': 'Vol GARCH Ann. (%)',
-    }[risk]
+    usati = [p for p in ('P1', 'P2', 'P3')
+             if p in disegnati or {v: k for k, v in _P_DI.items()}[p] in frontier_res]
     fig.update_layout(
-        title=dict(text=f'Frontiera Efficiente{arima_label}',
+        title=dict(text='Frontiera Efficiente',
                    font=dict(size=14, color='#1a3a6b'), x=0.02),
-        xaxis=dict(title=risk_label, gridcolor='#e8eef8', zeroline=False),
+        xaxis=dict(title=_etichetta_asse([(p, misure[p]) for p in usati]),
+                   gridcolor='#e8eef8', zeroline=False),
         yaxis=dict(title='Rendimento Atteso Ann. (%)', gridcolor='#e8eef8', zeroline=False),
         paper_bgcolor='white', plot_bgcolor='#f8faff',
         font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
@@ -2370,9 +2210,18 @@ def calc_and_render(n, stock_data, prices_data,
     )
 
     # ── Performance e Drawdown chart ─────────────────────────────────────────
-    show_frontiers = {fname: (fname in port_chart_checked) for fname in frontier_wgts}
-    fig2   = _build_perf_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
-    fig_dd = _build_drawdown_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
+    # F1 spuntato di default solo se non c'era ancora nessuna riga di frontiera
+    # (le righe P1/P2/P3 dell'Analisi ci sono anche prima del calcolo).
+    # I portafogli F non si disegnano finché non si clicca la frontiera; restano
+    # quelli dell'Analisi con la spunta che avevano.
+    port_chart_checked = {k for k in port_chart_checked if not str(k).startswith('F')}
+    pesi_analisi = _pesi_analisi()
+    show_frontiers = {k: (k in port_chart_checked) for k in pesi_analisi}
+    pesi_grafici = dict(pesi_analisi)
+    # colonne F1/F2/F3 % della griglia: pesi dell'Analisi finché non si clicca un punto
+    pesi_colonne = {f: pesi_analisi.get(p, {}) for f, p in (('F1', 'P1'), ('F2', 'P2'), ('F3', 'P3'))}
+    fig2   = _build_perf_chart(prices_data, chart_assets, pesi_grafici, show_frontiers, date_start, date_end)
+    fig_dd = _build_drawdown_chart(prices_data, chart_assets, pesi_grafici, show_frontiers, date_start, date_end)
 
     # ── Ricostruisci griglia con F1/F2/F3 weights ────────────────────────────
     p1_set    = set(p1_sel)
@@ -2384,9 +2233,9 @@ def calc_and_render(n, stock_data, prices_data,
     short_map = _short_history(returns_df)
     rows = []
     for i, asset in enumerate(all_assets):
-        f1w = frontier_wgts.get('F1', {}).get(asset)
-        f2w = frontier_wgts.get('F2', {}).get(asset)
-        f3w = frontier_wgts.get('F3', {}).get(asset)
+        f1w = pesi_colonne['F1'].get(asset)
+        f2w = pesi_colonne['F2'].get(asset)
+        f3w = pesi_colonne['F3'].get(asset)
         row = html.Div([
             _asset_name_div(asset, short_map),
             html.Div(
@@ -2416,7 +2265,7 @@ def calc_and_render(n, stock_data, prices_data,
                 dcc.Checklist(id={'type':'fe-p3','index':asset},
                               options=[{'label':'','value':asset}],
                               value=[asset] if asset in p3_set else [],
-                              inputStyle={'accentColor':'#e6550d'},
+                              inputStyle={'accentColor':'#d62728'},
                               style={'display':'flex','justifyContent':'center'}),
                 style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}
             ),
@@ -2424,7 +2273,7 @@ def calc_and_render(n, stock_data, prices_data,
                      style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
             html.Div(id={'type':'fe-wgt-f2','index':asset}, children=_w_cell(f2w, '#2ca02c'),
                      style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(f3w, '#e6550d'),
+            html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(f3w, '#d62728'),
                      style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
         ], style={'display':'flex','alignItems':'center','height':'24px',
                   'borderBottom':'1px solid #f0f4fb',
@@ -2432,7 +2281,7 @@ def calc_and_render(n, stock_data, prices_data,
         rows.append(row)
 
     # ── Righe portafoglio (F1/F2/F3) ─────────────────────────────────────────
-    _PORT_BG = {'F1': '#f0f6ff', 'F2': '#f0fff4', 'F3': '#fff5f0'}
+    _PORT_BG = {'F1': '#f0f6ff', 'F2': '#f0fff4', 'F3': '#fff3f3'}
 
     # Costruisci sel_pt (label semplice per riga riepilogo)
     sel_pt = {}
@@ -2441,10 +2290,7 @@ def calc_and_render(n, stock_data, prices_data,
         pt_idx = ex.get('pt_idx', -1)
         ex_label = ex.get('label', '')
         if pt_idx >= 0 and pt_idx < len(df_f):
-            label = ex_label or f'P{pt_idx + 1}'
-        else:
-            label = 'Sharpe'
-        sel_pt[fname] = {'label': label, 'pt_idx': pt_idx}
+            sel_pt[fname] = {'label': ex_label or f'P{pt_idx + 1}', 'pt_idx': pt_idx}
 
     def _sel_cell(fname):
         info = sel_pt.get(fname, {})
@@ -2475,7 +2321,8 @@ def calc_and_render(n, stock_data, prices_data,
         for fname, fcolor in _FC.items():
             if fname not in frontier_wgts:
                 continue
-            rows.append(html.Div([
+            # nascosta finché non si clicca un punto della frontiera fname
+            rows.append(html.Div(id={'type':'fe-riga-f','index':fname}, children=[
                 html.Div(
                     html.Span(f'Portafoglio {fname}',
                               style={'fontSize':'8px','color':fcolor,'fontWeight':'700',
@@ -2486,8 +2333,7 @@ def calc_and_render(n, stock_data, prices_data,
                     dcc.Checklist(
                         id={'type':'fe-chart-port','index':fname},
                         options=[{'label':'','value':fname}],
-                        value=[fname] if (fname in port_chart_checked or
-                                          (fname == 'F1' and not port_chart_ids)) else [],
+                        value=[fname] if fname in port_chart_checked else [],
                         inputStyle={'accentColor': fcolor},
                         style={'display':'flex','justifyContent':'center'},
                     ),
@@ -2500,29 +2346,39 @@ def calc_and_render(n, stock_data, prices_data,
                          style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
                 html.Div(_w_cell(100.0 if fname == 'F2' else None, '#2ca02c'),
                          style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-                html.Div(_w_cell(100.0 if fname == 'F3' else None, '#e6550d'),
+                html.Div(_w_cell(100.0 if fname == 'F3' else None, '#d62728'),
                          style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            ], style={'display':'flex','alignItems':'center','height':'28px',
+            ], style={'display':'none','alignItems':'center','height':'28px',
                       'borderBottom':'1px solid #e0e8f8',
                       'background': _PORT_BG.get(fname, 'white')}))
+
+    # Portafogli dell'Analisi sotto le frontiere, con la spunta che avevano
+    rows.extend(_righe_portafogli_analisi(pesi_analisi, port_chart_checked))
 
     # ── Stats ────────────────────────────────────────────────────────────────
     stats = []
     for fname, (df_f, ms, mv, names) in frontier_res.items():
         if ms is not None:
+            misura = misure[_P_DI[fname]]
+            dettaglio = {'vol': f' {int(arima_window or 250)} gg',
+                         'arima_garch': f' {arima_utenti.FINESTRA} gg'}.get(misura, '')
             stats.append(html.Span([
-                html.B(f'Max Sharpe {fname}: ', style={'color': _FC[fname]}),
+                html.B(f'Max Sharpe {fname} ', style={'color': _FC[fname]}),
+                html.Span(f'({_NOME_MISURA[misura]}{dettaglio}): ',
+                          style={'color': '#6b7a99'}),
                 f"{ms['Return']*100:.1f}% rend · {ms['Volatility']*100:.1f}% rischio · "
                 f"Sharpe {ms['Sharpe']:.2f}   ",
             ], style={'marginRight':'8px', 'fontSize':'11px'}))
-    if arima_label:
+    if senza_arima:
         stats.append(html.Span(
-            f'Metodo: ARIMA+GARCH finestra {arima_window or 250}gg',
-            style={'fontSize':FONT['sm'],'color':'#6b7a99','fontStyle':'italic'}))
+            f'ARIMA non disponibile per {", ".join(senza_arima[:4])}'
+            f'{"…" if len(senza_arima) > 4 else ""}: media e volatilità degli ultimi '
+            f'{arima_utenti.FINESTRA} giorni',
+            style={'fontSize':FONT['xs'],'color':'#856404','fontStyle':'italic'}))
 
-    f1j = json.dumps(frontier_wgts.get('F1', {}))
-    f2j = json.dumps(frontier_wgts.get('F2', {}))
-    f3j = json.dumps(frontier_wgts.get('F3', {}))
+    f1j = json.dumps(pesi_colonne['F1']) if pesi_colonne['F1'] else None
+    f2j = json.dumps(pesi_colonne['F2']) if pesi_colonne['F2'] else None
+    f3j = json.dumps(pesi_colonne['F3']) if pesi_colonne['F3'] else None
     count = f'{len(all_assets)} asset · {len(frontier_res)} frontiere calcolate'
 
     raw_data = {}
@@ -2549,12 +2405,19 @@ def calc_and_render(n, stock_data, prices_data,
     Output('fe-f1-weights',  'data',             allow_duplicate=True),
     Output('fe-f2-weights',  'data',             allow_duplicate=True),
     Output('fe-f3-weights',  'data',             allow_duplicate=True),
+    Output({'type':'fe-riga-f','index':ALL},     'style', allow_duplicate=True),
+    Output({'type':'fe-chart-port','index':ALL}, 'value', allow_duplicate=True),
     Input('fe-frontier-chart',   'clickData'),
     State('fe-selected-pt',      'data'),
     State('fe-frontier-rawdata', 'data'),
+    State({'type':'fe-riga-f','index':ALL},     'style'),
+    State({'type':'fe-riga-f','index':ALL},     'id'),
+    State({'type':'fe-chart-port','index':ALL}, 'value'),
+    State({'type':'fe-chart-port','index':ALL}, 'id'),
     prevent_initial_call=True,
 )
-def on_frontier_click(click_data, sel_pt_json, rawdata_json):
+def on_frontier_click(click_data, sel_pt_json, rawdata_json,
+                      stili_f, ids_f, val_port, ids_port):
     if not click_data:
         raise PreventUpdate
     pt = click_data['points'][0]
@@ -2581,8 +2444,21 @@ def on_frontier_click(click_data, sel_pt_json, rawdata_json):
             w_out[fname] = w_dict
     except Exception:
         pass
+    if w_out.get(fname) is no_update:
+        raise PreventUpdate
 
-    return json.dumps(sel_pt), w_out['F1'], w_out['F2'], w_out['F3']
+    # Il portafoglio Fn compare in griglia (riga visibile) e nei grafici (spuntato)
+    # solo ora, al primo clic sulla sua frontiera; ai clic successivi la spunta
+    # resta quella scelta dall'utente.
+    stili_out, val_out = [], []
+    for st, d in zip(stili_f or [], ids_f or []):
+        stili_out.append({**(st or {}), 'display': 'flex'} if d['index'] == fname else no_update)
+    nascosta = next((((st or {}).get('display') == 'none') for st, d in zip(stili_f or [], ids_f or [])
+                     if d['index'] == fname), False)
+    for v, d in zip(val_port or [], ids_port or []):
+        val_out.append([fname] if (d['index'] == fname and nascosta) else no_update)
+
+    return json.dumps(sel_pt), w_out['F1'], w_out['F2'], w_out['F3'], stili_out, val_out
 
 
 # ── Aggiorna riga riepilogo portafoglio selezionato ──────────────────────────
@@ -2599,7 +2475,7 @@ def update_sel_info(sel_pt_json, ids):
         fname = d['index']
         info  = sel_pt.get(fname, {})
         label = info.get('label', '') if info else ''
-        color = 'red' if 'Sharpe' in label else (_FC.get(fname, '#888') if label else '#bbb')
+        color = _FC.get(fname, '#888') if label else '#bbb'
         result.append(
             html.Span(label or '—',
                       style={'fontSize':'9px','fontWeight':'700', 'color': color})
@@ -2622,7 +2498,7 @@ def _make_wgt_cell_cb(store_id, col_type, color):
 
 _wgt_f1_cb = _make_wgt_cell_cb('fe-f1-weights', 'fe-wgt-f1', '#0066cc')
 _wgt_f2_cb = _make_wgt_cell_cb('fe-f2-weights', 'fe-wgt-f2', '#2ca02c')
-_wgt_f3_cb = _make_wgt_cell_cb('fe-f3-weights', 'fe-wgt-f3', '#e6550d')
+_wgt_f3_cb = _make_wgt_cell_cb('fe-f3-weights', 'fe-wgt-f3', '#d62728')
 
 
 # ── ARIMA: polling progresso ──────────────────────────────────────────────────
@@ -2636,418 +2512,46 @@ _wgt_f3_cb = _make_wgt_cell_cb('fe-f3-weights', 'fe-wgt-f3', '#e6550d')
     prevent_initial_call=True,
 )
 def arima_poll(n_int, cur_req_id):
-    if not cur_req_id:
+    if not cur_req_id or ':' in cur_req_id:
         raise PreventUpdate
-    raw_id = cur_req_id.replace(':done', '').replace(':error', '').replace(':ready', '')
     with _ARIMA_LOCK:
-        s = dict(_ARIMA_STATE)
-    if s.get('req_id') != raw_id:
-        raise PreventUpdate
-    _pre = s.get('precompute')
+        s = dict(_ARIMA_JOBS.get(cur_req_id) or {})
+    if not s:
+        # processo riavviato a calcolo in corso: si ricalcola da capo col pulsante
+        return (cur_req_id + ':error', '❌ Calcolo ARIMA interrotto', True,
+                _arima_bar_style(100, '#c0392b'))
     if s.get('error'):
-        return (raw_id + ':error', f"❌ Errore: {s['error'][:50]}", True,
+        return (cur_req_id + ':error', f"❌ Errore ARIMA: {s['error'][:50]}", True,
                 _arima_bar_style(100, '#c0392b'))
     if s.get('done'):
-        # In precompute non costruiamo la frontiera: usiamo il suffisso ':ready'
-        # (on_arima_done lo ignora). In modalità calcolo usiamo ':done'.
-        if _pre:
-            return raw_id + ':ready', '✓ ARIMA pronto', True, _arima_bar_style(100)
-        return raw_id + ':done', '✓ Completato', True, _arima_bar_style(100)
+        return cur_req_id + ':done', '✓ ARIMA completato', True, _arima_bar_style(100)
     total = s['total'] or 1
     pct   = int(s['pct'] / total * 100)
     return (no_update,
-            f"ARIMA: {s['pct']}/{total} titoli ({pct}%)",
+            f"ARIMA: {s['pct']}/{total} asset nuovi ({pct}%)",
             False,
             _arima_bar_style(pct))
 
 
-# ── ARIMA: quando completato → calcola frontiere e aggiorna ──────────────────
+# ── ARIMA finito → il file personale ha tutti gli asset: si ripreme Calcola ──
+# (con un errore pure: calc_and_render non riparte per 15 minuti e usa media e
+# volatilità degli ultimi 250 giorni per gli asset senza stima).
 @app.callback(
-    Output('fe-grid',               'children',   allow_duplicate=True),
-    Output('fe-asset-count',        'children',   allow_duplicate=True),
-    Output('fe-frontier-chart',     'figure',     allow_duplicate=True),
-    Output('fe-perf-chart',         'figure',     allow_duplicate=True),
-    Output('fe-drawdown-chart',     'figure',     allow_duplicate=True),
-    Output('fe-stats-panel',        'children',   allow_duplicate=True),
-    Output('fe-f1-weights',         'data',       allow_duplicate=True),
-    Output('fe-f2-weights',         'data',       allow_duplicate=True),
-    Output('fe-f3-weights',         'data',       allow_duplicate=True),
-    Output('fe-frontier-rawdata',   'data',       allow_duplicate=True),
-    Output('fe-selected-pt',        'data',       allow_duplicate=True),
+    Output('fe-calc-btn',           'n_clicks',   allow_duplicate=True),
     Output('fe-arima-progress-div', 'style',      allow_duplicate=True),
     Input('fe-arima-reqid',         'data'),
-    State('fe-stock-data',          'data'),
-    State('fe-prices-data',         'data'),
-    State({'type':'fe-p1','index':ALL},       'value'),
-    State({'type':'fe-p2','index':ALL},       'value'),
-    State({'type':'fe-p3','index':ALL},       'value'),
-    State({'type':'fe-p1','index':ALL},       'id'),
-    State({'type':'fe-chart','index':ALL},    'value'),
-    State('fe-n-portfolios',        'value'),
-    State('fe-min-weight',          'value'),
-    State('fe-max-weight',          'value'),
-    State('fe-rf',                  'value'),
-    State('fe-risk-measure',        'value'),
-    State('fe-arima-window',        'value'),
-    State('fe-date-start',          'date'),
-    State('fe-date-end',            'date'),
-    State({'type':'fe-chart-port','index':ALL}, 'value'),
-    State({'type':'fe-chart-port','index':ALL}, 'id'),
-    State('fe-selected-pt',         'data'),
+    State('fe-calc-btn',            'n_clicks'),
     prevent_initial_call=True,
 )
-def on_arima_done(req_id, stock_data, prices_data,
-                  p1_vals, p2_vals, p3_vals, p_ids, chart_vals,
-                  n_port, wmin, wmax, rf, risk, arima_window,
-                  date_start, date_end, port_chart_vals, port_chart_ids, sel_pt_cur):
-    if not req_id:
+def on_arima_done(req_id, cur_clicks):
+    if not req_id or not (req_id.endswith(':done') or req_id.endswith(':error')):
         raise PreventUpdate
-    # ':ready' = precompute completato in background: la cache ARIMA è pronta,
-    # ma NON costruiamo la frontiera ora (l'utente la calcola quando vuole).
-    if req_id.endswith(':ready'):
-        raise PreventUpdate
-    raw_id = req_id.replace(':done', '').replace(':error', '')
     with _ARIMA_LOCK:
-        s = dict(_ARIMA_STATE)
-    if s.get('req_id') != raw_id or not s.get('done') or s.get('error'):
-        raise PreventUpdate
-    mu_series = s.get('mu')
-    cov_df = s.get('cov')
-    if mu_series is None:
-        raise PreventUpdate
-    if not stock_data:
-        raise PreventUpdate
-
-    returns_df = _get_returns(stock_data)
-    if returns_df is None or returns_df.empty:
-        raise PreventUpdate
-
-    if date_start: returns_df = returns_df.loc[date_start:]
-    if date_end:   returns_df = returns_df.loc[:date_end]
-    returns_df = returns_df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-    win_ag = int(arima_window or 250)
-    all_assets = returns_df.columns.tolist()
-
-    def _p_assets(vals, ids, default_all=False):
-        if not ids:
-            return all_assets if default_all else []
-        sel = [pid['index'] for v, pid in zip(vals, ids) if v]
-        if len(sel) == 0:
-            return all_assets if default_all else []
-        return sel if len(sel) >= 2 else []
-
-    # Una frontiera solo per i portafogli con almeno 2 asset spuntati: niente più
-    # F1 «su tutto il file» quando P1 è vuoto (scelta dell'utente, 20/11/2026).
-    p1_sel = _p_assets(p1_vals, p_ids, default_all=False)
-    p2_sel = _p_assets(p2_vals, p_ids, default_all=False)
-    p3_sel = _p_assets(p3_vals, p_ids, default_all=False)
-
-    chart_assets = [a for v in (chart_vals or []) if v for a in v]
-    port_chart_checked = {
-        pid['index'] for v, pid in zip(port_chart_vals or [], port_chart_ids or []) if v
-    }
-
-    wmin_f = (wmin or 0) / 100
-    wmax_f = (wmax or 100) / 100
-    rf_f   = (rf or 2.0) / 100
-    n_f    = int(n_port or 15)
-    arima_label = f' [ARIMA+GARCH finestra {arima_window or 250}gg]'
-    _existing_sel = json.loads(sel_pt_cur) if sel_pt_cur else {}
-
-    print(f"[on_arima_done] p1={len(p1_sel)} p2={len(p2_sel)} p3={len(p3_sel)} mu={len(mu_series) if mu_series is not None else 'None'}")
-    frontier_res  = {}
-    frontier_wgts = {}
-    for fname, assets_sel in [('F1', p1_sel), ('F2', p2_sel), ('F3', p3_sel)]:
-        valid = [a for a in assets_sel if a in returns_df.columns]
-        if len(valid) < 2:
-            print(f"[on_arima_done] {fname}: valid={len(valid)} — skip")
-            continue
-        df_sub = returns_df[valid].dropna()
-        if win_ag < len(df_sub):
-            df_sub = df_sub.tail(win_ag)
-        if len(df_sub) < 10:
-            continue
-        mu_sub  = mu_series.reindex(valid).fillna(mu_series.mean()) if mu_series is not None else None
-        cov_sub = cov_df.reindex(index=valid, columns=valid) if cov_df is not None else None
-
-        # Filtra asset con diagonale della cov nulla/NaN (es. Russell2000 senza dati)
-        if cov_sub is not None:
-            cov_arr_chk = np.nan_to_num(cov_sub.values, nan=0.0)
-            diag_chk    = np.diag(cov_arr_chk)
-            bad_assets  = [valid[i] for i, d in enumerate(diag_chk) if d <= 1e-10]
-            if bad_assets:
-                print(f"[on_arima_done] {fname}: escludo asset cov-zero: {bad_assets}")
-                valid   = [a for a in valid if a not in bad_assets]
-                if len(valid) < 2:
-                    continue
-                df_sub  = returns_df[valid].dropna()
-                if win_ag < len(df_sub):
-                    df_sub = df_sub.tail(win_ag)
-                mu_sub  = mu_series.reindex(valid).fillna(mu_series.mean())
-                cov_sub = cov_df.reindex(index=valid, columns=valid)
-
-        # Winsorizza mu estremi (±3σ cross-sectionale) per evitare frontiere verticali
-        if mu_sub is not None and len(mu_sub) > 1:
-            _m_mean = mu_sub.mean()
-            _m_std  = mu_sub.std()
-            if _m_std > 0:
-                _lo, _hi = _m_mean - 3 * _m_std, _m_mean + 3 * _m_std
-                _clipped = mu_sub.clip(_lo, _hi)
-                _outliers = mu_sub[mu_sub != _clipped]
-                if not _outliers.empty:
-                    print(f"[on_arima_done] {fname}: winsorize mu outliers: {_outliers.to_dict()}")
-                mu_sub = _clipped
-
-        print(f"[on_arima_done] {fname}: valid={len(valid)} df_sub={df_sub.shape} mu_sub={mu_sub is not None} cov_sub={cov_sub is not None}")
-        try:
-            df_f, ms, mv, names = calc_frontier(
-                df_sub, n=n_f, wmin=wmin_f, wmax=wmax_f,
-                rf=rf_f, risk=risk, mu_override=mu_sub, cov_override=cov_sub)
-            frontier_res[fname] = (df_f, ms, mv, names)
-            ex = _existing_sel.get(fname, {})
-            pt_idx = ex.get('pt_idx', -1)
-            if pt_idx >= 0 and pt_idx < len(df_f):
-                row  = df_f.iloc[pt_idx]
-                wvec = row['Weights']
-            elif ms is not None:
-                wvec   = ms['Weights']
-                pt_idx = -1
-            else:
-                continue
-            frontier_wgts[fname] = {names[i]: round(wvec[i] * 100, 2) for i in range(len(names))}
-        except Exception as _e:
-            import traceback; traceback.print_exc()
-            print(f"[on_arima_done] ERRORE {fname}: {_e}")
-
-    # Re-use the same chart/grid/stats building as calc_and_render
-    # (frontier_res, frontier_wgts, all_assets, etc. are all set)
-    # Build frontier chart
-    _EMPTY_FIG = go.Figure().update_layout(paper_bgcolor='white', plot_bgcolor='#f8faff')
-    fig = go.Figure()
-    _cvar_pct_done = 10 if risk == 'cvar90' else (5 if risk == 'cvar95' else None)
-    _chart_set = _asset_nei_portafogli(p1_vals, p2_vals, p3_vals)   # visibili solo gli asset di P1/P2/P3
-    _campioni = [_campione_comune(returns_df, sel, win_ag) for sel in (p1_sel, p2_sel, p3_sel)]
-    for ai, asset in enumerate(all_assets):
-        s = _serie_asset(returns_df, asset, _campioni, win_ag)
-        if len(s) < 10:
-            continue
-        # Per ARIMA+GARCH usa mu/vol stimati, altrimenti usa media/std storici
-        if mu_series is not None and asset in mu_series.index:
-            ret_a = float(mu_series[asset] * 252)
-        else:
-            ret_a = float(s.mean() * 252)
-        if cov_df is not None and asset in cov_df.columns:
-            vol_a = float(np.sqrt(cov_df.loc[asset, asset] * 252))
-        else:
-            vol_a = float(s.std() * np.sqrt(252))
-        if _cvar_pct_done is not None:
-            risk_a = _port_cvar(np.array([1.0]), s.to_frame(), _cvar_pct_done)
-            risk_lbl = f'CVaR {100-_cvar_pct_done}%: {risk_a*100:.2f}%'
-        else:
-            risk_a = vol_a
-            risk_lbl = f'Vol: {vol_a*100:.2f}%'
-        color = _PALETTE[ai % len(_PALETTE)]
-        fig.add_trace(go.Scatter(
-            x=[risk_a*100], y=[ret_a*100], mode='markers+text', name=asset,
-            meta={'punto_asset': asset}, visible=(asset in _chart_set),
-            marker=dict(size=6, opacity=0.75, color=color),
-            text=[asset[:9]], textposition='top center',
-            textfont=dict(size=7, color=color), showlegend=False,
-            hoverlabel=dict(bgcolor='white', bordercolor=color,
-                            font=dict(color='black', size=11)),
-            hovertemplate=f'<b>{asset}</b><br>{risk_lbl}<br>Ren:{ret_a*100:.2f}%<extra></extra>',
-        ))
-    for fname, (df_f, ms, mv, names) in frontier_res.items():
-        fcolor  = _FC[fname]
-        cml_col = _CML_C[fname]
-        if not df_f.empty:
-            cd = [[fname, i, i + 1] for i in range(len(df_f))]
-            fig.add_trace(go.Scatter(
-                x=df_f['Volatility']*100, y=df_f['Return']*100,
-                mode='lines+markers', name=f'Frontiera {fname}',
-                line=dict(color=fcolor, width=2), marker=dict(size=6),
-                customdata=cd,
-                hovertemplate=f'<b>{fname} · Portafoglio %{{customdata[2]}}</b>'
-                              f'<br>Rischio:%{{x:.2f}}%<br>Ren:%{{y:.2f}}%<extra></extra>',
-            ))
-        if ms is not None and ms['Sharpe'] > 0:
-            vr = np.linspace(0, ms['Volatility']*1.8, 100)
-            fig.add_trace(go.Scatter(
-                x=vr*100, y=(rf_f + ms['Sharpe']*vr)*100,
-                mode='lines', name=f'CML {fname}',
-                line=dict(color=cml_col, dash='dash', width=1.5), showlegend=False,
-                hovertemplate=f'<b>CML {fname}</b><br>%{{x:.2f}}%→%{{y:.2f}}%<extra></extra>',
-            ))
-        if ms is not None:
-            fig.add_trace(go.Scatter(
-                x=[ms['Volatility']*100], y=[ms['Return']*100], mode='markers',
-                name=f'Max Sharpe {fname}',
-                marker=dict(symbol='circle', size=12, color='red',
-                            line=dict(color='#880000', width=1.5)),
-                hovertemplate=(f'<b>Max Sharpe {fname}:{ms["Sharpe"]:.2f}</b>'
-                               f'<br>Rischio:{ms["Volatility"]*100:.2f}%'
-                               f'<br>Ren:{ms["Return"]*100:.2f}%<extra></extra>'),
-            ))
-    # P1/P2/P3 dell'Analisi Portafoglio: prima con ARIMA+GARCH non comparivano.
-    _punti_portafogli(fig, returns_df, win_ag, _cvar_pct_done, mu=mu_series, cov=cov_df)
-
-    risk_label = {
-        'standard':    'Volatilità Ann. (%)',
-        'vol':         'Volatilità Ann. (%) [fin.]',
-        'cvar90':      'CVaR 90% Ann. (%)',
-        'cvar95':      'CVaR 95% Ann. (%)',
-        'arima_garch': 'Vol GARCH Ann. (%)',
-    }[risk]
-    fig.update_layout(
-        title=dict(text=f'Frontiera Efficiente{arima_label}', font=dict(size=14,color='#1a3a6b'), x=0.02),
-        xaxis=dict(title=risk_label, gridcolor='#e8eef8', zeroline=False),
-        yaxis=dict(title='Rendimento Atteso Ann. (%)', gridcolor='#e8eef8', zeroline=False),
-        paper_bgcolor='white', plot_bgcolor='#f8faff',
-        font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
-        margin=dict(l=50, r=30, t=80, b=40), hovermode='closest',
-    )
-
-    show_frontiers = {fname: (fname in port_chart_checked) for fname in frontier_wgts}
-    fig2   = _build_perf_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
-    fig_dd = _build_drawdown_chart(prices_data, chart_assets, frontier_wgts, show_frontiers, date_start, date_end)
-
-    # Build grid rows
-    chart_set = set(chart_assets)
-    p1_set    = set(p1_sel)
-    p2_set    = set(p2_sel)
-    p3_set    = set(p3_sel)
-    short_map = _short_history(returns_df)
-    rows = []
-    for i, asset in enumerate(all_assets):
-        f1w = frontier_wgts.get('F1', {}).get(asset)
-        f2w = frontier_wgts.get('F2', {}).get(asset)
-        f3w = frontier_wgts.get('F3', {}).get(asset)
-        rows.append(html.Div([
-            _asset_name_div(asset, short_map),
-            html.Div(dcc.Checklist(id={'type':'fe-chart','index':asset},
-                                   options=[{'label':'','value':asset}],
-                                   value=[asset] if asset in chart_set else [],
-                                   style={'display':'flex','justifyContent':'center'}),
-                     style={'width':'7%','display':'flex','justifyContent':'center','alignItems':'center'}),
-            html.Div(dcc.Checklist(id={'type':'fe-p1','index':asset},
-                                   options=[{'label':'','value':asset}],
-                                   value=[asset] if asset in p1_set else [],
-                                   inputStyle={'accentColor':'#0066cc'},
-                                   style={'display':'flex','justifyContent':'center'}),
-                     style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}),
-            html.Div(dcc.Checklist(id={'type':'fe-p2','index':asset},
-                                   options=[{'label':'','value':asset}],
-                                   value=[asset] if asset in p2_set else [],
-                                   inputStyle={'accentColor':'#2ca02c'},
-                                   style={'display':'flex','justifyContent':'center'}),
-                     style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}),
-            html.Div(dcc.Checklist(id={'type':'fe-p3','index':asset},
-                                   options=[{'label':'','value':asset}],
-                                   value=[asset] if asset in p3_set else [],
-                                   inputStyle={'accentColor':'#e6550d'},
-                                   style={'display':'flex','justifyContent':'center'}),
-                     style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}),
-            html.Div(id={'type':'fe-wgt-f1','index':asset}, children=_w_cell(f1w,'#0066cc'),
-                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            html.Div(id={'type':'fe-wgt-f2','index':asset}, children=_w_cell(f2w,'#2ca02c'),
-                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(f3w,'#e6550d'),
-                     style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
-        ], style={'display':'flex','alignItems':'center','height':'24px',
-                  'borderBottom':'1px solid #f0f4fb',
-                  'background':'white' if i % 2 == 0 else '#fafcff'}))
-
-    # Portfolio summary + portfolio rows
-    sel_pt = {}
-    _PORT_BG = {'F1':'#f0f6ff','F2':'#f0fff4','F3':'#fff5f0'}
-    for fname, (df_f, ms, _mv, _names) in frontier_res.items():
-        ex = _existing_sel.get(fname, {})
-        pt_idx = ex.get('pt_idx', -1)
-        ex_label = ex.get('label', '')
-        label = (ex_label or f'P{pt_idx+1}') if (pt_idx >= 0 and pt_idx < len(df_f)) else 'Sharpe'
-        sel_pt[fname] = {'label': label, 'pt_idx': pt_idx}
-
-    def _sel_cell_local(fname):
-        info = sel_pt.get(fname, {})
-        return html.Span(info.get('label','—') if info else '—',
-                         style={'fontSize':'9px','fontWeight':'700',
-                                'color':_FC.get(fname,'#888') if info else '#bbb'})
-
-    if frontier_wgts:
-        rows.append(html.Div(style={'height':'3px','background':'#ccd9ee','margin':'2px 0'}))
-        rows.append(html.Div([
-            html.Div(html.Span('Portfolio selezionato',
-                               style={'fontSize':'7px','color':'#8899bb','fontStyle':'italic'}),
-                     style={'width':'25%','height':'36px','display':'flex','alignItems':'center','paddingLeft':'4px'}),
-            html.Div(style={'width':'7%'}),
-            html.Div('',style={'width':'8%'}), html.Div('',style={'width':'8%'}), html.Div('',style={'width':'8%'}),
-            html.Div(id={'type':'fe-sel-info','index':'F1'}, children=_sel_cell_local('F1'),
-                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center','flexDirection':'column'}),
-            html.Div(id={'type':'fe-sel-info','index':'F2'}, children=_sel_cell_local('F2'),
-                     style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center','flexDirection':'column'}),
-            html.Div(id={'type':'fe-sel-info','index':'F3'}, children=_sel_cell_local('F3'),
-                     style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center','flexDirection':'column'}),
-        ], style={'display':'flex','alignItems':'center','height':'36px','borderBottom':'1px solid #e0e8f8','background':'#f8faff'}))
-        for fname, fcolor in _FC.items():
-            if fname not in frontier_wgts:
-                continue
-            rows.append(html.Div([
-                html.Div(html.Span(f'Portafoglio {fname}',
-                                   style={'fontSize':'8px','color':fcolor,'fontWeight':'700',
-                                          'overflow':'hidden','whiteSpace':'nowrap','textOverflow':'ellipsis'}),
-                         style={'width':'25%','height':'28px','display':'flex','alignItems':'center','paddingLeft':'4px'}),
-                html.Div(dcc.Checklist(id={'type':'fe-chart-port','index':fname},
-                                       options=[{'label':'','value':fname}],
-                                       value=[fname] if (fname in port_chart_checked or
-                                                         (fname=='F1' and not port_chart_ids)) else [],
-                                       inputStyle={'accentColor':fcolor},
-                                       style={'display':'flex','justifyContent':'center'}),
-                         style={'width':'7%','display':'flex','justifyContent':'center','alignItems':'center'}),
-                html.Div('—',style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'}),
-                html.Div('—',style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'}),
-                html.Div('—',style={'width':'8%','textAlign':'center','fontSize':'8px','color':'#ccc'}),
-                html.Div(_w_cell(100.0 if fname=='F1' else None,'#0066cc'),
-                         style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-                html.Div(_w_cell(100.0 if fname=='F2' else None,'#2ca02c'),
-                         style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-                html.Div(_w_cell(100.0 if fname=='F3' else None,'#e6550d'),
-                         style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            ], style={'display':'flex','alignItems':'center','height':'28px',
-                      'borderBottom':'1px solid #e0e8f8','background':_PORT_BG.get(fname,'white')}))
-
-    # Stats
-    stats = []
-    for fname, (df_f, ms, mv, names) in frontier_res.items():
-        if ms is not None:
-            stats.append(html.Span([
-                html.B(f'Max Sharpe {fname}: ', style={'color':_FC[fname]}),
-                f"{ms['Return']*100:.1f}% rend · {ms['Volatility']*100:.1f}% rischio · Sharpe {ms['Sharpe']:.2f}   ",
-            ], style={'marginRight':'8px','fontSize':'11px'}))
-    stats.append(html.Span(arima_label.strip(' []'),
-                           style={'fontSize':FONT['sm'],'color':'#6b7a99','fontStyle':'italic'}))
-
-    f1j = json.dumps(frontier_wgts.get('F1', {}))
-    f2j = json.dumps(frontier_wgts.get('F2', {}))
-    f3j = json.dumps(frontier_wgts.get('F3', {}))
-    count = f'{len(all_assets)} asset · {len(frontier_res)} frontiere calcolate'
-
-    raw_data = {}
-    for fname, (df_f, _ms, _mv, names) in frontier_res.items():
-        raw_data[fname] = {
-            'assets': names,
-            'points': [{'vol':float(r['Volatility']),'ret':float(r['Return']),'weights':list(r['Weights'])}
-                       for _, r in df_f.iterrows()],
-        }
-
-    # Aggiorna la cache info in memoria — ora disponibile per toggle_window_div
-    _ARIMA_CACHE_INFO['available'] = True
-    _ARIMA_CACHE_INFO['ts'] = datetime.now().strftime('%d/%m/%Y %H:%M')
-
-    return (rows, count, fig, fig2, fig_dd,
-            html.Div(stats, style={'display':'flex','flexWrap':'wrap','gap':'4px'}),
-            f1j, f2j, f3j, json.dumps(raw_data), json.dumps(sel_pt),
-            {'display':'none'})
+        # i job finiti restano 10 minuti: un'altra scheda può star seguendo lo stesso
+        for r in [r for r, j in _ARIMA_JOBS.items()
+                  if j.get('done') and time.time() - j.get('fine', 0) > 600]:
+            _ARIMA_JOBS.pop(r, None)
+    return (cur_clicks or 0) + 1, (_ARIMA_PROG_HIDDEN if req_id.endswith(':done') else no_update)
 
 
 # ── Salva portafogli F1/F2/F3 per importazione in Analisi Portafoglio ────────
