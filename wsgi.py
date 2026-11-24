@@ -47,7 +47,7 @@ yf_seriale.installa()
 try:
     import cloud_storage
     if cloud_storage.enabled():
-        cloud_storage.pull_all()
+        cloud_storage.pull_all_separato()    # processo a parte: la memoria del download torna al sistema
     else:
         print("• [cloud] storage persistente disattivato (nessuna env var S3_*) — uso disco locale", flush=True)
 except Exception as _e:

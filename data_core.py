@@ -592,6 +592,9 @@ def add_asset_to_current(ticker, description, currency='EUR', username=None):
     data = read_current(username)
     is_new = description not in data
     data[description] = entry
+    # read_current toglie le chiavi meta: senza rimetterle si perdeva '_tipo'.
+    # Un asset aggiunto rende il file personale, come in Analisi di Portafoglio.
+    data = {**read_meta(username), '_tipo': 'personale', **data}
     if not write_current(data, username):
         return False, "⚠ Errore salvataggio current.json"
     valuta_txt = '' if (codice or 'EUR') == 'EUR' else f" — da {codice} in EUR"
@@ -898,6 +901,8 @@ def load_profilo(filename, username=None):
         analyses = snap.get('analyses', None)
     else:
         current, analyses = (snap or {}), None
+    # Un lavoro salvato caricato diventa il file di lavoro personale (anche per il Portafoglio).
+    current = {**{k: v for k, v in current.items() if isinstance(v, dict)}, '_tipo': 'personale'}
     ok = write_current(current, username)
     if analyses is not None:
         write_json_atomic(analyses_path(username), analyses)

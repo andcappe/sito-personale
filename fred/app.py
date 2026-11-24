@@ -4418,7 +4418,7 @@ def _compare_tab_layout():
 
 def _fred_navbar():
     from navbar import make_navbar
-    return make_navbar(current='macro')
+    return make_navbar(current='macro', margine='16px')   # = intestazione della dashboard
 
 
 app.layout = html.Div([

@@ -1879,7 +1879,7 @@ def layout():
                                     "background": "#eaf4fb", "display": "block",
                                     "padding": "4px 8px", "border-radius": "3px",
                                     "margin-bottom": "8px"}),
-        _lbl("Simbolo (es. AAPL, ENI.MI, MC.PA)"),
+        _lbl("Simbolo"),
         _inp("val-ticker", "Ticker Yahoo Finance", "AAPL"),
         html.Button("▶ Carica & Valuta", id="btn-run-valuation", n_clicks=0,
                     style={"width": "100%", "margin-top": "8px",
@@ -1903,9 +1903,7 @@ def layout():
                     children=html.Div(id="val-av-status",
                                       style={"font-size": "9px", "color": "#888",
                                              "margin-top": "4px", "line-height": "1.45",
-                                             "white-space": "pre-wrap"},
-                                      children="Solo dopo una trimestrale appena uscita: "
-                                               "costa 3 delle 25 richieste giornaliere.")),
+                                             "white-space": "pre-wrap"})),
         dcc.Store(id="val-av-agg"),
 
         html.Button("🎯 Applica valori consigliati", id="btn-val-consigli",
@@ -1915,10 +1913,6 @@ def layout():
                            "border": "1px solid #1a3a5c", "border-radius": "6px",
                            "padding": "6px", "font-size": "11px",
                            "cursor": "pointer"}),
-        html.Div("Li applica già ▶ al caricamento. Il tab 🎯 Parametri mostra "
-                 "da dove viene ogni numero.",
-                 style={"font-size": "9px", "color": "#888", "margin-top": "4px",
-                        "line-height": "1.45"}),
 
         html.Hr(style={"margin": "10px 0"}),
 
@@ -1933,14 +1927,6 @@ def layout():
         # Gordon non converge e il DCF non sarebbe calcolabile.
         _sl("val-gterm",   0.0, 8.75, 0.25, 2.5,
             f"Tasso finale — da anno {ANNI_DCF + 1} in poi, per sempre (%)"),
-        html.Div("Crescita perpetua: il massimo segue il WACC (resta un quarto "
-                 "di punto sotto), perché una crescita perpetua pari o "
-                 "superiore al tasso di sconto fa divergere Gordon. Alza il "
-                 "WACC se ti serve più corsa. In pratica 2-3% (inflazione + "
-                 "crescita reale): per una crescita alta ma temporanea usa le "
-                 "due fasi qui sopra.",
-                 style={"font-size": "9px", "color": "#888",
-                        "line-height": "1.45", "margin": "-4px 0 8px"}),
         _sl("val-fcf-margin", 1.0, 50.0, 0.5, 15.0, "Margine FCF/Revenue (%)"),
         html.Div(id="val-fcf-nota",
                  style={"font-size": "9px", "color": "#888", "margin": "-2px 0 4px",
@@ -1977,10 +1963,6 @@ def layout():
             persistence=True, persistence_type="session",
             labelStyle={"display": "block", "font-size": "11px",
                         "color": "#333", "margin-bottom": "4px"}),
-        html.Div("Vale per i grafici e le tabelle del tab Bilanci. "
-                 "Per la variazione anno su anno scegli «Annuali».",
-                 style={"font-size": "9px", "color": "#888",
-                        "line-height": "1.45", "margin-top": "2px"}),
 
     ], style={"width": "270px", "min-width": "270px", "padding": "14px",
               "background": "#fafafa", "border-right": "1px solid #ddd",
@@ -2022,9 +2004,6 @@ def layout():
             html.H3("Valutazione Titolo Azionario",
                     style={"margin": "0 20px 0 0", "font-size": "15px",
                            "color": "#1a3a5c", "white-space": "nowrap"}),
-            html.Span("DCF · DDM · Graham · P/E relativo · EV/EBITDA · Heatmap sensitività — "
-                      "dati fondamentali da Yahoo Finance (yfinance)",
-                      style={"font-size": "11px", "color": "#666"}),
         ], style={"display": "flex", "align-items": "center",
                   "padding": "8px 16px", "background": "#f0f4fa",
                   "border-bottom": "1px solid #dee2e6",

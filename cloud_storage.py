@@ -112,8 +112,12 @@ def _rel_key(local_path) -> str:
 # ─── Write-through (upload dopo ogni scrittura) ───────────────────────────────
 
 def _push_blocking(local_path, key):
+    # put_object e non upload_file: upload_file passa da s3transfer, che apre un
+    # pool di thread a ogni chiamata e su glibc lascia memoria frammentata (istanza
+    # da 512 MB). I file sincronizzati stanno tutti sotto i 10 MB: basta una PUT.
     try:
-        _cli().upload_file(str(local_path), _bucket(), key)
+        with open(local_path, 'rb') as f:
+            _cli().put_object(Bucket=_bucket(), Key=key, Body=f.read())
     except Exception as e:
         print(f"⚠ [cloud] upload fallito {key}: {e}", flush=True)
 
@@ -205,6 +209,29 @@ def pull_all() -> int:
     return n
 
 
+def pull_all_separato(timeout=900) -> int:
+    """pull_all() in un processo a parte (quello del sito non lo vede mai).
+    Su DO, istanza da 512 MB: fatto dentro il worker, il download di ~300 file con
+    boto3/s3transfer lasciava ~200 MB di memoria che malloc_trim non restituiva
+    (log del 24/11/2026: RSS 209 MB a fine pull, 467 MB dopo il montaggio delle app,
+    container ucciso per OOM all'apertura del Portafoglio). Un processo che finisce
+    restituisce tutto al sistema. Se il processo separato non parte, si ripiega sul
+    pull nel processo corrente. Restituisce il numero di file (−1 se sconosciuto)."""
+    global _pull_ok
+    if not enabled():
+        return 0
+    import subprocess
+    import sys
+    try:
+        r = subprocess.run([sys.executable, str(Path(__file__).resolve()), 'pull'],
+                           cwd=str(_ROOT), timeout=timeout)
+    except Exception as e:
+        print(f"⚠ [cloud] pull in processo separato non riuscito ({e}): lo faccio qui", flush=True)
+        return pull_all()
+    _pull_ok = r.returncode == 0       # l'esito lo stampa il processo figlio
+    return -1
+
+
 # ─── Seed (carica i dati locali attuali sul bucket) ───────────────────────────
 
 def seed() -> int:
@@ -257,6 +284,7 @@ if __name__ == '__main__':
         seed()
     elif cmd == 'pull':
         pull_all()
+        sys.exit(0 if _pull_ok else 2)
     else:
         print(f"cloud_storage: enabled={enabled()}  bucket={_bucket() or '(nessuno)'}")
         print("Comandi: python cloud_storage.py [seed|pull|status]")

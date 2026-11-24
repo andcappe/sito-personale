@@ -245,7 +245,7 @@ _FOTO_PNG = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file_
 _FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
 
 _FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES', 'VALUTE']
-from navbar import ETICHETTA_PERSONALE, legenda_btn
+from navbar import ETICHETTA_PERSONALE
 from settings.caratteri import NOME_ASSET
 _PERSONALE_OPT = {'label': ETICHETTA_PERSONALE, 'value': '__personale__'}
 
@@ -3217,15 +3217,26 @@ def get_rolling_analysis_tab():
         campo('A', dcc.DatePickerSingle(id='dr-end-roll', display_format='DD/MM/YYYY',
                                         first_day_of_week=1, clearable=False)),
     ])
+    # Si sceglie un asset del file oppure si scrive un ticker Yahoo (compare la voce
+    # «🔎 TICKER — da Yahoo», valore 'yf:TICKER'): `_roll_opzioni_ricerca`.
     _tendina = lambda id_, ph: dcc.Dropdown(id=id_, options=[], value=None, placeholder=ph,
-                                            clearable=True, optionHeight=28,
+                                            clearable=True, searchable=True, optionHeight=28,
                                             style={'width': '240px', 'font-size': '12px'})
     asset = html.Div(style={'display': 'flex', 'gap': '10px 16px', 'flex-wrap': 'wrap',
                             'align-items': 'flex-end'}, children=[
         campo('Benchmark', dcc.Dropdown(id='roll-bm-scelta', options=[], value=None,
-                                        clearable=False, placeholder='Benchmark…', optionHeight=28,
+                                        clearable=False, searchable=True,
+                                        placeholder='Asset o ticker Yahoo…', optionHeight=28,
                                         style={'width': '240px', 'font-size': '12px'})),
-        *[campo(f'Asset {i}', _tendina(f'roll-asset-{i}', '—')) for i in range(1, 5)],
+        *[campo(f'Asset {i}', _tendina(f'roll-asset-{i}', 'Asset o ticker Yahoo…'))
+          for i in range(1, 5)],
+    ])
+    asset = html.Div([
+        asset,
+        html.Div('Scegli fra gli asset del file o scrivi un ticker Yahoo (es. AAPL, CSSPX.MI) '
+                 'e seleziona «🔎 … da Yahoo». Il confronto usa solo il periodo in cui ci sono '
+                 'tutte le serie.', style={'font-size': '11px', 'color': '#6b7a99', 'margin-top': '6px'}),
+        html.Div(id='roll-avviso', style={'font-size': '11px', 'color': '#8a5a00', 'margin-top': '4px'}),
     ])
     finestre = html.Div(style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap',
                                'gap': '6px 14px'}, children=[
@@ -3566,7 +3577,7 @@ def get_portfolio_analysis_tab(options_tickers):
                 html.Div([
                   _testa_cell('Grafici'),
                   html.Div(className='nb-espandi-corpo', children=[
-                    legenda_btn('controls-and-graph', 'Legenda — Analisi Portafoglio'),
+                    # Niente «⤢ Legenda» qui (24/11/2026, scelta dell'utente): basta la legenda del grafico.
                     dcc.Loading(
                         id='graph-loading',
                         target_components={'controls-and-graph': 'figure'},
@@ -5559,30 +5570,59 @@ def _roll_etichetta(anni):
 _ROLL_N_ASSET = 4   # asset da confrontare col benchmark
 
 
-@app.callback(
-    Output('roll-bm-scelta', 'options'),
-    Output('roll-bm-scelta', 'value'),
-    *[Output(f'roll-asset-{i}', 'options') for i in range(1, _ROLL_N_ASSET + 1)],
-    *[Output(f'roll-asset-{i}', 'value') for i in range(1, _ROLL_N_ASSET + 1)],
-    Input('stock-data', 'data'),
-    State('roll-bm-scelta', 'value'),
-    *[State(f'roll-asset-{i}', 'value') for i in range(1, _ROLL_N_ASSET + 1)],
-)
-def _roll_opzioni_asset(stock_data, bm, *scelti):
-    """Tendine dagli asset del file; benchmark predefinito come nelle altre sezioni.
-    Se le quattro tendine sono vuote si riempiono con i primi asset selezionati (CH)."""
-    df = _get_df(stock_data) if stock_data else None
-    if df is None or df.empty:
-        raise PreventUpdate
-    assets = list(df.columns)
-    opz = [{'label': a, 'value': a} for a in assets]
-    bm = _corr_bench_predefinito(assets, bm)
-    scelti = [a if a in assets else None for a in scelti]
-    if not any(scelti):
-        ns = _read_user_json(_get_username())
-        spuntati = [a for a in assets if a != bm and ns.get(a, {}).get('checked')]
-        scelti = (spuntati[:_ROLL_N_ASSET] + [None] * _ROLL_N_ASSET)[:_ROLL_N_ASSET]
-    return (opz, bm, *([opz] * _ROLL_N_ASSET), *scelti)
+_ROLL_YF = 'yf:'      # prefisso del valore di una tendina per un ticker Yahoo
+_ROLL_TENDINE = ['roll-bm-scelta'] + [f'roll-asset-{i}' for i in range(1, _ROLL_N_ASSET + 1)]
+
+
+def _roll_nome(valore):
+    """Nome mostrato: l'asset del file così com'è, il ticker Yahoo senza prefisso."""
+    return valore[len(_ROLL_YF):] if valore and valore.startswith(_ROLL_YF) else valore
+
+
+def _roll_opz_yahoo(ticker):
+    return {'label': f'🔎 {ticker} — da Yahoo', 'value': _ROLL_YF + ticker}
+
+
+def _roll_registra_ricerca(id_):
+    @app.callback(
+        Output(id_, 'options'),
+        Output(id_, 'value'),
+        Input('stock-data', 'data'),
+        Input(id_, 'search_value'),
+        State(id_, 'value'),
+        State(id_, 'options'),
+    )
+    def _roll_opzioni_ricerca(stock_data, cerca, valore, attuali):
+        """Opzioni = asset del file + la voce Yahoo per il testo scritto (e per il
+        ticker Yahoo già scelto, altrimenti la tendina non saprebbe cosa mostrare).
+        Valore (solo al cambio dei dati, nello stesso callback: separati, il valore
+        arrivava prima delle opzioni e la tendina lo scartava): si parte dal solo
+        benchmark predefinito, gli asset da confrontare restano vuoti; un ticker
+        Yahoo scelto resta, un asset che non sta più nel file si toglie."""
+        da_ricerca = callback_context.triggered_id == id_
+        if da_ricerca and not cerca and attuali:
+            raise PreventUpdate
+        df = _get_df(stock_data) if stock_data else None
+        assets = list(df.columns) if df is not None and not df.empty else []
+        if not da_ricerca:
+            if valore and not valore.startswith(_ROLL_YF) and valore not in assets:
+                valore = None
+            if id_ == 'roll-bm-scelta' and assets and not (valore and valore.startswith(_ROLL_YF)):
+                valore = _corr_bench_predefinito(assets, valore)
+        opz = [{'label': a, 'value': a} for a in assets]
+        extra = []
+        if valore and valore.startswith(_ROLL_YF):
+            extra.append(_roll_opz_yahoo(_roll_nome(valore)))
+        t = (cerca or '').strip().upper().replace(' ', '')
+        if t and len(t) <= 20 and all(c.isalnum() or c in '.-=^' for c in t):
+            if not extra or extra[0]['value'] != _ROLL_YF + t:
+                extra.insert(0, _roll_opz_yahoo(t))
+        return extra + opz, (no_update if da_ricerca else valore)
+    return _roll_opzioni_ricerca
+
+
+for _id in _ROLL_TENDINE:
+    _roll_registra_ricerca(_id)
 
 
 # Finestra Temporale condivisa con gli altri tab (sessions/<u>/finestra.json).
@@ -5642,6 +5682,7 @@ def _roll_prezzi_file(df, nomi):
     Output('roll-chart-returns', 'style'),
     Output('roll-chart-diff',    'style'),
     Output('roll-chart-summary', 'style'),
+    Output('roll-avviso',        'children'),
     Input('roll-calc-button',    'n_clicks'),
     State('roll-bm-scelta',      'value'),
     *[State(f'roll-asset-{i}', 'value') for i in range(1, _ROLL_N_ASSET + 1)],
@@ -5656,7 +5697,8 @@ def calcola_rolling(*args):
     """Con responsive=True Dash ignora layout.height: l'altezza va nello style."""
     out = _calcola_rolling(*args)
     stili = [{'width': '100%', 'height': f"{(f.layout.height or 450)}px"} for f in out[:3]]
-    return (*out, *stili)
+    avviso = out[5] if len(out) > 5 else out[4]     # errori di scelta: visibili anche fuori dal ⚙
+    return (*out[:5], *stili, avviso)
 
 
 def _calcola_rolling(n_clicks, bm, a1, a2, a3, a4, finestre_spuntate, anni_liberi,
@@ -5665,7 +5707,7 @@ def _calcola_rolling(n_clicks, bm, a1, a2, a3, a4, finestre_spuntate, anni_liber
         raise PreventUpdate
     confronti = []
     for x in (a1, a2, a3, a4):
-        if x and x != bm and x not in confronti:
+        if x and x != bm and x not in confronti and _roll_nome(x) != _roll_nome(bm):
             confronti.append(x)
     if not bm or not confronti:
         msg = _roll_vuoto('Scegli il benchmark e almeno un asset da confrontare.', '#c0392b')
@@ -5689,24 +5731,70 @@ def _calcola_rolling(n_clicks, bm, a1, a2, a3, a4, finestre_spuntate, anni_liber
         msg = _roll_vuoto('Finestra temporale non valida.', '#c0392b')
         return msg, msg, msg, None, '⚠ Controlla le date.'
 
-    # Si scarica anche PRIMA della data iniziale: una finestra di N anni ha il
-    # suo primo valore solo dopo N anni di storico, altrimenti il grafico
-    # partirebbe vuoto proprio nel tratto che interessa.
+    # Asset del file: indice di prezzo dai rendimenti in EUR. Ticker Yahoo: scaricati
+    # anche PRIMA della data iniziale (una finestra di N anni ha il primo valore
+    # dopo N anni), riportati in EUR e trattati come i dati del file (rendimenti
+    # limitati a ±50% al giorno). Poi tutte le serie si tagliano al periodo comune.
     t0 = time.time()
     df = _get_df(stock_data) if stock_data else None
     if df is None or df.empty:
         msg = _roll_vuoto('Nessun dato: carica un file.', '#c0392b')
-        return msg, msg, msg, None, '⚠ Nessun dato.'
-    prezzi = _roll_prezzi_file(df, [bm] + confronti)
-    info_val, errori = None, []
+        return msg, msg, msg, None, '⚠ Nessun dato.', '⚠ Nessun dato: carica un file.'
+    scelti = [bm] + confronti
+    dal_file = [v for v in scelti if not v.startswith(_ROLL_YF)]
+    da_yahoo = [_roll_nome(v) for v in scelti if v.startswith(_ROLL_YF)]
+    grezzi = {_roll_nome(k): v for k, v in _roll_prezzi_file(df, dal_file).items()}
+    info_val, errori = {}, []
+    for t in grezzi:
+        info_val[t] = {'grezza': 'EUR', 'valuta': 'EUR', 'origine': 'file', 'divisore': 1.0,
+                       'convertita': True, 'cambio': None}
+    if da_yahoo:
+        inizio = (d_ini - pd.DateOffset(years=int(np.ceil(max(anni))), days=45)).strftime('%Y-%m-%d')
+        p_yf, i_yf, e_yf = _roll_scarica(da_yahoo, inizio)
+        # Un ticker che Yahoo non conosce: basta «nessun dato», non anche la valuta.
+        errori += [e for e in e_yf
+                   if not any(e.startswith(f'{t}: Yahoo non dice') for t in da_yahoo if t not in p_yf)]
+        info_val.update({t: d for t, d in i_yf.items() if t in p_yf})
+        for t, p in p_yf.items():
+            r = p.pct_change().clip(-_MAX_DAILY_RET, _MAX_DAILY_RET).dropna()
+            if len(r):
+                grezzi[t] = (1 + r).cumprod()
+    if not any(i.get('origine') != 'file' for i in info_val.values()):
+        info_val = None           # solo dati del file: niente colonna Valuta
+    bm = _roll_nome(bm)
+    confronti = [_roll_nome(v) for v in confronti]
+
+    # Periodo comune: dal primo giorno in cui ci sono tutte le serie all'ultimo in cui
+    # ci sono tutte. Calendari diversi (borse italiane e USA) si allineano col prezzo
+    # dell'ultimo giorno disponibile, solo dentro la vita di ogni serie.
+    prezzi, avviso = {}, []
+    if bm in grezzi:
+        validi = {t: grezzi[t] for t in [bm] + confronti if t in grezzi}
+        inizio_c = max(p.index[0] for p in validi.values())
+        fine_c = min(p.index[-1] for p in validi.values())
+        chi_ini = max(validi, key=lambda t: validi[t].index[0])
+        chi_fin = min(validi, key=lambda t: validi[t].index[-1])
+        if inizio_c < fine_c:
+            tab = pd.concat(validi, axis=1).sort_index().ffill().loc[inizio_c:fine_c]
+            for t in validi:
+                prezzi[t] = tab[t] / tab[t].iloc[0]
+            limite = (f" (fermo a {chi_fin})"
+                      if fine_c < max(p.index[-1] for p in validi.values()) - pd.Timedelta(days=5) else '')
+            avviso.append(f"Periodo comune a tutte le serie: dal {inizio_c:%d/%m/%Y} (inizio di "
+                          f"{chi_ini}) al {fine_c:%d/%m/%Y}{limite}.")
+        else:
+            errori.append('le serie scelte non hanno giorni in comune')
     durata = time.time() - t0
+    if errori:
+        avviso.append('⚠ ' + ' · '.join(errori[:4]))
+    avviso = html.Div([html.Div(x) for x in avviso]) if avviso else None
     if bm not in prezzi:
         msg = _roll_vuoto(f"Benchmark '{bm}' senza dati.", '#c0392b')
-        return msg, msg, msg, None, f'⚠ {bm} senza dati'
+        return msg, msg, msg, None, f'⚠ {bm} senza dati', avviso
     serie = [t for t in confronti if t in prezzi]
     if not serie:
         msg = _roll_vuoto('Nessun asset di confronto con dati.', '#c0392b')
-        return msg, msg, msg, None, '⚠ nessun confronto valido'
+        return msg, msg, msg, None, '⚠ nessun confronto valido', avviso
 
     nomi   = [bm] + serie
     colore = {t: _ROLL_COLORI[i % len(_ROLL_COLORI)] for i, t in enumerate(nomi)}
@@ -5814,11 +5902,13 @@ def _calcola_rolling(n_clicks, bm, a1, a2, a3, a4, finestre_spuntate, anni_liber
                      + (' …' if len(troppo_corti) > 6 else ''))
     if errori:
         pezzi.append('⚠ ' + ' · '.join(errori[:3]))
-    stato = html.Div([html.Div(p) for p in pezzi])
+    if info_val:
+        pezzi.append(_roll_riga_valute(info_val, nomi))
+    stato = html.Div([p if not isinstance(p, str) else html.Div(p) for p in pezzi if p])
     _applica_nascosti(fig_ret, 'roll-chart-returns')
     _applica_nascosti(fig_diff, 'roll-chart-diff')
     _applica_nascosti(fig_sum, 'roll-chart-summary')
-    return fig_ret, fig_diff, fig_sum, tabella, stato
+    return fig_ret, fig_diff, fig_sum, tabella, stato, avviso
 
 
 def _roll_riepilogo(stat, anni, serie, colore, bm):

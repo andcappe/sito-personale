@@ -26,8 +26,9 @@ from dash.exceptions import PreventUpdate
 
 _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from settings.browser_css import SITE_CSS            # noqa: E402  (CSS unico del sito)
-from navbar import make_navbar                       # noqa: E402
+from navbar import make_navbar, ETICHETTA_PERSONALE, tendina_cell  # noqa: E402
 import valutazione                                   # noqa: E402  (sotto-tab Valutazione)
+from analisitattica import indicatori                # noqa: E402  (sotto-tab Indicatori)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # App
@@ -44,9 +45,41 @@ server = app.server
 
 app.index_string = '''<!DOCTYPE html><html>
 <head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
-<style>''' + SITE_CSS + '''</style>
+<style>''' + SITE_CSS + indicatori.CSS + '''
+  /* Menu «Strumenti» (come in Analisi di Portafoglio): <details> nativo; si chiude
+     con un clic fuori o su una voce (script sotto). */
+  .pf-strumenti { position: relative; display: inline-block; }
+  .pf-strumenti > summary { list-style: none; }
+  .pf-strumenti > summary::-webkit-details-marker { display: none; }
+  .pf-strumenti-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 1500;
+    background: #fff; border: 1px solid #c0d0e8; border-radius: 6px; padding: 4px;
+    box-shadow: 0 6px 20px rgba(26,58,107,0.18); min-width: 220px;
+    display: flex; flex-direction: column; gap: 2px; }
+  .pf-strumenti-menu > * { width: 100%; box-sizing: border-box; }
+  .pf-voce:hover { background: #f0f4fa !important; }
+  @media (max-width: 600px) { .pf-strumenti-menu { left: auto; right: 0; } }
+  .at-via { display: none !important; }
+  @media (max-width: 900px) {
+    .at-info-btn { background-color: #0066cc !important; padding: 7px 10px !important; }
+  }
+  .at-info-testo { font-size: 12px; color: #33475b; line-height: 1.45; margin: 0 0 8px; }
+  .at-info-testo b { color: #1a3a5c; }
+  @media (max-width: 900px) {
+    .pf-info > .pf-strumenti-menu { position: fixed; top: auto; left: 16px; right: 16px;
+      min-width: 0 !important; max-width: none !important; }
+  }
+  .at-file-aperto:hover { border-color: #1a3a6b !important; }
+</style>
 </head>
-<body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>'''
+<body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}
+<script>
+document.addEventListener('click', function(e){
+  document.querySelectorAll('details.pf-strumenti[open]').forEach(function(d){
+    var dentro = d.contains(e.target);
+    if (!dentro || e.target.closest('.pf-voce')) setTimeout(function(){ d.removeAttribute('open'); }, 0);
+  });
+});
+</script></footer></body></html>'''
 
 _ROOT_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent
 
@@ -1017,7 +1050,7 @@ def get_cot_tab():
                         value=[_COT_YEAR_MAX - 2, _COT_YEAR_MAX], allowCross=False,
                         marks=_cot_year_marks(),
                         tooltip={'placement': 'bottom', 'always_visible': False}),
-                ], style={'width': '360px'}),
+                ], style={'width': '360px', 'max-width': 'calc(100vw - 150px)'}),
             ], style={'display': 'flex', 'align-items': 'center', 'border': '1px solid #ccc',
                       'border-radius': '4px', 'padding': '3px 14px 3px 10px', 'margin-right': '12px',
                       'background': '#f5f5f5'}),
@@ -1029,14 +1062,6 @@ def get_cot_tab():
         ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap',
                   'gap': '4px', 'margin-bottom': '8px'}),
 
-        html.Div('Fonte: CFTC — Commitments of Traders, pubblicato ogni venerdì. '
-                 'Per indici azionari, valute e tassi (report TFF) sono mostrate le posizioni '
-                 'nette di Asset Manager (fondi pensione/comuni/assicurazioni, medio-lungo termine) '
-                 'e Leveraged Money (hedge fund/CTA, speculativi). Per le materie prime '
-                 '(report Disaggregated) sono mostrati il Managed Money (speculazione hedge fund) '
-                 'e il Commercial (hedger = Producer/Merchant + Swap Dealers).',
-                 style={'font-size': '10px', 'color': '#777', 'margin-bottom': '10px',
-                        'line-height': '1.4', 'max-width': '920px'}),
 
         html.Hr(style={'margin': '4px 0 10px'}),
 
@@ -1055,7 +1080,6 @@ _TAB_SEL   = {'font-size': '12px', 'padding': '8px 18px',
 
 _INP = {'font-size': '11px', 'padding': '5px 8px', 'border': '1px solid #aaa',
         'border-radius': '4px'}
-_SEP = {'width': '1px', 'height': '26px', 'background': '#d0d8e4', 'margin': '0 8px'}
 
 
 def _btn(bg):
@@ -1064,12 +1088,95 @@ def _btn(bg):
             'background': bg, 'font-weight': 'bold'}
 
 
+# Pulsanti principali e voci del menu «Strumenti»: stessi stili di Analisi di
+# Portafoglio (_PF_BTN_PRINCIPALE, _PF_VOCE in portafoglio/app.py).
+_BTN_PRINCIPALE = {'background-color': '#1a3a6b', 'color': 'white', 'border': 'none',
+                   'padding': '6px 14px', 'border-radius': '4px', 'cursor': 'pointer',
+                   'font-weight': '600', 'font-size': '12px', 'line-height': '18px',
+                   'display': 'inline-block', 'user-select': 'none'}
+_VOCE = {'font-size': '12px', 'padding': '7px 12px', 'border-radius': '4px',
+         'cursor': 'pointer', 'background': '#ffffff', 'border': '1px solid transparent',
+         'color': '#1a3a5c', 'text-align': 'left', 'width': '100%',
+         'font-weight': '500', 'display': 'block'}
+
+
+def _file_aperto():
+    """Indicatore del file di lavoro (current.json): personale o uno dei predefiniti,
+    con lo stesso nome del selettore di Analisi di Portafoglio. Si cambia lì."""
+    tipo = str(dc.read_meta().get('_tipo') or '')
+    n = len(dc.read_current())
+    if tipo.startswith('default:'):
+        nome, nota = Path(tipo.split(':', 1)[1].strip()).stem, 'file predefinito'
+    else:                       # 'personale' o tipo assente (lavoro caricato / file vecchio)
+        nome, nota = ETICHETTA_PERSONALE, 'file personale'
+    return [html.Span(nome, style={'font-weight': '600', 'color': '#1a3a5c'})], \
+        f'File aperto: {nome} ({nota}, {n} asset). Per cambiarlo vai in Analisi Strategica.'
+
+
+# ── Menu ⚙ «Descrizione»: i testi esplicativi tolti dalle pagine, per sotto-tab ──
+_INFO_TITOLO = {'font-size': '11px', 'font-weight': '600', 'color': '#5a6b85',
+                'text-transform': 'uppercase', 'letter-spacing': '0.04em', 'margin-bottom': '6px'}
+
+_INFO = {
+    'tab-valutazione': ('💹 Valutazione', [
+        ('Modelli', 'DCF · DDM · Graham · P/E relativo · EV/EBITDA · heatmap di sensitività · '
+                    'SaaS. Dati fondamentali da Yahoo Finance, prospetti di bilancio da Alpha Vantage.'),
+        ('Simbolo', 'Ticker di Yahoo Finance, es. AAPL, ENI.MI, MC.PA.'),
+        ('⟳ Aggiorna bilanci', 'Solo dopo una trimestrale appena uscita: costa 3 delle 25 '
+                               'richieste giornaliere di Alpha Vantage.'),
+        ('🎯 Valori consigliati', 'Li applica già ▶ al caricamento. Il tab 🎯 Parametri mostra '
+                                 'da dove viene ogni numero.'),
+        ('Tasso finale', 'Crescita perpetua: il massimo segue il WACC (resta un quarto di punto '
+                         'sotto), perché una crescita perpetua pari o superiore al tasso di sconto fa '
+                         'divergere Gordon. Alza il WACC se serve più corsa. In pratica 2-3% '
+                         '(inflazione + crescita reale): per una crescita alta ma temporanea usa le '
+                         'due fasi sopra.'),
+        ('Bilanci — base di calcolo', 'Vale per i grafici e le tabelle del tab Bilanci. Per la '
+                                      'variazione anno su anno scegli «Annuali».'),
+    ]),
+    'tab-indicatori': ('📐 Indicatori', [
+        ('Finestre', 'Nell\'unità della periodicità (giorni di borsa, settimane o mesi). RSI e '
+                     'stocastico: la finestra più altre tre = finestra × moltiplicatore (vuoto = non usata).'),
+        ('Medie mobili', 'Le tre medie si confrontano a coppie (veloce − lenta, in % della lenta).'),
+        ('Dati', 'Prezzi in EUR del file aperto; lo stocastico usa le sole chiusure.'),
+        ('Colori', 'Rosso = sopra la soglia alta (ipercomprato), verde = sotto la bassa '
+                   '(ipervenduto); per le medie verde = veloce sopra la lenta.'),
+        ('Finestra Temporale', 'È la stessa delle altre pagine: la tabella dà i valori alla data A. '
+                               'Il periodo del grafico parte da lì e si cambia sopra il grafico '
+                               '(vale solo per il grafico). Clic su una riga per il grafico.'),
+        ('Aggiungi asset', 'Scarica 10 anni da Yahoo, converte in EUR e accoda l\'asset al file '
+                           'personale: lo trovi anche in Analisi di Portafoglio (senza spunte né pesi). '
+                           'Una valuta sbagliata si corregge da sola con quella dichiarata da Yahoo.'),
+    ]),
+    'tab-arima': ('📉 Analisi ARIMA', [
+        ('Analisi', 'Per l\'asset scelto cerca l\'ARIMA migliore fino a Max p / Max q secondo il '
+                    'criterio (AIC o BIC) e prevede per l\'orizzonte indicato, in giorni di borsa.'),
+        ('📊 Previsioni 1gg (tutti)', 'Previsione a un giorno per tutti gli asset del file con '
+                                     'ARIMA(1,1,1) e intervallo di confidenza al 95%; può '
+                                     'richiedere qualche secondo.'),
+    ]),
+    'tab-cot': ('📊 Posizionamento COT', [
+        ('Fonte', 'CFTC — Commitments of Traders, pubblicato ogni venerdì. 🔄 Aggiorna lo '
+                  'riscarica subito.'),
+        ('Indici, valute e tassi', 'Report TFF: posizioni nette di Asset Manager (fondi '
+                                   'pensione/comuni/assicurazioni, medio-lungo termine) e Leveraged '
+                                   'Money (hedge fund/CTA, speculativi).'),
+        ('Materie prime', 'Report Disaggregated: Managed Money (speculazione hedge fund) e '
+                          'Commercial (hedger = Producer/Merchant + Swap Dealers).'),
+    ]),
+}
+
+
+def _info_tab(tab):
+    """Contenuto del menu ⚙ per il sotto-tab aperto."""
+    titolo, voci = _INFO.get(tab) or _INFO['tab-valutazione']
+    return [html.Div(f'Descrizione · {titolo}', style=_INFO_TITOLO)] + [
+        html.P([html.B(f'{t}: '), testo], className='at-info-testo') for t, testo in voci]
+
+
 def _file_panel():
     """Solo il pulsante 📁 File (il pannello vero è _file_modal(), alla radice)."""
-    return html.Button('📁 File', id='at-file-btn', n_clicks=0,
-                       style={'border': 'none', 'border-radius': '4px', 'cursor': 'pointer',
-                              'font-weight': 'bold', 'background-color': '#5a1a6a',
-                              'color': 'white', 'padding': '6px 14px', 'font-size': '12px'})
+    return html.Button('📁 File', id='at-file-btn', n_clicks=0, className='pf-voce', style=_VOCE)
 
 
 def _file_modal():
@@ -1092,12 +1199,11 @@ def _file_modal():
                               style={'width': '100%', 'padding': '5px 8px', 'border': '1px solid #aaa',
                                      'border-radius': '4px', 'font-size': '11px', 'margin-bottom': '6px'}),
                     html.Button('💾 Salva', id='at-save-btn', n_clicks=0,
+                                title='Salva dataset + pesi + analisi (tutti i dati)',
                                 style={**_bb, 'background': '#1b7a34', 'color': 'white', 'width': '100%'}),
                     html.Div(id='at-save-status',
                              style={'font-size': '10px', 'margin-top': '5px', 'color': '#555',
                                     'min-height': '16px'}),
-                    html.Div('Salva dataset + pesi + analisi (tutti i dati).',
-                             style={'font-size': '9px', 'color': '#888', 'margin-top': '6px'}),
                 ], style={'width': '220px', 'padding-right': '20px', 'border-right': '1px solid #ddd'}),
                 # Destra: i miei lavori salvati
                 html.Div([
@@ -1128,22 +1234,44 @@ def _data_toolbar():
     return html.Div([
         # ── Toolbar ───────────────────────────────────────────────────────
         html.Div([
-            _file_panel(),
-            html.Div(style=_SEP),
-            # ⬆ Carica File · 📋 Template · 📤 Esporta
-            dcc.Upload(id='at-upload', children=html.Div(['⬆ Carica File']), multiple=False,
-                       style={'height': '30px', 'lineHeight': '30px', 'padding': '0 12px',
-                              'borderWidth': '1px', 'borderStyle': 'dashed', 'borderColor': '#9bb0cc',
-                              'borderRadius': '4px', 'textAlign': 'center', 'fontSize': '11px',
-                              'color': '#1a3a5c', 'background': '#f5f8fc', 'cursor': 'pointer'}),
-            html.Button('📋 Template', id='at-template-btn', n_clicks=0,
-                        style={'font-size': '11px', 'padding': '6px 12px', 'border-radius': '4px',
-                               'cursor': 'pointer', 'background': '#e8f5e9',
-                               'border': '1px solid #a5d6a7', 'color': '#1b5e20'}),
-            html.Button('📤 Esporta Dati', id='at-export-btn', n_clicks=0,
-                        style={'font-size': '11px', 'padding': '6px 12px', 'border-radius': '4px',
-                               'cursor': 'pointer', 'background': '#eafaf1',
-                               'border': '1px solid #1a7a4a', 'color': '#1a7a4a', 'font-weight': 'bold'}),
+            # File aperto (personale o predefinito): solo indicatore, si cambia nel Portafoglio.
+            html.A(id='at-file-aperto', className='at-file-aperto', href='/portafoglio/',
+                   children=_file_aperto()[0], title=_file_aperto()[1],
+                   style={'display': 'inline-flex', 'align-items': 'center', 'gap': '2px',
+                          'font-size': '12px', 'padding': '5px 12px', 'border': '1px solid #b8c4d4',
+                          'border-radius': '4px', 'background': '#fff', 'text-decoration': 'none',
+                          'white-space': 'nowrap', 'line-height': '18px'}),
+            # Menu «Strumenti»: File · Carica file · Template · Esporta dati, voci uguali.
+            # Solo da PC: sul cellulare il menu Strumenti non c'è (scelta dell'utente).
+            html.Details(className='pf-strumenti nb-nascondi-cell', children=[
+                html.Summary('🧰 Strumenti ▾', style=_BTN_PRINCIPALE),
+                html.Div(className='pf-strumenti-menu', children=[
+                    _file_panel(),
+                    dcc.Upload(id='at-upload', className='pf-voce', multiple=False,
+                               children=html.Div(['⬆ Carica file']), style=_VOCE),
+                    html.Button('📋 Template', id='at-template-btn', n_clicks=0, className='pf-voce',
+                                title='Scarica il file Excel da compilare con TICKER, DESCRIZIONE, VALUTA',
+                                style=_VOCE),
+                    html.Button('📤 Esporta dati', id='at-export-btn', n_clicks=0, className='pf-voce',
+                                title='Scarica i dati di Analisi Tattica come file Excel', style=_VOCE),
+                ]),
+            ]),
+            # Sul cellulare, tab Indicatori: preme ▶ Calcola indicatori (nb-clicca, delega in NAVBAR_JS).
+            html.Button('▶ Calcola indicatori', id='at-calcola-cell', className='at-via',
+                        **{'data-bersaglio': 'ind-calcola'},
+                        style={**{k: v for k, v in _BTN_PRINCIPALE.items() if k != 'display'},
+                               'white-space': 'nowrap', 'padding': '7px 12px'}),
+            # ⚙ Descrizione: i testi esplicativi del sotto-tab aperto (come il ⚙ del Portafoglio).
+            html.Details(className='pf-strumenti pf-info', children=[
+                html.Summary([html.I(className='fa-solid fa-gear nb-nascondi-cell'),
+                              html.Span('⚙', className='nb-solo-cell')],
+                             className='at-info-btn', title='Descrizione',
+                             style={**_BTN_PRINCIPALE, 'padding': '6px 9px'}),
+                html.Div(id='at-info-corpo', className='pf-strumenti-menu',
+                         children=_info_tab('tab-valutazione'),
+                         style={'padding': '10px 12px', 'gap': '0', 'min-width': '320px',
+                                'max-width': '420px'}),
+            ]),
         ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap',
                   'gap': '6px', 'margin-bottom': '6px'}),
         dcc.Loading(type='default', color='#1b7a34', children=[
@@ -1155,45 +1283,48 @@ def _data_toolbar():
     ])
 
 
+# Sotto-tab: una sola lista per i dcc.Tabs e la tendina del cellulare.
+_AT_SOTTOTAB = [
+    ('💹 Valutazione',          'tab-valutazione'),
+    ('📐 Indicatori',           'tab-indicatori'),
+    ('📉 Analisi ARIMA',        'tab-arima'),
+    ('📊 Posizionamento COT',   'tab-cot'),
+]
+
+
 def serve_layout():
     opts = _asset_options()
     return html.Div([
-        make_navbar('Analisi Tattica'),
+        make_navbar('Analisi Tattica', margine='calc(8px + 1%)'),  # = .page-wrap
         html.Div([
-            # ── Intestazione pagina (stile Analisi di Portafoglio) ─────────
-            html.Div([
-                html.H1([
-                    'Analisi Tattica',
-                    html.Span(' - ', style={'color': '#9baabf'}),
-                    html.Span('Analisi per una gestione tattica del portafoglio',
-                              className='sub'),
-                ]),
-            ], className='page-head'),
+            # Niente intestazione: il nome della dashboard sta già nella navbar (scelta dell'utente).
             _data_toolbar(),
             # `serve_layout` è una funzione: a ogni ricarica della pagina il
-            # valore tornerebbe a 'tab-arima' e l'utente si ritroverebbe su
-            # Calcola ARIMA. Con persistence il tab aperto sopravvive.
-            dcc.Tabs(id='at-tabs', value='tab-arima',
+            # valore tornerebbe al primo tab. Con persistence il tab aperto sopravvive.
+            # Ordine (24/11/2026, scelta dell'utente): Valutazione, Indicatori, ARIMA, COT.
+            # Sul cellulare i dcc.Tabs si nascondono e al loro posto c'è la tendina
+            # «Tabs Strumenti», identica a quella dell'Analisi Strategica.
+            tendina_cell('at-tendina', _AT_SOTTOTAB),
+            dcc.Tabs(id='at-tabs', value='tab-valutazione',
                      persistence=True, persistence_type='session',
+                     parent_className='nb-nascondi-cell',
                      colors={'border': '#dee2e6', 'primary': '#1a3a5c',
                              'background': '#f0f4fa'},
                      style={'margin-bottom': '10px'},
                      children=[
-                         dcc.Tab(label='📉 Analisi ARIMA', value='tab-arima',
-                                 style=_TAB_STYLE, selected_style=_TAB_SEL),
-                         dcc.Tab(label='📊 Posizionamento COT', value='tab-cot',
-                                 style=_TAB_STYLE, selected_style=_TAB_SEL),
-                         dcc.Tab(label='💹 Valutazione', value='tab-valutazione',
-                                 style=_TAB_STYLE, selected_style=_TAB_SEL),
+                         dcc.Tab(label=lab, value=val, style=_TAB_STYLE, selected_style=_TAB_SEL)
+                         for lab, val in _AT_SOTTOTAB
                      ]),
             # Contenuto delle tab: tutte restano nel DOM e si mostrano/nascondono
             # via callback (Input at-tabs), così le callback ARIMA che dipendono
             # dai suoi componenti restano sempre agganciate.
-            html.Div(id='tab-arima-content', children=get_arima_analysis_tab(opts),
-                     style={'display': 'block'}),
-            html.Div(id='tab-cot-content', children=get_cot_tab(),
-                     style={'display': 'none'}),
             html.Div(id='tab-valutazione-content', children=valutazione.layout(),
+                     style={'display': 'block'}),
+            html.Div(id='tab-indicatori-content', children=indicatori.layout(),
+                     style={'display': 'none'}),
+            html.Div(id='tab-arima-content', children=get_arima_analysis_tab(opts),
+                     style={'display': 'none'}),
+            html.Div(id='tab-cot-content', children=get_cot_tab(),
                      style={'display': 'none'}),
         ], className='page-wrap'),
         # Pannello File montato ALLA RADICE → galleggia sopra a tutto
@@ -1615,6 +1746,48 @@ def at_export(n):
     return dcc.send_bytes(lambda b: b.write(_export_bytes()), 'dati_analisi_tattica.xlsx')
 
 
+# ── Indicatore del file aperto: si rilegge quando i dati possono essere cambiati ─
+@app.callback(
+    Output('at-file-aperto', 'children'), Output('at-file-aperto', 'title'),
+    Input('at-tabs', 'value'), Input('at-data-status', 'children'), Input('ind-nuovo', 'data'),
+    prevent_initial_call=True,
+)
+def at_file_aperto(*_):
+    return _file_aperto()
+
+
+# ── Sotto-tab sul cellulare: tendina «Tabs Strumenti» (come il Portafoglio) ──
+@app.callback(
+    Output('at-tabs', 'value'),
+    Input({'type': 'at-tendina-voce', 'index': ALL}, 'n_clicks'),
+    prevent_initial_call=True,
+)
+def _at_tendina_scegli(clicks):
+    tid = callback_context.triggered_id
+    if not tid or not any(clicks):
+        raise PreventUpdate
+    return tid['index']
+
+
+app.clientside_callback(
+    """function (val) {
+        var voci = %s, lab = voci[0][0];
+        voci.forEach(function (v) { if (v[1] === val) lab = v[0]; });
+        return [lab, voci.map(function (v) {
+            return v[1] === val ? 'nb-tendina-voce nb-attiva' : 'nb-tendina-voce'; })];
+    }""" % json.dumps(_AT_SOTTOTAB),
+    Output('at-tendina-att', 'children'),
+    Output({'type': 'at-tendina-voce', 'index': ALL}, 'className'),
+    Input('at-tabs', 'value'),
+)
+
+
+@app.callback(Output('at-info-corpo', 'children'), Output('at-calcola-cell', 'className'),
+              Input('at-tabs', 'value'))
+def at_info(tab):
+    return _info_tab(tab), ('nb-solo-cell nb-clicca' if tab == 'tab-indicatori' else 'at-via')
+
+
 # ── Pannello File: toggle, lista, salva, carica, elimina ──────────────────────
 @app.callback(
     Output('at-file-panel', 'style'),
@@ -1703,16 +1876,13 @@ def at_fp_del(all_n):
     Output('tab-arima-content', 'style'),
     Output('tab-cot-content', 'style'),
     Output('tab-valutazione-content', 'style'),
+    Output('tab-indicatori-content', 'style'),
     Input('at-tabs', 'value'),
 )
 def _at_switch_tab(tab):
-    show = {'display': 'block'}
-    hide = {'display': 'none'}
-    if tab == 'tab-cot':
-        return hide, show, hide
-    if tab == 'tab-valutazione':
-        return hide, hide, show
-    return show, hide, hide
+    ordine = ('tab-arima', 'tab-cot', 'tab-valutazione', 'tab-indicatori')
+    tab = tab if tab in ordine else 'tab-valutazione'
+    return tuple({'display': 'block' if t == tab else 'none'} for t in ordine)
 
 
 @app.callback(
@@ -1739,6 +1909,7 @@ def _update_cot(key, year_range, n):
 # TAB 3 — Valutazione titolo azionario (modulo condiviso valutazione.py)
 # ─────────────────────────────────────────────────────────────────────────────
 valutazione.register_callbacks(app)
+indicatori.register_callbacks(app)
 
 
 if __name__ == '__main__':

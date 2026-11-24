@@ -11,12 +11,12 @@ _BASE = "https://andreacappelletti.app"
 ETICHETTA_PERSONALE = "👤 File personale"
 
 _TABS = [
-    ("Dashboard Finanziaria Strumenti", "/portafoglio/"),
-    ("Strategie Opzioni",    "/opzioni/"),
+    ("Analisi Strategica", "/portafoglio/"),
     ("Analisi Tattica",      "/analisitattica/"),
-    ("Macro Economia",       "/fred/"),
-    ("Clienti",              "/fondipensione/"),
+    ("Strategie Opzioni",    "/opzioni/"),
     ("Calendario",           "/calendario/"),
+    ("Clienti",              "/fondipensione/"),
+    ("Macro Economia",       "/fred/"),
 ]
 
 
@@ -36,11 +36,16 @@ _TABS = [
 NAVBAR_CSS = """
   html:not(.nb-embed) body { margin-top: -64px !important; }
   #site-navbar .nb-mobile, #site-navbar .nb-menu { display: none !important; }
-  /* Computer stretto (901–1180 px): i sette tab non ci stavano e «Calendario» usciva
-     dalla pagina. Spazi e carattere più piccoli (gli stili dei tab sono inline). */
-  @media (min-width: 901px) and (max-width: 1180px) {
+  /* Computer: carattere e spazi dei tab crescono con la larghezza dello schermo
+     (prima un solo scalino a 1180 px: sotto 10,5 px, sopra 12 px fissi, e sugli
+     schermi grandi voci piccole con grandi vuoti). Fino a ~1080 px → 10,5 px, 1440 → 12,
+     1920 e oltre → 14. Gli stili dei tab sono inline, da qui !important. */
+  @media (min-width: 901px) {
     #site-navbar .nb-tabbar .nb-tab, #site-navbar .nb-tabbar .nb-sito {
-      padding: 0 8px !important; font-size: 0.66rem !important; letter-spacing: 0.02em !important; }
+      font-size: clamp(10.5px, calc(6px + 0.42vw), 14px) !important;
+      padding: 0 clamp(6px, calc(1.6vw - 8px), 28px) !important;
+      letter-spacing: clamp(0.02em, calc(0.0625vw - 0.04em), 0.06em) !important; }
+    #site-navbar .nb-tabbar .nb-sito { margin-right: clamp(4px, 0.6vw, 12px) !important; }
   }
   @media (max-width: 900px) {
     #site-navbar .nb-tabbar { display: none !important; }
@@ -287,7 +292,7 @@ def make_navbar(current: str = "", margine: str = "5%") -> html.Div:
 
     def _attivo(label: str) -> bool:
         # Basta una parola: «Strategie Opzioni» arriva come 'Opzioni'. Vale
-        # anche il percorso: «Dashboard Finanziaria» arriva come 'portafoglio'.
+        # anche il percorso: «Analisi Strategica» arriva come 'portafoglio'.
         cur = current.lower()
         return (_url.get(label, "") in cur and bool(_url.get(label))) or \
             any(w in cur for w in label.lower().split())
