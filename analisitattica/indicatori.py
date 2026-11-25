@@ -449,7 +449,7 @@ def layout():
 
         dcc.Store(id='ind-par'),
         dcc.Store(id='ind-nuovo'),          # nome dell'asset appena aggiunto: ricalcola e lo mostra
-        # ── Tabella | grafico ────────────────────────────────────────────
+        # ── Asset a tutta larghezza, sotto i Grafici (computer e cellulare) ──
         html.Div([
             html.Div([_sezione('Asset', [dcc.Loading(type='circle', color='#1a3a5c', className='ind-tab', children=dash_table.DataTable(
                 id='ind-tabella', data=[], columns=[{'name': 'Asset', 'id': 'asset'}],
@@ -496,7 +496,7 @@ def layout():
                           'border-top': '1px solid #e2e8f0'}),
             ]),
             ], className='nb-piena',
-                style={'width': '50%', 'min-width': '0'}),
+                style={'width': '100%', 'min-width': '0'}),
             html.Div([_sezione('Grafici', [
                 dcc.Dropdown(id='ind-asset', options=[], placeholder='Asset da mostrare…',
                              persistence=True, persistence_type='local', clearable=False,
@@ -505,8 +505,8 @@ def layout():
                     id='ind-grafico', figure=_vuota('Premi «Calcola indicatori»'),
                     responsive=True, style={'width': '100%', 'height': '1000px'},
                     config={'displaylogo': False, 'scrollZoom': False})),
-            ])], className='nb-piena', style={'width': '50%', 'min-width': '0'}),
-        ], className='nb-impila', style={'display': 'flex', 'gap': '12px', 'align-items': 'flex-start'}),
+            ])], className='nb-piena', style={'width': '100%', 'min-width': '0'}),
+        ], style={'display': 'flex', 'flex-direction': 'column', 'gap': '12px'}),
     ])
 
 

@@ -290,12 +290,17 @@ def make_navbar(current: str = "", margine: str = "5%") -> html.Div:
 
     _url = {lab: u.strip("/") for lab, u in _TABS}
 
+    # Parole che stanno in un solo tab: «Analisi» è sia in Strategica sia in Tattica,
+    # e contarla accendeva Analisi Strategica anche dentro Analisi Tattica.
+    _parole = [w for lab, _ in _TABS for w in lab.lower().split()]
+    _uniche = {w for w in _parole if _parole.count(w) == 1}
+
     def _attivo(label: str) -> bool:
-        # Basta una parola: «Strategie Opzioni» arriva come 'Opzioni'. Vale
-        # anche il percorso: «Analisi Strategica» arriva come 'portafoglio'.
+        # Basta una parola propria del tab: «Strategie Opzioni» arriva come 'Opzioni'.
+        # Vale anche il percorso: «Analisi Strategica» arriva come 'portafoglio'.
         cur = current.lower()
         return (_url.get(label, "") in cur and bool(_url.get(label))) or \
-            any(w in cur for w in label.lower().split())
+            any(w in cur for w in label.lower().split() if w in _uniche)
 
     def _tab_style(label: str) -> dict:
         active = _attivo(label)
