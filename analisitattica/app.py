@@ -76,6 +76,31 @@ app.index_string = '''<!DOCTYPE html><html>
       min-width: 0 !important; max-width: none !important; }
   }
   .at-file-aperto:hover { border-color: #1a3a6b !important; }
+  /* Analisi ARIMA: sezioni Asset e Grafici, una sotto l'altra a tutta larghezza */
+  .at-ar-box { border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc;
+               padding: 8px 10px; margin: 0 0 10px; }
+  .at-ar-box > .nb-espandi-btn { font-size: 13px; font-weight: 700; color: #1a3a5c; margin-bottom: 6px; }
+  .at-ar-box #weights-grid-container-arima { background: #fff; padding: 4px; border-radius: 4px; }
+  .at-ar-stato:empty { display: none; }
+  .at-ar-stato { font-size: 11px; color: #333; padding: 5px 10px; background: #f0f8ff;
+                 border: 1px solid #bee3f8; border-radius: 4px; margin-bottom: 8px;
+                 white-space: pre-wrap; font-family: monospace; overflow-x: auto; }
+  .at-ar-titolo { font-size: 13px; font-weight: 700; color: #1a3a5c; margin: 4px 0 8px; }
+  .at-ar-graf { background: #fff; border: 1px solid #e2e8f0; border-radius: 4px;
+                margin-bottom: 10px; box-sizing: border-box; padding-top: 8px; }
+  .at-ar-gtit { font-size: 13px; font-weight: 600; color: #1a3a5c; margin: 0 10px; }
+  .at-ar-gsub { font-size: 11px; color: #555; margin-right: 10px; }
+  .cot-nota { font-size: 11px; color: #555; margin-bottom: 6px; }
+  .at-ar-gsub::before { content: '· '; }
+  @media (max-width: 900px) {
+    .at-ar-gtit, .at-ar-gsub { display: block; margin: 0 10px; }
+    .at-ar-gsub::before { content: ''; }
+  }
+  @media (max-width: 900px) {
+    .at-ar-box { padding: 8px; }
+    .at-ar-graf .modebar-container { display: none; }
+    .at-ar-titolo { font-size: 12px; }
+  }
 </style>
 </head>
 <body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}
@@ -86,7 +111,7 @@ document.addEventListener('click', function(e){
     if (!dentro || e.target.closest('.pf-voce')) setTimeout(function(){ d.removeAttribute('open'); }, 0);
   });
   // Valutazione sul cellulare: un grafico disegnato a sezione chiusa nasce largo 0.
-  var testa = e.target.closest && e.target.closest('.val-sezioni .nb-espandi-btn');
+  var testa = e.target.closest && e.target.closest('.val-sezioni .nb-espandi-btn, .at-ar-box > .nb-espandi-btn');
   if (testa && window.Plotly) {
     setTimeout(function(){
       testa.parentNode.querySelectorAll('.js-plotly-plot').forEach(function(g){
@@ -125,44 +150,6 @@ _load_profilo         = dc.load_profilo
 _delete_profilo       = dc.delete_profilo
 
 
-def _quick_forecast(prices):
-    """
-    Previsione ARIMA leggera a 1 giorno per la tabella riassuntiva.
-    Usa ARIMA(1,1,1) sulla ciclicità (log-prezzo detrendizzato) + intervallo di
-    confidenza 95% come banda di volatilità. Ritorna prezzo previsto, min/max e
-    variazioni % (media/min/max), oppure None se non calcolabile.
-    """
-    try:
-        from statsmodels.tsa.arima.model import ARIMA as ARIMAModel
-        prices = prices.dropna()
-        if len(prices) < 60:
-            return None
-        if len(prices) > 500:
-            prices = prices.iloc[-500:]
-        log_p = np.log(prices.values.astype(float))
-        x     = np.arange(len(log_p), dtype=float)
-        coef  = np.polyfit(x, log_p, 1)
-        detr  = log_p - np.polyval(coef, x)
-        m     = ARIMAModel(detr, order=(1, 1, 1)).fit()
-        fc    = m.get_forecast(steps=1)
-        mean_det = float(np.array(fc.predicted_mean)[0])
-        ci       = np.array(fc.conf_int(alpha=0.05))[0]
-        lo_det, hi_det = float(ci[0]), float(ci[1])
-        trend_next = float(np.polyval(coef, len(log_p)))
-        prev = float(np.exp(mean_det + trend_next))
-        pmin = float(np.exp(lo_det  + trend_next))
-        pmax = float(np.exp(hi_det  + trend_next))
-        last = float(prices.iloc[-1])
-        return {
-            'prev': prev, 'min': pmin, 'max': pmax,
-            'dpm':  (prev / last - 1) * 100,
-            'dmin': (pmin / last - 1) * 100,
-            'dmax': (pmax / last - 1) * 100,
-        }
-    except Exception:
-        return None
-
-
 def _render_file_list(username=None):
     items = _list_profili(username)
     if not items:
@@ -189,104 +176,57 @@ def _render_file_list(username=None):
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout
 # ─────────────────────────────────────────────────────────────────────────────
-# Larghezze colonne (devono sommare ~100%)
-_COLW = {'asset': '24%', 'chk': '8%', 'prev': '13%', 'min': '12%',
-         'max': '12%', 'dpm': '11%', 'dmin': '10%', 'dmax': '10%'}
-
-
-def _cell(text, w, *, bold=False, color='#333', align='right', title=None):
-    st = {'width': w, 'height': '28px', 'display': 'flex', 'align-items': 'center',
-          'justify-content': ('center' if align == 'center' else
-                              ('flex-start' if align == 'left' else 'flex-end')),
-          'font-size': '8px', 'overflow': 'hidden', 'white-space': 'nowrap',
-          'padding': '0 3px', 'color': color}
-    if bold:
-        st['font-weight'] = 'bold'
-    return html.Div(text, style=st, title=title)
-
-
-def _build_asset_grid(asset_names, selected=None, forecasts=None):
-    """
-    Griglia asset di sinistra con checkbox + (se forecasts presente) colonne di
-    previsione a 1 giorno: prezzo previsto, min/max (volatilità) e Δ% med/min/max.
-    """
-    selected  = selected or []
-    forecasts = forecasts or {}
+def _build_asset_grid(asset_names, selected=None):
+    """Griglia degli asset del file aperto: una spunta sceglie l'asset per l'analisi
+    (una sola alla volta) e lo mette nella tendina in alto (ar_griglia_tendina)."""
+    selected = selected or []
     if not asset_names:
         return html.Div("Nessun asset: carica i dati in Analisi di Portafoglio.",
                         style={'color': '#888', 'padding': '12px', 'font-size': '11px'})
-
-    def _hcell(text, w, title=None):
-        return html.Div(text, title=title, style={
-            'width': w, 'font-weight': 'bold', 'font-size': '8px',
-            'text-align': 'center', 'padding': '0 2px', 'white-space': 'nowrap',
-            'overflow': 'hidden'})
-
     header = html.Div([
-        html.Div('Asset', style={'width': _COLW['asset'], 'font-weight': 'bold',
-                                  'font-size': '9px', 'padding-left': '4px'}),
-        html.Div(html.Button('Des', id='deselect-all-arima-tab', n_clicks=0,
-                             style={'font-size': '7px', 'padding': '1px 3px', 'width': '95%'}),
-                 style={'width': _COLW['chk'], 'text-align': 'center'}),
-        _hcell('Prev.',  _COLW['prev'], 'Prezzo previsto giorno successivo'),
-        _hcell('Min',    _COLW['min'],  'Minimo (volatilità, IC 95%)'),
-        _hcell('Max',    _COLW['max'],  'Massimo (volatilità, IC 95%)'),
-        _hcell('Δ%',     _COLW['dpm'],  'Variazione % media attesa'),
-        _hcell('Δ%min',  _COLW['dmin'], 'Variazione % minima'),
-        _hcell('Δ%max',  _COLW['dmax'], 'Variazione % massima'),
+        html.Div('Asset', style={'flex': '1 1 auto', 'font-weight': 'bold',
+                                  'font-size': '11px', 'padding-left': '4px'}),
+        html.Div('Analizza', style={'flex': '0 0 64px', 'font-weight': 'bold',
+                                     'font-size': '11px', 'text-align': 'center'}),
     ], style={'display': 'flex', 'margin-bottom': '5px',
               'border-bottom': '2px solid #ccc', 'padding-bottom': '4px', 'align-items': 'center'})
 
     rows = [header]
     for asset in asset_names:
-        asset_val = [asset] if asset in selected else []
-        fc = forecasts.get(asset)
-        if fc:
-            pcol = '#1b7a34' if fc['dpm'] >= 0 else '#c0392b'
-            cells = [
-                _cell(f"{fc['prev']:.2f}", _COLW['prev'], bold=True),
-                _cell(f"{fc['min']:.2f}",  _COLW['min'],  color='#666'),
-                _cell(f"{fc['max']:.2f}",  _COLW['max'],  color='#666'),
-                _cell(f"{fc['dpm']:+.1f}", _COLW['dpm'],  bold=True, color=pcol),
-                _cell(f"{fc['dmin']:+.1f}", _COLW['dmin'], color='#c0392b'),
-                _cell(f"{fc['dmax']:+.1f}", _COLW['dmax'], color='#1b7a34'),
-            ]
-        else:
-            cells = [_cell('—', _COLW[k], color='#bbb', align='center')
-                     for k in ('prev', 'min', 'max', 'dpm', 'dmin', 'dmax')]
         rows.append(html.Div([
-            html.Div(html.B(asset), style={
-                'width': _COLW['asset'], 'height': '28px', 'display': 'flex',
+            html.Div(html.B(asset, style={'overflow': 'hidden', 'text-overflow': 'ellipsis'}), style={
+                'flex': '1 1 auto', 'min-width': '0', 'height': '28px', 'display': 'flex',
                 'align-items': 'center', 'padding-left': '4px',
-                'font-size': '8px', 'overflow': 'hidden', 'white-space': 'nowrap'}),
+                'font-size': '12px', 'overflow': 'hidden', 'white-space': 'nowrap',
+                'text-overflow': 'ellipsis'}, title=asset),
             html.Div(dcc.Checklist(
                 id={'type': 'graph-select-checkbox-arima', 'index': asset},
-                options=[{'label': '', 'value': asset}], value=asset_val,
+                options=[{'label': '', 'value': asset}],
+                value=[asset] if asset in selected else [],
                 style={'justify-content': 'center'}),
-                style={'width': _COLW['chk'], 'height': '28px', 'display': 'flex',
+                style={'flex': '0 0 64px', 'height': '28px', 'display': 'flex',
                        'align-items': 'center', 'justify-content': 'center'}),
-            *cells,
         ], style={'display': 'flex', 'border-bottom': '1px dotted #eee', 'align-items': 'center'}))
 
     # ── Riga "Aggiungi asset" IN CODA (come in Analisi di Portafoglio) ────────
-    _ai = {'font-size': '9px', 'padding': '4px 6px', 'border': '1px solid #aaa',
-           'border-radius': '4px'}
+    _ai = {'font-size': '12px', 'padding': '4px 6px', 'border': '1px solid #aaa',
+           'border-radius': '4px', 'box-sizing': 'border-box', 'min-width': '0'}
     rows.append(html.Div([
-        html.Div('➕ Aggiungi asset (in coda)',
-                 style={'font-size': '9px', 'font-weight': '700', 'color': '#1a3a5c',
+        html.Div('➕ Aggiungi asset al file personale',
+                 style={'font-size': '12px', 'font-weight': '700', 'color': '#1a3a5c',
                         'margin-bottom': '4px'}),
         html.Div([
-            dcc.Input(id='at-add-desc', placeholder='descrizione',
-                      style={**_ai, 'width': '40%'}),
-            dcc.Input(id='at-add-ticker', placeholder='ticker',
-                      style={**_ai, 'width': '28%'}),
+            dcc.Input(id='at-add-desc', placeholder='Descrizione',
+                      style={**_ai, 'flex': '3 1 0'}),
+            dcc.Input(id='at-add-ticker', placeholder='Ticker Yahoo',
+                      style={**_ai, 'flex': '2 1 0'}),
             dcc.Input(id='at-add-cur', value='EUR',
-                      style={**_ai, 'width': '20%'}),
-        ], style={'display': 'flex', 'gap': '3px', 'margin-bottom': '4px'}),
-        html.Button('➕ Aggiungi', id='at-add-btn', n_clicks=0,
-                    style={'width': '100%', 'font-size': '10px', 'padding': '5px',
+                      style={**_ai, 'flex': '0 0 60px'}),
+            html.Button('➕ Aggiungi', id='at-add-btn', n_clicks=0,
+                    style={'flex': '0 0 auto', 'font-size': '12px', 'padding': '5px 12px',
                            'border': 'none', 'border-radius': '4px', 'cursor': 'pointer',
                            'color': 'white', 'background': '#1b7a34', 'font-weight': 'bold'}),
+        ], style={'display': 'flex', 'gap': '4px', 'flex-wrap': 'wrap'}),
     ], style={'margin-top': '10px', 'border-top': '2px solid #ccc', 'padding-top': '8px'}))
     return rows
 
@@ -343,41 +283,36 @@ def get_arima_analysis_tab(options_tickers):
                         style={'background-color': '#0066cc', 'color': 'white', 'border': 'none',
                                'padding': '8px 18px', 'border-radius': '4px', 'cursor': 'pointer',
                                'font-weight': 'bold', 'font-size': '12px'}),
-            html.Button('📊 Previsioni 1gg (tutti)', id='calc-arima-forecasts-btn', n_clicks=0,
-                        title='Calcola la previsione a 1 giorno per TUTTI gli asset '
-                              '(ARIMA(1,1,1) + IC 95%); può richiedere qualche secondo',
-                        style={'background-color': '#1b7a34', 'color': 'white', 'border': 'none',
-                               'padding': '8px 14px', 'border-radius': '4px', 'cursor': 'pointer',
-                               'font-weight': 'bold', 'font-size': '12px', 'margin-left': '8px'}),
-            html.Span(id='arima-forecast-status',
-                      style={'font-size': '10px', 'color': '#555', 'margin-left': '8px'}),
         ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap',
                   'gap': '4px', 'margin-bottom': '10px'}),
 
-        html.Hr(style={'margin': '8px 0'}),
+        # ── Sezioni: Asset, poi Grafici (sul cellulare schede espandibili aperte) ──
+        _ar_sezione('Asset', [
+            dcc.Loading(type='circle', color='#1b7a34', children=[
+                html.Div(id='weights-grid-container-arima',
+                         children=_build_asset_grid(asset_names, [])),
+            ]),
+            html.Div(id='at-add-stato', style={'font-size': '12px', 'color': '#1a3a5c',
+                                               'margin-top': '6px'}),
+        ]),
+        _ar_sezione('Grafici modello ARIMA', [
+            html.Div(id='arima-tab-status', className='at-ar-stato'),
+            dcc.Loading(id='loading-arima-tab', type='circle', children=[
+                html.Div(id='arima-grafici', children=html.Div(
+                    "Scegli un asset nella riga in alto e premi «▶ Esegui Analisi ARIMA».",
+                    style={'color': '#888', 'font-size': '12px', 'padding': '10px 2px'})),
+            ]),
+        ]),
+    ])
 
-        # ── Body ─────────────────────────────────────────────────────────
-        html.Div([
-            html.Div([
-                dcc.Loading(type='circle', color='#1b7a34', children=[
-                    html.Div(id='weights-grid-container-arima',
-                             children=_build_asset_grid(asset_names, [])),
-                ]),
-            ], style={'width': '46%', 'vertical-align': 'top', 'padding-right': '10px',
-                      'border-right': '1px solid #eee', 'overflow-y': 'auto', 'max-height': '90vh'}),
-            html.Div([
-                html.Div(id='arima-tab-status',
-                         style={'font-size': '11px', 'color': '#333', 'padding': '5px 10px',
-                                'background': '#f0f8ff', 'border': '1px solid #bee3f8',
-                                'border-radius': '4px', 'margin-bottom': '8px',
-                                'white-space': 'pre-wrap', 'font-family': 'monospace'}),
-                dcc.Loading(id='loading-arima-tab', type='circle', children=[
-                    dcc.Graph(id='arima-analysis-chart',
-                              style={'width': '100%', 'height': '92vh'},
-                              config={'responsive': True, 'scrollZoom': True}),
-                ]),
-            ], style={'width': '54%', 'vertical-align': 'top', 'padding-left': '10px'}),
-        ], style={'display': 'flex'}),
+
+def _ar_sezione(titolo, corpo, aperto=True):
+    """Riquadro a tutta larghezza; sul cellulare sezione espandibile, aperta all'avvio
+    (aperto=False: chiusa sul cellulare; sul computer è sempre aperta)."""
+    return html.Div(className='nb-espandi at-ar-box' + (' nb-aperto' if aperto else ''), children=[
+        html.Div([titolo, html.I(className='fa-solid fa-chevron-down nb-espandi-ico')],
+                 className='nb-espandi-btn at-ar-box-tit'),
+        html.Div(corpo, className='nb-espandi-corpo'),
     ])
 
 
@@ -595,7 +530,7 @@ def _cot_summary(kind, df, label):
                                  'color': '#1b7a34' if net >= 0 else '#c0392b'}),
             html.Div(f"{arrow} {'+' if delta >= 0 else ''}{_num(delta)} vs sett. prec.",
                      style={'font-size': '10px', 'color': dcol, 'margin-top': '3px'}),
-        ], style={'flex': '1', 'padding': '10px 14px', 'background': '#f8fafd',
+        ], style={'flex': '1 1 140px', 'min-width': '0', 'padding': '10px 14px', 'background': '#f8fafd',
                   'border': '1px solid #e3e9f2', 'border-radius': '6px'})
 
     if kind == 'tff':
@@ -612,7 +547,7 @@ def _cot_summary(kind, df, label):
         html.Div(f"Ultimo dato CFTC: {d}",
                  style={'font-size': '11px', 'color': '#555', 'margin-bottom': '6px',
                         'font-weight': '600'}),
-        html.Div(cards, style={'display': 'flex', 'gap': '10px'}),
+        html.Div(cards, style={'display': 'flex', 'gap': '10px', 'flex-wrap': 'wrap'}),
     ])
 
 
@@ -650,17 +585,53 @@ def _stoch_series(close, n, smooth=3):
     return k
 
 
-def _cot_fig_and_summary(key, year_range):
+# Stocastici del grafico prezzo: finestra base × moltiplicatori (vuoto = non usato).
+# 30 × 1, 2, 4, 8 = 30 / 60 / 120 / 240 giorni, le finestre di prima.
+_COT_ST_BASE = 30
+_COT_ST_MOLT = (2, 4, 8)
+_COT_ST_COLORI = (('#0f8a8a', 1.4), ('#e08a1e', 1.4), ('#c0392b', 2.6), ('#1a4fd6', 2.6))
+
+
+def _cot_finestre_stoc(base, molt):
+    """[n1, n2, n3, n4] dei quattro stocastici: base, poi base × ogni moltiplicatore
+    (es. 10 · 2 3 4 → 10, 20, 30, 40). Valori vuoti o non validi si saltano."""
+    try:
+        base = int(float(base))
+    except (TypeError, ValueError):
+        base = _COT_ST_BASE
+    base = max(2, min(base, 1000))
+    out = [base]
+    for m in molt:
+        try:
+            n = int(round(base * float(m)))
+        except (TypeError, ValueError):
+            continue
+        if 2 <= n <= 2000 and n not in out:
+            out.append(n)
+    return out
+
+
+def _cot_media_stoc(n):
+    """Media mobile del %K: come prima 30→5, 60→10, 120→20, 240→30."""
+    return int(min(30, max(3, round(n / 6))))
+
+
+def _cot_figure(key, year_range, finestre=None, cell=False):
+    """Grafici separati del tab COT (uno sotto l'altro, titoli fuori da Plotly in
+    layout.meta.titolo) + riepilogo. Il primo è il prezzo del sottostante (asse y1)
+    con i quattro stocastici (asse y2); poi posizionamento, variazione settimanale,
+    drawdown, COT Index e Z-score."""
+    finestre = finestre or _cot_finestre_stoc(_COT_ST_BASE, _COT_ST_MOLT)
     cat, label, kind, contract = _COT_INSTRUMENTS[key]
     try:
         df = _cot_fetch(key)
     except Exception as e:
-        return _cot_empty_fig(f'Errore nel recupero dei dati CFTC: {e}'), ''
+        return [_cot_empty_fig(f'Errore nel recupero dei dati CFTC: {e}')], '', label
     if df is None or df.empty:
-        return _cot_empty_fig('Nessun dato COT disponibile per questo strumento'), ''
+        return [_cot_empty_fig('Nessun dato COT disponibile per questo strumento')], '', label
     full = df
-    # year_range = [anno_inizio, anno_fine] scelti dallo slider; ritaglio la finestra
-    # mostrata mantenendo full per il calcolo di COT Index / Z-score / stocastico.
+    # year_range = [anno_inizio, anno_fine] dallo slider; COT Index / Z-score / stocastico
+    # si calcolano su tutta la storia (full) e si ritagliano alla finestra.
     if year_range and len(year_range) == 2:
         y0, y1 = sorted(int(v) for v in year_range)
         start = pd.Timestamp(year=y0, month=1, day=1)
@@ -669,9 +640,6 @@ def _cot_fig_and_summary(key, year_range):
     if df.empty:
         df = full.tail(2)
 
-    # prezzo del sottostante (asse secondario): storico completo ritagliato sulla
-    # finestra COT mostrata, così copre tutto l'orizzonte temporale del grafico.
-    # Teniamo anche lo storico intero (price_full) per lo stocastico a 120 giorni.
     price_full = _cot_price(key)
     price = None
     if price_full is not None and not price_full.empty:
@@ -679,359 +647,213 @@ def _cot_fig_and_summary(key, year_range):
                            (price_full.index <= df.index.max())]
     has_price = price is not None and not price.empty
     price_label = _COT_PRICE_NAME.get(key, label)
+    disp = df.index
+    x0 = min(disp.min(), price.index.min()) if has_price else disp.min()
+    x1 = max(disp.max(), price.index.max()) if has_price else disp.max()
+
+    figure = []
+    fig = None
+
+    def nuovo(titolo, alto_pc, alto_cell, sec=False):
+        nonlocal fig
+        fig = make_subplots(rows=1, cols=1, specs=[[{'secondary_y': sec}]])
+        fig.update_layout(meta={'titolo': titolo}, height=alto_cell if cell else alto_pc)
+        figure.append(fig)
 
     def _yr(series):
-        """Range Y ritagliato su [min − 10, max + 10] per riempire il pannello."""
         s = series.dropna()
         if s.empty:
             return None
         return [float(s.min()) - 10, float(s.max()) + 10]
 
-    def _add_price(row):
-        """Aggiunge l'S&P 500 (o il sottostante) sull'asse secondario del pannello."""
+    def _add_price():
         if has_price:
             fig.add_trace(go.Scatter(
                 x=price.index, y=price.values, name=f'Prezzo {price_label}',
                 mode='lines', line=dict(color='#444', width=1.5),
-                showlegend=(row == 1),
                 hovertemplate='%{x|%d %b %Y}<br>Prezzo: %{y:,.2f}<extra></extra>'),
-                row=row, col=1, secondary_y=True)
+                secondary_y=True)
+            fig.update_yaxes(title_text=price_label, showgrid=False, zeroline=False,
+                             secondary_y=True)
 
-    def _fmt_price_axis(row):
-        if has_price:
-            fig.update_yaxes(title_text=f'{price_label}', showgrid=False, zeroline=False,
-                             row=row, col=1, secondary_y=True)
-        else:
-            fig.update_yaxes(visible=False, row=row, col=1, secondary_y=True)
-
-    disp = df.index
-
-    def _add_cot_index(series_full, color, row, name):
-        """COT Index (0–100) sullo storico completo, lisciato a 8 settimane e ritagliato."""
-        ci = _cot_index_series(series_full).rolling(8, min_periods=1).mean().reindex(disp)
+    def _add_pos(serie, colore, nome, ax_bg):
+        """Posizionamento netto (media 4 sett.) + eco della variazione settimanale + prezzo."""
+        _add_wow_bg(full_col[nome], colore, nome)
+        s = serie.rolling(4, min_periods=1).mean().reindex(disp)
         fig.add_trace(go.Scatter(
-            x=disp, y=ci, name=name, showlegend=False, mode='lines',
-            line=dict(color=color, width=1.8),
-            hovertemplate='%{x|%d %b %Y}<br>' + name + ': %{y:.0f}<extra></extra>'),
-            row=row, col=1)
+            x=disp, y=s, name=nome, mode='lines', line=dict(color=colore, width=2.2),
+            hovertemplate='%{x|%d %b %Y}<br>' + nome + ': %{y:,.0f}<extra></extra>'),
+            secondary_y=False)
+        _add_price()
+        fig.add_hline(y=0, line=dict(color='#999', width=1), secondary_y=False)
+        fig.update_yaxes(title_text='Contratti netti', showgrid=True, gridcolor='#eef1f5',
+                         zeroline=False, secondary_y=False)
+        yr = _yr(s)
+        if yr:
+            fig.update_yaxes(range=yr, secondary_y=False)
 
-    def _add_zscore(series_full, color, row, name):
-        """Z-score sullo storico completo, lisciato a 8 settimane e ritagliato."""
-        z = _cot_z_series(series_full).rolling(8, min_periods=1).mean().reindex(disp)
-        fig.add_trace(go.Scatter(
-            x=disp, y=z, name=name, showlegend=False, mode='lines',
-            line=dict(color=color, width=1.8),
-            hovertemplate='%{x|%d %b %Y}<br>' + name + ': %{y:.2f}<extra></extra>'),
-            row=row, col=1)
-
-    def _fmt_index_axis(row):
-        fig.add_hline(y=80, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
-        fig.add_hline(y=20, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
-        fig.update_yaxes(title_text='COT Index', range=[0, 100], showgrid=True,
-                         gridcolor='#eef1f5', row=row, col=1)
-
-    def _fmt_z_axis(row):
-        fig.add_hline(y=0, line=dict(color='#999', width=1), row=row, col=1)
-        fig.add_hline(y=2, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
-        fig.add_hline(y=-2, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
-        fig.update_yaxes(title_text='Z-score', showgrid=True, gridcolor='#eef1f5', row=row, col=1)
-
-    def _add_wow(row, pairs):
-        """Variazione settimanale dei contratti netti (diff sett-su-sett), lisciata
-        con media a 4 settimane; la diff grezza è tracciata tenue sotto.
-
-        pairs = [(series_full, colore, nome), ...]. Calcolata sullo storico completo
-        e ritagliata alla finestra, così la media a 4 settimane è continua anche al
-        bordo sinistro del periodo mostrato. Asse Y su [min − 10, max + 10] delle sole
-        medie a 4 settimane: le diff grezze possono essere tagliate, così le medie
-        riempiono il pannello e restano leggibili.
-        """
-        shown = []
-        for series_full, color, name in pairs:
-            raw = series_full.diff()
-            ma = raw.rolling(4, min_periods=1).mean()
-            raw_d = raw.reindex(disp)
-            ma_d = ma.reindex(disp)
-            shown.append(ma_d)
-            fig.add_trace(go.Scatter(
-                x=disp, y=raw_d, name=f'Δsett {name}', showlegend=False,
-                mode='lines', line=dict(color=color, width=0.8), opacity=0.30,
-                hoverinfo='skip'),
-                row=row, col=1)
-            fig.add_trace(go.Scatter(
-                x=disp, y=ma_d, name=f'Δsett {name} (media 4 sett.)',
-                showlegend=False, mode='lines', line=dict(color=color, width=2.0),
-                hovertemplate='%{x|%d %b %Y}<br>Δ4s ' + name + ': %{y:,.0f}<extra></extra>'),
-                row=row, col=1)
-        fig.add_hline(y=0, line=dict(color='#999', width=1), row=row, col=1)
-        fig.update_yaxes(title_text='Δ contratti / sett.', showgrid=True,
-                         gridcolor='#eef1f5', zeroline=False, row=row, col=1)
-        if shown:
-            allv = pd.concat(shown).dropna()
-            if not allv.empty:
-                fig.update_yaxes(range=[float(allv.min()) - 10, float(allv.max()) + 10],
-                                 row=row, col=1)
-
-    def _add_wow_bg(base_yaxis, xaxis_id, series_full, hexcol, ax_idx, name):
-        """Eco tenue della variazione settimanale (media 4 sett.) DIETRO la linea
-        della media di posizionamento, su un asse Y dedicato nascosto e autoscalato:
-        stesso colore ma poco saturo (bassa opacità), così dà il senso del momentum
-        settimanale senza confondere la lettura del posizionamento.
-
-        Va chiamata PRIMA di aggiungere la linea della media: l'ordine di disegno
-        segue l'ordine delle tracce, quindi così lo sfondo resta dietro. L'asse
-        dedicato (`yaxis<ax_idx>`) sovrappone l'asse primario del pannello
-        (`base_yaxis`) ed è invisibile: serve solo a dare alla variazione una scala
-        propria, diversa da quella dei contratti netti.
-
-        Passandoci sopra col mouse mostra la sua descrizione (Δ settimanale a 4 sett.
-        della serie), così la linea di sfondo resta identificabile.
-        """
+    def _add_wow_bg(series_full, hexcol, name):
+        """Eco tenue della variazione settimanale (media 4 sett.) dietro il posizionamento,
+        su un asse nascosto con scala propria (va aggiunta prima della linea)."""
         h = hexcol.lstrip('#')
         r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
         var = series_full.diff().rolling(4, min_periods=1).mean().reindex(disp)
         fig.add_trace(go.Scatter(
-            x=disp, y=var, xaxis=xaxis_id, yaxis=f'y{ax_idx}',
-            name=f'Variazione sett. {name} (media 4 sett.)', showlegend=False,
+            x=disp, y=var, xaxis='x', yaxis='y9', showlegend=False,
+            name=f'Variazione sett. {name} (media 4 sett.)',
             mode='lines', line=dict(color=f'rgba({r},{g},{b},0.35)', width=1.1),
             fill='tozeroy', fillcolor=f'rgba({r},{g},{b},0.08)',
             hovertemplate='%{x|%d %b %Y}<br>Variazione sett. ' + name
                           + ' (media 4 sett.): %{y:,.0f}<extra></extra>'))
-        fig.update_layout(**{f'yaxis{ax_idx}': dict(
-            overlaying=base_yaxis, anchor=xaxis_id,
-            showgrid=False, zeroline=False, visible=False)})
+        fig.update_layout(yaxis9=dict(overlaying='y', anchor='x', showgrid=False,
+                                      zeroline=False, visible=False))
 
-    def _add_sum(row):
-        """Somma AM + LM (contratti netti totali) con media a 4 settimane.
+    def _add_wow(pairs):
+        shown = []
+        for series_full, color, name in pairs:
+            raw = series_full.diff()
+            ma = raw.rolling(4, min_periods=1).mean()
+            shown.append(ma.reindex(disp))
+            fig.add_trace(go.Scatter(
+                x=disp, y=raw.reindex(disp), name=f'Δsett {name}', showlegend=False,
+                mode='lines', line=dict(color=color, width=0.8), opacity=0.30,
+                hoverinfo='skip'))
+            fig.add_trace(go.Scatter(
+                x=disp, y=ma.reindex(disp), name=f'{name} (media 4 sett.)',
+                mode='lines', line=dict(color=color, width=2.0),
+                hovertemplate='%{x|%d %b %Y}<br>Δ4s ' + name + ': %{y:,.0f}<extra></extra>'))
+        fig.add_hline(y=0, line=dict(color='#999', width=1))
+        fig.update_yaxes(title_text='Δ contratti / sett.', showgrid=True,
+                         gridcolor='#eef1f5', zeroline=False)
+        allv = pd.concat(shown).dropna() if shown else pd.Series(dtype=float)
+        if not allv.empty:
+            fig.update_yaxes(range=[float(allv.min()) - 10, float(allv.max()) + 10])
 
-        Essendo già posizioni nette, la somma dà il posizionamento netto complessivo
-        di istituzionali e hedge fund. Asse Y su [min − 10, max + 10] come i pannelli
-        di posizionamento.
-        """
-        am_ma = full['am_net'].rolling(4, min_periods=1).mean()
-        lm_ma = full['lm_net'].rolling(4, min_periods=1).mean()
-        s = (am_ma + lm_ma).reindex(disp)
+    def _add_cot_index(series_full, color, name):
+        ci = _cot_index_series(series_full).rolling(8, min_periods=1).mean().reindex(disp)
         fig.add_trace(go.Scatter(
-            x=disp, y=s, name='Somma AM + LM', showlegend=False,
-            mode='lines', line=dict(color='#6a3d9a', width=2.2),
-            fill='tozeroy', fillcolor='rgba(106,61,154,0.10)',
-            hovertemplate='%{x|%d %b %Y}<br>AM + LM: %{y:,.0f}<extra></extra>'),
-            row=row, col=1)
-        fig.add_hline(y=0, line=dict(color='#999', width=1), row=row, col=1)
-        fig.update_yaxes(title_text='AM + LM (netti)', showgrid=True, gridcolor='#eef1f5',
-                         zeroline=False, row=row, col=1)
-        yr = _yr(s)
-        if yr:
-            fig.update_yaxes(range=yr, row=row, col=1)
+            x=disp, y=ci, name=name, mode='lines', line=dict(color=color, width=1.8),
+            hovertemplate='%{x|%d %b %Y}<br>' + name + ': %{y:.0f}<extra></extra>'))
 
-    def _add_drawdown(row):
-        """Drawdown % del sottostante dal massimo progressivo della finestra mostrata."""
+    def _add_zscore(series_full, color, name):
+        z = _cot_z_series(series_full).rolling(8, min_periods=1).mean().reindex(disp)
+        fig.add_trace(go.Scatter(
+            x=disp, y=z, name=name, mode='lines', line=dict(color=color, width=1.8),
+            hovertemplate='%{x|%d %b %Y}<br>' + name + ': %{y:.2f}<extra></extra>'))
+
+    def _soglie(valori, secondary_y=None):
+        """Linee di riferimento come tracce (non shape: il tab può essere nascosto)."""
+        for y, c, d in valori:
+            kw = {} if secondary_y is None else {'secondary_y': secondary_y}
+            fig.add_trace(go.Scatter(x=[x0, x1], y=[y, y], mode='lines', showlegend=False,
+                                     hoverinfo='skip', line=dict(color=c, width=1, dash=d)), **kw)
+
+    # ── 1) Prezzo (y1) e stocastici (y2) ──────────────────────────────────────
+    if has_price:
+        fin_txt = ' · '.join(f'{n} gg' for n in finestre)
+        nuovo(f'{price_label}: prezzo e stocastico  ·  {fin_txt} (%K con media mobile)',
+              560, 440, sec=True)
+        fig.add_trace(go.Scatter(
+            x=price.index, y=price.values, name=f'Prezzo {price_label}',
+            mode='lines', line=dict(color='#222', width=1.8),
+            hovertemplate='%{x|%d %b %Y}<br>Prezzo: %{y:,.2f}<extra></extra>'),
+            secondary_y=False)
+        _soglie([(80, '#bbb', 'dot'), (20, '#bbb', 'dot')], secondary_y=True)
+        for i, n in enumerate(finestre):
+            colore, larg = _COT_ST_COLORI[i % len(_COT_ST_COLORI)]
+            sm = _cot_media_stoc(n)
+            st = _stoch_series(price_full, n, smooth=sm).reindex(price.index)
+            fig.add_trace(go.Scatter(
+                x=st.index, y=st.values, name=f'Stocastico {n} gg', opacity=0.85,
+                mode='lines', line=dict(color=colore, width=larg),
+                hovertemplate=f'%{{x|%d %b %Y}}<br>Stocastico {n} gg (media {sm}): '
+                              f'%{{y:.0f}}<extra></extra>'),
+                secondary_y=True)
+        fig.update_yaxes(title_text=f'Prezzo {price_label}', showgrid=True, gridcolor='#eef1f5',
+                         secondary_y=False)
+        fig.update_yaxes(title_text='Stocastico', range=[0, 100], showgrid=False,
+                         secondary_y=True)
+
+    # ── Drawdown del prezzo, subito sotto prezzo e stocastici ─────────────────
+    if has_price:
+        nuovo(f'Drawdown {price_label}  ·  % dal massimo progressivo', 300, 260)
         dd = _drawdown_series(price)
         fig.add_trace(go.Scatter(
-            x=dd.index, y=dd.values, name=f'Drawdown {price_label}', showlegend=False,
-            mode='lines', line=dict(color='#8a1a1a', width=1.3),
+            x=dd.index, y=dd.values, name=f'Drawdown {price_label}', mode='lines',
+            line=dict(color='#8a1a1a', width=1.3),
             fill='tozeroy', fillcolor='rgba(192,57,43,0.15)',
-            hovertemplate='%{x|%d %b %Y}<br>Drawdown: %{y:.1f}%<extra></extra>'),
-            row=row, col=1)
+            hovertemplate='%{x|%d %b %Y}<br>Drawdown: %{y:.1f}%<extra></extra>'))
         fig.update_yaxes(title_text='Drawdown', ticksuffix='%', showgrid=True,
-                         gridcolor='#eef1f5', row=row, col=1)
+                         gridcolor='#eef1f5')
 
-    def _add_stoch(row):
-        """Stocastico %K del sottostante con filtro dedicato per finestra.
-
-        30gg → media 5; 60gg → media 10; 120gg → media 20; 240gg → media 30.
-        Le due linee lunghe (120gg rossa, 240gg blu) sono più marcate e disegnate
-        per ultime così restano in primo piano.
-        """
-        # (n_giorni, media_filtro, colore, spessore)
-        for n, smooth, color, width in ((30, 5, '#0f8a8a', 1.4),
-                                        (60, 10, '#e08a1e', 1.4),
-                                        (120, 20, '#c0392b', 2.8),
-                                        (240, 30, '#1a4fd6', 2.8)):
-            st = _stoch_series(price_full, n, smooth=smooth).reindex(price.index)
-            fig.add_trace(go.Scatter(
-                x=st.index, y=st.values, name=f'Stocastico {n}gg', showlegend=True,
-                mode='lines', line=dict(color=color, width=width),
-                hovertemplate=f'%{{x|%d %b %Y}}<br>Stocastico {n}gg: %{{y:.0f}}<extra></extra>'),
-                row=row, col=1)
-        fig.add_hline(y=80, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
-        fig.add_hline(y=20, line=dict(color='#bbb', width=1, dash='dot'), row=row, col=1)
-        fig.update_yaxes(title_text='Stocastico', range=[0, 100], showgrid=True,
-                         gridcolor='#eef1f5', row=row, col=1)
-
+    # ── 2) Posizionamento ─────────────────────────────────────────────────────
     if kind == 'tff':
-        # Pannelli in ordine: Asset Manager, Leveraged Money (posizionamento + prezzo),
-        # Somma AM + LM, Variazione settimanale contratti (media 4 sett.),
-        # poi Drawdown e Stocastico sul sottostante, infine COT Index e Z-score.
-        titles  = ['Asset Manager — istituzionali (media 4 sett.)',
-                   'Leveraged Money — hedge fund / CTA (media 4 sett.)',
-                   'Somma AM + LM (contratti netti totali, media 4 sett.)',
-                   'Variazione settimanale contratti netti (media 4 sett.) — AM e LM']
-        specs   = [[{'secondary_y': True}], [{'secondary_y': True}],
-                   [{'secondary_y': False}], [{'secondary_y': False}]]
-        heights = [1.0, 1.0, 1.0, 1.40]   # AM, LM, somma, variazione settimanale (doppia)
-        r_sum, r_wow = 3, 4
-        if has_price:
-            titles  += [f'Drawdown {price_label} (%)',
-                        f'Stocastico {price_label} — 240 gg (media 30) · 120 gg (media 20) · 60 gg (media 10) · 30 gg (media 5)']
-            specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
-            heights += [0.70, 0.70]
-            r_dd, r_st, r_ci, r_z = 5, 6, 7, 8
-        else:
-            r_dd = r_st = None
-            r_ci, r_z = 5, 6
-        titles  += ['COT Index (0–100, finestra 1 anno, media 8 sett.)',
-                    'Z-score (deviazioni standard, finestra 1 anno, media 8 sett.)']
-        specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
-        heights += [0.70, 0.70]
-        _tot = sum(heights)
-        fig = make_subplots(
-            rows=len(specs), cols=1, shared_xaxes=True, vertical_spacing=0.045,
-            row_heights=[h / _tot for h in heights], specs=specs,
-            subplot_titles=tuple(titles))
-        # sfondo tenue della variazione settimanale, dietro le medie di posizionamento
-        # (riga 1 = asse y/x, riga 2 = asse y3/x2)
-        _add_wow_bg('y', 'x', full['am_net'], '#1a3a5c', 90, 'Asset Manager')
-        _add_wow_bg('y3', 'x2', full['lm_net'], '#c0392b', 91, 'Leveraged Money')
-        # posizionamento AM/LM lisciato con media a 4 settimane (calcolata su full,
-        # ritagliata alla finestra per continuità al bordo sinistro)
-        am_disp = full['am_net'].rolling(4, min_periods=1).mean().reindex(disp)
-        lm_disp = full['lm_net'].rolling(4, min_periods=1).mean().reindex(disp)
+        full_col = {'Asset Manager': full['am_net'], 'Leveraged Money': full['lm_net']}
+        nuovo('Asset Manager — istituzionali  ·  contratti netti, media 4 sett.', 400, 320,
+              sec=True)
+        _add_pos(full['am_net'], '#1a3a5c', 'Asset Manager', None)
+        nuovo('Leveraged Money — hedge fund / CTA  ·  contratti netti, media 4 sett.', 400, 320,
+              sec=True)
+        _add_pos(full['lm_net'], '#c0392b', 'Leveraged Money', None)
+        nuovo('Somma AM + LM  ·  contratti netti totali, media 4 sett.', 340, 280)
+        s = (full['am_net'].rolling(4, min_periods=1).mean()
+             + full['lm_net'].rolling(4, min_periods=1).mean()).reindex(disp)
         fig.add_trace(go.Scatter(
-            x=disp, y=am_disp, name='Asset Manager (istituzionali)',
-            mode='lines', line=dict(color='#1a3a5c', width=2.2),
-            hovertemplate='%{x|%d %b %Y}<br>Asset Manager: %{y:,.0f}<extra></extra>'),
-            row=1, col=1, secondary_y=False)
-        fig.add_trace(go.Scatter(
-            x=disp, y=lm_disp, name='Leveraged Money (hedge fund / CTA)',
-            mode='lines', line=dict(color='#c0392b', width=2.2),
-            hovertemplate='%{x|%d %b %Y}<br>Leveraged Money: %{y:,.0f}<extra></extra>'),
-            row=2, col=1, secondary_y=False)
-        _add_price(1)
-        _add_price(2)
-        for r, series in ((1, am_disp), (2, lm_disp)):
-            fig.add_hline(y=0, line=dict(color='#999', width=1), row=r, col=1, secondary_y=False)
-            fig.update_yaxes(title_text='Contratti netti', showgrid=True, gridcolor='#eef1f5',
-                             zeroline=False, row=r, col=1, secondary_y=False)
-            yr = _yr(series)
-            if yr:
-                fig.update_yaxes(range=yr, row=r, col=1, secondary_y=False)
-            _fmt_price_axis(r)
-        _add_sum(r_sum)
-        _add_wow(r_wow, [(full['am_net'], '#1a3a5c', 'Asset Manager'),
-                         (full['lm_net'], '#c0392b', 'Leveraged Money')])
-        if has_price:
-            _add_drawdown(r_dd)
-            _add_stoch(r_st)
-        _add_cot_index(full['am_net'], '#1a3a5c', r_ci, 'COT Index AM')
-        _add_cot_index(full['lm_net'], '#c0392b', r_ci, 'COT Index LM')
-        _fmt_index_axis(r_ci)
-        _add_zscore(full['am_net'], '#1a3a5c', r_z, 'Z-score AM')
-        _add_zscore(full['lm_net'], '#c0392b', r_z, 'Z-score LM')
-        _fmt_z_axis(r_z)
-        fig.update_annotations(font_size=12)
-        height = 2100 if has_price else 1700
-    else:
-        # Materie prime: Managed Money (speculatori) e Commercial (hedger = Producer/
-        # Merchant + Swap Dealers), poi Variazione settimanale, Drawdown e Stocastico
-        # sul sottostante, infine COT Index e Z-score. Se il Commercial non è
-        # disponibile si mostra il solo Managed Money.
-        has_comm = 'comm_net' in df.columns and df['comm_net'].notna().any()
-        mm_disp = full['mm_net'].rolling(4, min_periods=1).mean().reindex(disp)
-        if has_comm:
-            titles  = ['Managed Money — hedge fund (media 4 sett.)',
-                       'Commercial — Producer/Merchant + Swap Dealers (media 4 sett.)']
-            specs   = [[{'secondary_y': True}], [{'secondary_y': True}]]
-            heights = [1.0, 1.0]
-            pos_rows = 2
-        else:
-            titles  = ['Managed Money — hedge fund (media 4 sett.)']
-            specs   = [[{'secondary_y': True}]]
-            heights = [1.3]
-            pos_rows = 1
-        titles  += ['Variazione settimanale contratti netti (media 4 sett.)']
-        specs   += [[{'secondary_y': False}]]
-        heights += [1.40]
-        r_wow = pos_rows + 1
-        if has_price:
-            titles  += [f'Drawdown {price_label} (%)',
-                        f'Stocastico {price_label} — 240 gg (media 30) · 120 gg (media 20) · 60 gg (media 10) · 30 gg (media 5)']
-            specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
-            heights += [0.70, 0.70]
-            r_dd, r_st = r_wow + 1, r_wow + 2
-            r_ci, r_z = r_wow + 3, r_wow + 4
-        else:
-            r_dd = r_st = None
-            r_ci, r_z = r_wow + 1, r_wow + 2
-        titles  += ['COT Index (0–100, finestra 1 anno, media 8 sett.)',
-                    'Z-score (deviazioni standard, finestra 1 anno, media 8 sett.)']
-        specs   += [[{'secondary_y': False}], [{'secondary_y': False}]]
-        heights += [0.80, 0.80]
-        _tot = sum(heights)
-        fig = make_subplots(
-            rows=len(specs), cols=1, shared_xaxes=True, vertical_spacing=0.045,
-            row_heights=[h / _tot for h in heights], specs=specs,
-            subplot_titles=tuple(titles))
-        # sfondo tenue della variazione settimanale, dietro le medie di posizionamento
-        _add_wow_bg('y', 'x', full['mm_net'], '#1b7a34', 90, 'Managed Money')
-        if has_comm:
-            _add_wow_bg('y3', 'x2', full['comm_net'], '#1a3a5c', 91, 'Commercial')
-        # posizionamento Managed Money, lisciato a 4 settimane
-        fig.add_trace(go.Scatter(
-            x=disp, y=mm_disp, name='Managed Money (hedge fund)',
-            mode='lines', line=dict(color='#1b7a34', width=2.2),
-            hovertemplate='%{x|%d %b %Y}<br>Managed Money: %{y:,.0f}<extra></extra>'),
-            row=1, col=1, secondary_y=False)
-        _add_price(1)
-        fig.add_hline(y=0, line=dict(color='#999', width=1), row=1, col=1, secondary_y=False)
-        fig.update_yaxes(title_text='Contratti netti', showgrid=True, gridcolor='#eef1f5',
-                         zeroline=False, row=1, col=1, secondary_y=False)
-        yr = _yr(mm_disp)
+            x=disp, y=s, name='Somma AM + LM', mode='lines',
+            line=dict(color='#6a3d9a', width=2.2),
+            fill='tozeroy', fillcolor='rgba(106,61,154,0.10)',
+            hovertemplate='%{x|%d %b %Y}<br>AM + LM: %{y:,.0f}<extra></extra>'))
+        fig.add_hline(y=0, line=dict(color='#999', width=1))
+        fig.update_yaxes(title_text='AM + LM (netti)', showgrid=True, gridcolor='#eef1f5',
+                         zeroline=False)
+        yr = _yr(s)
         if yr:
-            fig.update_yaxes(range=yr, row=1, col=1, secondary_y=False)
-        _fmt_price_axis(1)
+            fig.update_yaxes(range=yr)
+        gruppi = [(full['am_net'], '#1a3a5c', 'Asset Manager'),
+                  (full['lm_net'], '#c0392b', 'Leveraged Money')]
+        nomi_idx = [(full['am_net'], '#1a3a5c', 'AM'), (full['lm_net'], '#c0392b', 'LM')]
+    else:
+        has_comm = 'comm_net' in df.columns and df['comm_net'].notna().any()
+        full_col = {'Managed Money': full['mm_net']}
+        nuovo('Managed Money — hedge fund  ·  contratti netti, media 4 sett.', 400, 320, sec=True)
+        _add_pos(full['mm_net'], '#1b7a34', 'Managed Money', None)
+        gruppi = [(full['mm_net'], '#1b7a34', 'Managed Money')]
+        nomi_idx = [(full['mm_net'], '#1b7a34', 'MM')]
         if has_comm:
-            comm_disp = full['comm_net'].rolling(4, min_periods=1).mean().reindex(disp)
-            fig.add_trace(go.Scatter(
-                x=disp, y=comm_disp, name='Commercial (Producer/Merchant + Swap)',
-                mode='lines', line=dict(color='#1a3a5c', width=2.2),
-                hovertemplate='%{x|%d %b %Y}<br>Commercial: %{y:,.0f}<extra></extra>'),
-                row=2, col=1, secondary_y=False)
-            _add_price(2)
-            fig.add_hline(y=0, line=dict(color='#999', width=1), row=2, col=1, secondary_y=False)
-            fig.update_yaxes(title_text='Contratti netti', showgrid=True, gridcolor='#eef1f5',
-                             zeroline=False, row=2, col=1, secondary_y=False)
-            yr = _yr(comm_disp)
-            if yr:
-                fig.update_yaxes(range=yr, row=2, col=1, secondary_y=False)
-            _fmt_price_axis(2)
-        wow_pairs = [(full['mm_net'], '#1b7a34', 'Managed Money')]
-        if has_comm:
-            wow_pairs.append((full['comm_net'], '#1a3a5c', 'Commercial'))
-        _add_wow(r_wow, wow_pairs)
-        if has_price:
-            _add_drawdown(r_dd)
-            _add_stoch(r_st)
-        _add_cot_index(full['mm_net'], '#1b7a34', r_ci, 'COT Index MM')
-        if has_comm:
-            _add_cot_index(full['comm_net'], '#1a3a5c', r_ci, 'COT Index Commercial')
-        _fmt_index_axis(r_ci)
-        _add_zscore(full['mm_net'], '#1b7a34', r_z, 'Z-score MM')
-        if has_comm:
-            _add_zscore(full['comm_net'], '#1a3a5c', r_z, 'Z-score Commercial')
-        _fmt_z_axis(r_z)
-        fig.update_annotations(font_size=12)
-        height = int(290 * _tot)
+            full_col['Commercial'] = full['comm_net']
+            nuovo('Commercial — Producer/Merchant + Swap Dealers  ·  contratti netti, media 4 sett.',
+                  400, 320, sec=True)
+            _add_pos(full['comm_net'], '#1a3a5c', 'Commercial', None)
+            gruppi.append((full['comm_net'], '#1a3a5c', 'Commercial'))
+            nomi_idx.append((full['comm_net'], '#1a3a5c', 'Commercial'))
 
-    fig.update_layout(
-        title=dict(text=f"Posizionamento COT — {label}",
-                   font=dict(size=15, color='#1a3a5c')),
-        height=height, plot_bgcolor='white', paper_bgcolor='white',
-        margin=dict(l=70, r=70, t=80, b=40),
-        legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='left', x=0),
-        hovermode='closest')
-    fig.update_xaxes(showgrid=True, gridcolor='#eef1f5')
-    return fig, _cot_summary(kind, full, label)
+    # ── 3) Variazione settimanale, drawdown, COT Index, Z-score ───────────────
+    nuovo('Variazione settimanale dei contratti netti  ·  media 4 sett. (linea chiara = dato '
+          'della settimana)', 380, 300)
+    _add_wow(gruppi)
+    nuovo('COT Index  ·  0–100, finestra 1 anno, media 8 sett.', 300, 260)
+    _soglie([(80, '#bbb', 'dot'), (20, '#bbb', 'dot')])
+    for s, c, n in nomi_idx:
+        _add_cot_index(s, c, f'COT Index {n}')
+    fig.update_yaxes(title_text='COT Index', range=[0, 100], showgrid=True, gridcolor='#eef1f5')
+    nuovo('Z-score  ·  deviazioni standard, finestra 1 anno, media 8 sett.', 300, 260)
+    _soglie([(0, '#999', 'solid'), (2, '#bbb', 'dot'), (-2, '#bbb', 'dot')])
+    for s, c, n in nomi_idx:
+        _add_zscore(s, c, f'Z-score {n}')
+    fig.update_yaxes(title_text='Z-score', showgrid=True, gridcolor='#eef1f5')
+
+    # ── Aspetto comune: stessa finestra sull'asse x, legenda in alto ─────────
+    for f in figure:
+        f.update_layout(
+            plot_bgcolor='white', paper_bgcolor='white', hovermode='x unified' if not cell else 'closest',
+            margin=(dict(l=44, r=44, t=36, b=28) if cell else dict(l=70, r=70, t=36, b=30)),
+            legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='left', x=0,
+                        font=dict(size=10 if cell else 11)),
+            font=dict(size=10 if cell else 12))
+        f.update_xaxes(showgrid=True, gridcolor='#eef1f5', range=[x0, x1])
+        if cell:   # sul cellulare i titoli degli assi rubano metà della larghezza
+            f.update_yaxes(title_text=None, tickfont=dict(size=9))
+    return figure, _cot_summary(kind, full, label), label
 
 
 # Slider periodo: dallo storico COT (report TFF/Disaggregated dal 2006) all'anno corrente.
@@ -1049,46 +871,47 @@ def _cot_year_marks():
 
 
 def get_cot_tab():
-    """Layout della tab Posizionamento COT."""
-    opts = _cot_options()
+    """Layout della tab Posizionamento COT. Strumento e 🔄 Aggiorna stanno nella riga in
+    alto (cot-cerca-riga, _data_toolbar); qui le sezioni Finestra Temporale, Parametri
+    e Grafici (sul cellulare schede espandibili)."""
+    _num = {'width': '64px', 'font-size': '12px', 'padding': '4px 6px',
+            'border': '1px solid #aaa', 'border-radius': '4px'}
+    _et = {'font-size': '11px', 'color': '#1a3a5c', 'font-weight': '600', 'display': 'block',
+           'margin-bottom': '2px'}
+
+    def campo(etichetta, cid, valore):
+        return html.Div([html.Label(etichetta, style=_et),
+                         dcc.Input(id=cid, type='number', value=valore, min=0, step='any',
+                                   debounce=True, persistence=True, persistence_type='local',
+                                   style=_num)])
+
     return html.Div([
-        html.Div([
-            html.H3('Posizionamento COT',
-                    style={'margin-right': '20px', 'white-space': 'nowrap', 'font-size': '16px'}),
+        _ar_sezione('Finestra Temporale', [
+            html.Div(dcc.RangeSlider(
+                id='cot-range', min=_COT_YEAR_MIN, max=_COT_YEAR_MAX, step=1,
+                value=[_COT_YEAR_MAX - 2, _COT_YEAR_MAX], allowCross=False,
+                marks=_cot_year_marks(),
+                tooltip={'placement': 'bottom', 'always_visible': False}),
+                style={'padding': '6px 4px 0', 'max-width': '900px'}),
+        ], aperto=False),
+        _ar_sezione('Parametri', [
+            html.Div('Stocastici del grafico prezzo: finestra base in giorni e tre '
+                     'moltiplicatori (10 · 2 · 3 · 4 = 10, 20, 30, 40 giorni; vuoto = non usato).',
+                     className='cot-nota'),
             html.Div([
-                html.Label("Strumento:", style={'margin-right': '6px', 'font-size': '11px',
-                                                 'white-space': 'nowrap'}),
-                dcc.Dropdown(id='cot-instrument', options=opts, value='sp500',
-                             clearable=False, style={'width': '250px', 'font-size': '11px'}),
-            ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '14px'}),
-            html.Div([
-                html.Label("Periodo:", style={'margin-right': '12px', 'font-size': '11px',
-                                              'white-space': 'nowrap'}),
-                html.Div([
-                    dcc.RangeSlider(
-                        id='cot-range', min=_COT_YEAR_MIN, max=_COT_YEAR_MAX, step=1,
-                        value=[_COT_YEAR_MAX - 2, _COT_YEAR_MAX], allowCross=False,
-                        marks=_cot_year_marks(),
-                        tooltip={'placement': 'bottom', 'always_visible': False}),
-                ], style={'width': '360px', 'max-width': 'calc(100vw - 150px)'}),
-            ], style={'display': 'flex', 'align-items': 'center', 'border': '1px solid #ccc',
-                      'border-radius': '4px', 'padding': '3px 14px 3px 10px', 'margin-right': '12px',
-                      'background': '#f5f5f5'}),
-            html.Button('🔄 Aggiorna', id='cot-refresh', n_clicks=0,
-                        title='Forza il ri-scaricamento dei dati dalla CFTC',
-                        style={'background-color': '#1a3a5c', 'color': 'white', 'border': 'none',
-                               'padding': '8px 16px', 'border-radius': '4px', 'cursor': 'pointer',
-                               'font-weight': 'bold', 'font-size': '12px'}),
-        ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap',
-                  'gap': '4px', 'margin-bottom': '8px'}),
-
-
-        html.Hr(style={'margin': '4px 0 10px'}),
-
-        html.Div(id='cot-summary', style={'margin-bottom': '10px'}),
-        dcc.Loading(id='loading-cot', type='circle', color='#1a3a5c', children=[
-            dcc.Graph(id='cot-chart', style={'width': '100%', 'height': '1400px'},
-                      config={'responsive': True, 'displaylogo': False}),
+                campo('Stocastico (gg)', 'cot-st-base', _COT_ST_BASE),
+                campo('× 2º', 'cot-st-m1', _COT_ST_MOLT[0]),
+                campo('× 3º', 'cot-st-m2', _COT_ST_MOLT[1]),
+                campo('× 4º', 'cot-st-m3', _COT_ST_MOLT[2]),
+                html.Div(id='cot-st-finestre', className='cot-nota',
+                         style={'align-self': 'flex-end', 'padding-bottom': '6px'}),
+            ], style={'display': 'flex', 'gap': '10px', 'flex-wrap': 'wrap'}),
+        ], aperto=False),
+        _ar_sezione('Grafici', [
+            html.Div(id='cot-summary', style={'margin-bottom': '10px'}),
+            dcc.Loading(id='loading-cot', type='circle', color='#1a3a5c', children=[
+                html.Div(id='cot-grafici'),
+            ]),
         ]),
     ])
 
@@ -1172,13 +995,20 @@ _INFO = {
     'tab-arima': ('📉 Analisi ARIMA', [
         ('Analisi', 'Per l\'asset scelto cerca l\'ARIMA migliore fino a Max p / Max q secondo il '
                     'criterio (AIC o BIC) e prevede per l\'orizzonte indicato, in giorni di borsa.'),
-        ('📊 Previsioni 1gg (tutti)', 'Previsione a un giorno per tutti gli asset del file con '
-                                     'ARIMA(1,1,1) e intervallo di confidenza al 95%; può '
-                                     'richiedere qualche secondo.'),
     ]),
     'tab-cot': ('📊 Posizionamento COT', [
-        ('Fonte', 'CFTC — Commitments of Traders, pubblicato ogni venerdì. 🔄 Aggiorna lo '
-                  'riscarica subito.'),
+        ('Mercato', 'Si sceglie nella riga in alto, accanto al file aperto; 🔄 Aggiorna '
+                    'riscarica subito i dati CFTC dello strumento.'),
+        ('Fonte', 'CFTC — Commitments of Traders, pubblicato ogni venerdì.'),
+        ('Finestra Temporale', 'Anni mostrati nei grafici. COT Index, Z-score e stocastici '
+                               'si calcolano su tutta la storia e poi si ritagliano.'),
+        ('Parametri', 'Quattro stocastici sul grafico del prezzo: finestra base in giorni e tre '
+                      'moltiplicatori del primo valore (10 · 2 · 3 · 4 = 10, 20, 30, 40 giorni). '
+                      'Il %K è smussato con una media di circa 1/6 della finestra (min 3, max 30). '
+                      'Un moltiplicatore vuoto toglie quello stocastico.'),
+        ('Grafici', 'Primo: prezzo (asse sinistro) e stocastici (asse destro, 0–100, linee 80/20); '
+                    'sotto il drawdown del prezzo. Poi posizionamento netto, variazione settimanale, '
+                    'COT Index, Z-score.'),
         ('Indici, valute e tassi', 'Report TFF: posizioni nette di Asset Manager (fondi '
                                    'pensione/comuni/assicurazioni, medio-lungo termine) e Leveraged '
                                    'Money (hedge fund/CTA, speculativi).'),
@@ -1277,6 +1107,15 @@ def _data_toolbar():
                              placeholder='Usa nome o ticker di Yahoo…',
                              className='val-cerca-campo', optionHeight=44,
                              style={'font-size': '12px'}),
+            ]),
+            # COT: mercato + 🔄 Aggiorna, visibili solo sul sotto-tab COT (at_info).
+            html.Div(id='cot-cerca-riga', className='at-via', children=[
+                dcc.Dropdown(id='cot-instrument', options=_cot_options(), value='sp500',
+                             clearable=False, searchable=True, className='val-cerca-campo',
+                             style={'font-size': '12px'}),
+                html.Button('🔄 Aggiorna', id='cot-refresh', n_clicks=0,
+                            title='Riscarica subito i dati CFTC dello strumento',
+                            style={k: v for k, v in _BTN_PRINCIPALE.items() if k != 'display'}),
             ]),
             # Menu «Strumenti»: File · Carica file · Template · Esporta dati, voci uguali.
             # Solo da PC: sul cellulare il menu Strumenti non c'è (scelta dell'utente).
@@ -1381,65 +1220,54 @@ app.layout = serve_layout
 # Callbacks
 # ─────────────────────────────────────────────────────────────────────────────
 @app.callback(
-    Output('arima-asset-dropdown', 'value', allow_duplicate=True),
-    Input({'type': 'graph-select-checkbox-arima', 'index': ALL}, 'value'),
-    State('arima-asset-dropdown', 'value'),
-    prevent_initial_call=True,
-)
-def sync_arima_dropdown_from_grid(all_checkbox_values, current_dropdown_value):
-    """Spuntare un asset nella griglia aggiorna il dropdown (ultimo spuntato)."""
-    checked = [v[0] for v in all_checkbox_values if v]
-    if not checked:
-        raise PreventUpdate
-    new_asset = checked[-1]
-    if new_asset == current_dropdown_value:
-        raise PreventUpdate
-    return new_asset
-
-
-@app.callback(
     Output({'type': 'graph-select-checkbox-arima', 'index': ALL}, 'value'),
-    Output('deselect-all-arima-tab', 'children'),
-    Input('deselect-all-arima-tab', 'n_clicks'),
-    State({'type': 'graph-select-checkbox-arima', 'index': ALL}, 'value'),
-    State({'type': 'graph-select-checkbox-arima', 'index': ALL}, 'options'),
+    Output('arima-asset-dropdown', 'value', allow_duplicate=True),
+    Output('arima-asset-dropdown', 'options', allow_duplicate=True),
+    Input({'type': 'graph-select-checkbox-arima', 'index': ALL}, 'value'),
+    Input('arima-asset-dropdown', 'value'),
+    State({'type': 'graph-select-checkbox-arima', 'index': ALL}, 'id'),
     prevent_initial_call=True,
 )
-def deselect_all_arima_tab(n, current_values, all_options):
-    if not all_options:
-        return [], 'Des'
-    if any(v for v in current_values):
-        return [[] for _ in all_options], 'Sel'
-    return [[opts[0]['value']] if opts else [] for opts in all_options], 'Des'
-
-
-@app.callback(
-    Output('weights-grid-container-arima', 'children'),
-    Output('arima-forecast-status', 'children'),
-    Input('calc-arima-forecasts-btn', 'n_clicks'),
-    State({'type': 'graph-select-checkbox-arima', 'index': ALL}, 'value'),
-    prevent_initial_call=True,
-)
-def compute_all_forecasts(n, checked_vals):
-    """Calcola la previsione ARIMA a 1 giorno per TUTTI gli asset e riempie la griglia."""
-    if not n:
+def ar_griglia_tendina(valori, scelto, ids):
+    """Griglia e tendina in alto restano allineate, una sola spunta alla volta.
+    Spunta nella griglia → l'asset va subito nella tendina (valore e opzioni);
+    asset scelto dalla tendina → la griglia spunta lui, o niente se è un titolo Yahoo."""
+    tid = callback_context.triggered_id
+    nomi = [i['index'] for i in ids]
+    if isinstance(tid, dict):                       # clic su una spunta della griglia
+        if tid['index'] not in nomi:
+            raise PreventUpdate
+        acceso = bool(valori[nomi.index(tid['index'])])
+        if not acceso:                               # tolta: la tendina resta com'è
+            return [[] for _ in nomi], no_update, no_update
+        a = tid['index']
+        return ([[n] if n == a else [] for n in nomi], a, _ar_opzioni('', a))
+    attese = [[n] if n == scelto else [] for n in nomi]
+    if attese == [list(v or []) for v in valori]:
         raise PreventUpdate
-    prices_df = _build_prices()
-    if prices_df is None or prices_df.empty:
-        return _build_asset_grid([], []), "⚠ Nessun dato disponibile"
-    selected = [v[0] for v in (checked_vals or []) if v]
-    asset_names = list(prices_df.columns)
-    forecasts = {}
-    for asset in asset_names:
-        fc = _quick_forecast(prices_df[asset])
-        if fc:
-            forecasts[asset] = fc
-    grid = _build_asset_grid(asset_names, selected, forecasts)
-    return grid, f"✓ Previsione 1gg calcolata per {len(forecasts)}/{len(asset_names)} asset"
+    return attese, no_update, no_update
+
+
+def _ar_grafici(titolo, figure):
+    """Titolo del modello + un dcc.Graph per figura, uno sotto l'altro.
+    responsive=True con l'altezza nello style: un grafico disegnato a tab o sezione
+    nascosta nascerebbe largo quanto misurato da nascosto."""
+    out = [html.Div(titolo, className='at-ar-titolo')]
+    for f in figure:
+        f.update_traces(mode='lines', selector=dict(type='scatter'))   # niente pallini sulle linee
+        testa, _, coda = (f.layout.meta or {}).get('titolo', '').partition('  ·  ')
+        out.append(html.Div(className='at-ar-graf', children=[
+            html.Div([html.Span(testa, className='at-ar-gtit'),
+                      html.Span(coda, className='at-ar-gsub') if coda else None]),
+            dcc.Graph(figure=f, responsive=True,
+                      style={'height': f'{f.layout.height}px', 'width': '100%'},
+                      config={'scrollZoom': True, 'displaylogo': False}),
+        ]))
+    return out
 
 
 @app.callback(
-    Output('arima-analysis-chart', 'figure'),
+    Output('arima-grafici', 'children'),
     Output('arima-tab-status', 'children'),
     Input('run-arima-tab-button', 'n_clicks'),
     State('arima-asset-dropdown', 'value'),
@@ -1454,7 +1282,7 @@ def run_arima_tab_analysis(n_clicks, selected_asset, horizon, max_p, max_q, crit
     if not n_clicks:
         raise PreventUpdate
     if not selected_asset:
-        return go.Figure(), "⚠ Seleziona un asset."
+        return [], "⚠ Seleziona un asset."
 
     horizon   = int(horizon or 30)
     max_p     = int(max_p   or 4)
@@ -1478,16 +1306,16 @@ def run_arima_tab_analysis(n_clicks, selected_asset, horizon, max_p, max_q, crit
             tk = selected_asset[3:]
             px = dc.download_series(tk, 'EUR')
             if px is None or px.empty:
-                return go.Figure(), f"⚠ Nessun dato da Yahoo per '{tk}' (ticker corretto?)."
+                return [], f"⚠ Nessun dato da Yahoo per '{tk}' (ticker corretto?)."
             prices = px.dropna()
             selected_asset = _AR_NOMI.get(selected_asset, tk).split(' · ')[0]
         else:
             original_prices = _build_prices()
             if original_prices is None or selected_asset not in original_prices.columns:
-                return go.Figure(), f"⚠ Asset '{selected_asset}' non trovato nei dati (current.json)."
+                return [], f"⚠ Asset '{selected_asset}' non trovato nei dati (current.json)."
             prices = original_prices[selected_asset].dropna()
         if len(prices) < 100:
-            return go.Figure(), "⚠ Dati insufficienti (< 100 osservazioni)."
+            return [], "⚠ Dati insufficienti (< 100 osservazioni)."
         if len(prices) > 750:
             prices = prices.iloc[-750:]
 
@@ -1524,7 +1352,7 @@ def run_arima_tab_analysis(n_clicks, selected_asset, horizon, max_p, max_q, crit
                 except Exception:
                     continue
         if best_model is None:
-            return go.Figure(), "❌ Nessun modello ARIMA convergente trovato."
+            return [], "❌ Nessun modello ARIMA convergente trovato."
 
         # Step 4: residui ε_t + ADF + ACF/PACF
         residuals = best_model.resid
@@ -1589,111 +1417,116 @@ def run_arima_tab_analysis(n_clicks, selected_asset, horizon, max_p, max_q, crit
         expected_ret = (price_fc_mean[-1] / last_price - 1) * 100
         ret_sign     = '+' if expected_ret >= 0 else ''
 
-        # ── Figura 5×2 ────────────────────────────────────────────────────
-        specs_layout = [
-            [{"colspan": 2, "type": "scatter"}, None],
-            [{"type": "scatter"}, {"type": "scatter"}],
-            [{"type": "bar"},     {"type": "bar"}],
-            [{"colspan": 2, "type": "scatter"}, None],
-            [{"colspan": 2, "type": "scatter"}, None],
-        ]
-        garch_title = ('GARCH(1,1) — Volatilità Condizionale degli Errori'
-                       if garch_ok else 'Errori Stazionari ε_t (ARIMA residui)')
-        fig = make_subplots(
-            rows=5, cols=2, specs=specs_layout,
-            subplot_titles=[
-                f'{selected_asset} — Log Prezzi + Trend (slope={trend_coef[0]:+.5f}/gg)',
-                'Ciclicità — Serie Detrended I(1)',
-                f'Δ Ciclicità = Errori Grezzi I(0)  |  ADF p={adf_pval:.4f}'
-                f'  {"✓ Staz." if is_stationary else "⚠ Non staz."}',
-                f'ACF  Δ-Ciclicità  (nlags={n_lags})',
-                f'PACF Δ-Ciclicità  (nlags={n_lags})',
-                garch_title,
-                f'Proiezione {horizon}gg — Prezzi + Cono 95%'
-                f'  |  Rendimento atteso: {ret_sign}{expected_ret:.2f}%',
-            ],
-            row_heights=[0.17, 0.13, 0.16, 0.12, 0.42],
-            vertical_spacing=0.065, horizontal_spacing=0.07,
-        )
+        # ── Un grafico per riquadro, uno sotto l'altro: prima la previsione ──
+        def _fig(titolo, altezza):
+            # Il titolo non va in Plotly ma in un'intestazione HTML sopra il grafico
+            # (_ar_grafici), che sul cellulare va a capo da sola.
+            f = go.Figure()
+            f.update_layout(
+                height=altezza, meta={'titolo': titolo},
+                margin=dict(t=40, b=30, l=55, r=15), hovermode='x unified',
+                plot_bgcolor='white', paper_bgcolor='white',
+                legend=dict(orientation='h', x=0, y=1.0, xanchor='left', yanchor='bottom',
+                            font=dict(size=10), bgcolor='rgba(0,0,0,0)'),
+            )
+            f.update_xaxes(showgrid=True, gridcolor='#eef1f5')
+            f.update_yaxes(showgrid=True, gridcolor='#eef1f5', title_font=dict(size=10))
+            return f
 
-        # R1
-        fig.add_trace(go.Scatter(x=idx, y=log_prices, name='Log Prezzi',
-                                 line=dict(color='#1f77b4', width=1.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=idx, y=trend_line, name='Trend Lineare',
-                                 line=dict(color='#d62728', width=2, dash='dash')), row=1, col=1)
-        # R2c1
-        fig.add_trace(go.Scatter(x=idx, y=detrended, name='Ciclicità',
-                                 line=dict(color='#2ca02c', width=1.1)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=[idx[0], idx[-1]], y=[0, 0], showlegend=False,
-                                 line=dict(color='red', width=0.8, dash='dot')), row=2, col=1)
-        # R2c2
-        col_diff = ['#2ca02c' if v >= 0 else '#d62728' for v in diff_detrended]
-        fig.add_trace(go.Bar(x=idx_diff, y=diff_detrended, name='Δ Ciclicità',
-                             marker_color=col_diff, marker_line_width=0), row=2, col=2)
-        # R3c1 ACF
-        acf_col = ['#d62728' if abs(v) > ci_bound else '#1f77b4' for v in acf_vals]
-        fig.add_trace(go.Bar(x=lags_arr, y=acf_vals, name='ACF',
-                             marker_color=acf_col, marker_line_width=0), row=3, col=1)
-        for b in [ci_bound, -ci_bound]:
-            fig.add_trace(go.Scatter(x=[0, n_lags], y=[b, b], showlegend=False,
-                                     line=dict(color='orange', dash='dash', width=1.2)), row=3, col=1)
-        # R3c2 PACF
-        pacf_col = ['#d62728' if abs(v) > ci_bound else '#ff7f0e' for v in pacf_vals]
-        fig.add_trace(go.Bar(x=lags_arr, y=pacf_vals, name='PACF',
-                             marker_color=pacf_col, marker_line_width=0), row=3, col=2)
-        for b in [ci_bound, -ci_bound]:
-            fig.add_trace(go.Scatter(x=[0, n_lags], y=[b, b], showlegend=False,
-                                     line=dict(color='orange', dash='dash', width=1.2)), row=3, col=2)
-        # R4 GARCH / residui
-        if garch_ok and cond_vol is not None:
-            vol_idx = idx_diff[-len(cond_vol):]
-            fig.add_trace(go.Scatter(x=vol_idx, y=cond_vol * 100, name='σ_t GARCH (%)',
-                                     line=dict(color='#d62728', width=1.3),
-                                     fill='tozeroy', fillcolor='rgba(214,39,40,0.1)'), row=4, col=1)
-            mean_vol = float(np.mean(cond_vol)) * 100
-            fig.add_trace(go.Scatter(x=[vol_idx[0], vol_idx[-1]], y=[mean_vol, mean_vol],
-                                     name=f'σ media ({mean_vol:.3f}%)',
-                                     line=dict(color='navy', dash='dash', width=1.2)), row=4, col=1)
-        else:
-            res_idx = idx_diff[-len(residuals):]
-            fig.add_trace(go.Scatter(x=res_idx, y=residuals, name='ε_t (residui)',
-                                     line=dict(color='#8c564b', width=0.7), opacity=0.8), row=4, col=1)
-            fig.add_trace(go.Scatter(x=[res_idx[0], res_idx[-1]], y=[0, 0], showlegend=False,
-                                     line=dict(color='red', width=1, dash='dot')), row=4, col=1)
-        # R5 prezzi + forecast + cono
+        stato_staz = "✓ Staz." if is_stationary else "⚠ Non staz."
+        figure = []
+
+        # 1. Proiezione prezzi + cono 95%
         lookback    = min(252 * 2, len(prices))
         hist_prices = prices.iloc[-lookback:]
+        f = _fig(f'Proiezione {horizon}gg — Prezzi + Cono 95%  ·  '
+                 f'rendimento atteso {ret_sign}{expected_ret:.2f}%', 520)
+        f.add_trace(go.Scatter(x=hist_prices.index, y=hist_prices.values, name='Prezzo storico',
+                               line=dict(color='#1f77b4', width=1.8)))
+        f.add_trace(go.Scatter(x=anchor_dates + anchor_dates[::-1], y=anchor_hi + anchor_lo[::-1],
+                               fill='toself', fillcolor='rgba(31,119,180,0.13)',
+                               line=dict(color='rgba(0,0,0,0)'), name='Cono 95%', hoverinfo='skip'))
+        f.add_trace(go.Scatter(x=anchor_dates, y=anchor_hi, name='IC +95%',
+                               line=dict(color='rgba(31,119,180,0.55)', dash='dot', width=1.2)))
+        f.add_trace(go.Scatter(x=anchor_dates, y=anchor_lo, name='IC −95%',
+                               line=dict(color='rgba(31,119,180,0.55)', dash='dot', width=1.2)))
+        f.add_trace(go.Scatter(x=anchor_dates, y=anchor_mean, name='Previsione media',
+                               line=dict(color='#d62728', width=2.5), marker=dict(size=4)))
         y_min = min(float(np.min(price_fc_lo)), float(hist_prices.min())) * 0.98
         y_max = max(float(np.max(price_fc_hi)), float(hist_prices.max())) * 1.02
-        fig.add_trace(go.Scatter(x=hist_prices.index, y=hist_prices.values, name='Prezzo Storico',
-                                 line=dict(color='#1f77b4', width=1.8)), row=5, col=1)
-        fig.add_trace(go.Scatter(x=[last_date, last_date], y=[y_min, y_max], name='Oggi',
-                                 line=dict(color='gray', width=1.5, dash='dash')), row=5, col=1)
-        fig.add_trace(go.Scatter(x=anchor_dates + anchor_dates[::-1], y=anchor_hi + anchor_lo[::-1],
-                                 fill='toself', fillcolor='rgba(31,119,180,0.13)',
-                                 line=dict(color='rgba(0,0,0,0)'), name='Cono 95%'), row=5, col=1)
-        fig.add_trace(go.Scatter(x=anchor_dates, y=anchor_hi, name='CI +95%',
-                                 line=dict(color='rgba(31,119,180,0.55)', dash='dot', width=1.2)), row=5, col=1)
-        fig.add_trace(go.Scatter(x=anchor_dates, y=anchor_lo, name='CI -95%',
-                                 line=dict(color='rgba(31,119,180,0.55)', dash='dot', width=1.2)), row=5, col=1)
-        fig.add_trace(go.Scatter(x=anchor_dates, y=anchor_mean, name='Previsione Media',
-                                 line=dict(color='#d62728', width=2.5), marker=dict(size=4)), row=5, col=1)
+        # «Oggi» come traccia, non come shape: il tab può essere ridisegnato da nascosto.
+        f.add_trace(go.Scatter(x=[last_date, last_date], y=[y_min, y_max], name='Oggi',
+                               mode='lines', line=dict(color='gray', width=1.2, dash='dash'),
+                               hoverinfo='skip'))
+        f.update_yaxes(title_text='Prezzo (EUR)', range=[y_min, y_max])
+        figure.append(f)
+
+        # 2. Log prezzi + trend
+        f = _fig(f'Log prezzi + trend lineare (pendenza {trend_coef[0]:+.5f}/gg)', 380)
+        f.add_trace(go.Scatter(x=idx, y=log_prices, name='Log prezzi',
+                               line=dict(color='#1f77b4', width=1.2)))
+        f.add_trace(go.Scatter(x=idx, y=trend_line, name='Trend lineare',
+                               line=dict(color='#d62728', width=2, dash='dash')))
+        f.update_yaxes(title_text='Log prezzo')
+        figure.append(f)
+
+        # 3. Ciclicità (serie senza trend)
+        f = _fig('Ciclicità — serie senza trend, I(1)', 340)
+        f.add_trace(go.Scatter(x=idx, y=detrended, name='Ciclicità',
+                               line=dict(color='#2ca02c', width=1.1)))
+        f.add_trace(go.Scatter(x=[idx[0], idx[-1]], y=[0, 0], showlegend=False, hoverinfo='skip',
+                               line=dict(color='red', width=0.8, dash='dot')))
+        f.update_yaxes(title_text='Ciclicità')
+        figure.append(f)
+
+        # 4. Δ ciclicità = errori grezzi
+        f = _fig(f'Δ Ciclicità = errori grezzi I(0)  ·  ADF p={adf_pval:.4f} {stato_staz}', 340)
+        f.add_trace(go.Bar(x=idx_diff, y=diff_detrended, name='Δ Ciclicità', marker_line_width=0,
+                           marker_color=['#2ca02c' if v >= 0 else '#d62728' for v in diff_detrended]))
+        f.update_yaxes(title_text='Δ Ciclicità')
+        figure.append(f)
+
+        # 5–6. ACF e PACF
+        for nome, valori, base in (('ACF', acf_vals, '#1f77b4'), ('PACF', pacf_vals, '#ff7f0e')):
+            f = _fig(f'{nome} della Δ ciclicità ({n_lags} ritardi)  ·  in rosso i ritardi '
+                     f'fuori dalla banda 95%', 320)
+            f.add_trace(go.Bar(x=lags_arr, y=valori, name=nome, marker_line_width=0,
+                               marker_color=['#d62728' if abs(v) > ci_bound else base for v in valori]))
+            f.add_trace(go.Scatter(x=[0, n_lags, None, 0, n_lags],
+                                   y=[ci_bound, ci_bound, None, -ci_bound, -ci_bound],
+                                   name='Banda 95%', hoverinfo='skip',
+                                   line=dict(color='orange', dash='dash', width=1.2)))
+            f.update_layout(hovermode='closest')
+            f.update_xaxes(title_text='Ritardo')
+            f.update_yaxes(title_text=nome)
+            figure.append(f)
+
+        # 7. GARCH (o residui se arch manca)
+        if garch_ok and cond_vol is not None:
+            f = _fig('GARCH(1,1) — volatilità condizionale degli errori', 340)
+            vol_idx = idx_diff[-len(cond_vol):]
+            f.add_trace(go.Scatter(x=vol_idx, y=cond_vol * 100, name='σ_t GARCH (%)',
+                                   line=dict(color='#d62728', width=1.3),
+                                   fill='tozeroy', fillcolor='rgba(214,39,40,0.1)'))
+            mean_vol = float(np.mean(cond_vol)) * 100
+            f.add_trace(go.Scatter(x=[vol_idx[0], vol_idx[-1]], y=[mean_vol, mean_vol],
+                                   name=f'σ media ({mean_vol:.3f}%)',
+                                   line=dict(color='navy', dash='dash', width=1.2)))
+            f.update_yaxes(title_text='σ_t (%)')
+        else:
+            f = _fig('Errori stazionari ε_t (residui ARIMA)', 340)
+            res_idx = idx_diff[-len(residuals):]
+            f.add_trace(go.Scatter(x=res_idx, y=residuals, name='ε_t (residui)',
+                                   line=dict(color='#8c564b', width=0.7), opacity=0.8))
+            f.add_trace(go.Scatter(x=[res_idx[0], res_idx[-1]], y=[0, 0], showlegend=False,
+                                   hoverinfo='skip', line=dict(color='red', width=1, dash='dot')))
+            f.update_yaxes(title_text='ε_t')
+        figure.append(f)
 
         arima_lbl = f'ARIMA{best_order}'
         title_str = (f'🔬  {selected_asset}  —  {arima_lbl}  |  {criterion.upper()}={best_score:.1f}  |  '
-                     f'ADF p={adf_pval:.4f}  {"✓ Staz." if is_stationary else "⚠ Non staz."}  |  '
+                     f'ADF p={adf_pval:.4f}  {stato_staz}  |  '
                      f'Forecast {horizon}gg: {ret_sign}{expected_ret:.2f}%')
-        fig.update_layout(
-            height=1150, title=dict(text=title_str, font=dict(size=12), x=0.01),
-            showlegend=True,
-            legend=dict(x=1.01, y=1, xanchor='left', yanchor='top', font=dict(size=9),
-                        bgcolor='rgba(255,255,255,0.8)', bordercolor='#ccc', borderwidth=1),
-            margin=dict(t=70, b=30, l=55, r=175), hovermode='closest',
-        )
-        for row_n, col_n, lbl in [(1, 1, 'Log Prezzo'), (2, 1, 'Ciclicità'), (2, 2, 'Δ Ciclicità'),
-                                  (3, 1, 'ACF'), (3, 2, 'PACF'),
-                                  (4, 1, 'σ_t (%)' if garch_ok else 'ε_t'), (5, 1, 'Prezzo')]:
-            fig.update_yaxes(title_text=lbl, row=row_n, col=col_n, title_font=dict(size=9))
 
         best_pq = (best_order[0], best_order[2])
         aic_lines = []
@@ -1710,34 +1543,48 @@ def run_arima_tab_analysis(n_clicks, selected_asset, horizon, max_p, max_q, crit
             f"{(price_fc_hi[-1]/last_price-1)*100:+.2f}%)\n\n"
             f"Top modelli ({criterion.upper()}):\n" + "\n".join(aic_lines)
         )
-        return fig, status_text
+        return _ar_grafici(title_str, figure), status_text
 
     except Exception as exc:
         import traceback as _tb
         print(f"❌ ARIMA Tab error:\n{_tb.format_exc()}", flush=True)
-        empty = go.Figure()
-        empty.add_annotation(text=f"Errore: {str(exc)}", xref="paper", yref="paper",
-                             x=0.5, y=0.5, showarrow=False, font=dict(size=14, color='red'))
-        return empty, f"❌ Errore: {str(exc)}"
+        return [], f"❌ Errore: {str(exc)}"
 
 
 # ── Barra dati: aggiungi asset / carica file / template / esporta / file lavoro ─
 @app.callback(
-    Output('tab-arima-content', 'children', allow_duplicate=True),
-    Output('at-data-status', 'children', allow_duplicate=True),
+    Output('weights-grid-container-arima', 'children', allow_duplicate=True),
+    Output('at-add-stato', 'children'),
+    Output('arima-asset-dropdown', 'value', allow_duplicate=True),
+    Output('arima-asset-dropdown', 'options', allow_duplicate=True),
     Input('at-add-btn', 'n_clicks'),
+    Input('at-add-ticker', 'n_submit'),
     State('at-add-ticker', 'value'),
     State('at-add-desc', 'value'),
     State('at-add-cur', 'value'),
+    running=[(Output('at-add-btn', 'disabled'), True, False)],
     prevent_initial_call=True,
 )
-def at_add_asset(n, ticker, desc, cur):
-    if not n:
+def at_add_asset(n, invio, ticker, desc, cur):
+    """Aggiunge un titolo al file personale (stessi controlli degli Indicatori), ridisegna
+    solo la griglia (i parametri restano) e lo sceglie per l'analisi ARIMA."""
+    if not (n or invio):
         raise PreventUpdate
-    ok, msg = _add_asset_to_current(ticker, desc, cur)
-    if ok:
-        return get_arima_analysis_tab(_asset_options()), msg
-    return no_update, msg
+    ticker = (ticker or '').strip().upper()
+    if not ticker:
+        return no_update, '⚠ Scrivi il ticker Yahoo (es. AAPL, SWDA.MI, BTC-USD)', no_update, no_update
+    desc = (desc or '').strip() or ticker
+    attuali = dc.read_current()
+    if desc in attuali:
+        return no_update, f'⚠ «{desc}» è già nel file', no_update, no_update
+    doppio = next((k for k, v in attuali.items() if (v.get('ticker') or '').upper() == ticker), None)
+    if doppio:
+        return no_update, f'⚠ {ticker} è già nel file come «{doppio}»', no_update, no_update
+    ok, msg = _add_asset_to_current(ticker, desc, cur or 'EUR')
+    if not ok:
+        return no_update, msg, no_update, no_update
+    nomi = [o['value'] for o in _asset_options()]
+    return _build_asset_grid(nomi, [desc]), msg, desc, _ar_opzioni('', desc)
 
 
 @app.callback(
@@ -1835,25 +1682,24 @@ app.clientside_callback(
 @app.callback(Output('at-info-corpo', 'children'), Output('at-calcola-cell', 'className'),
               Output('val-cerca-riga', 'className'), Output('val-a-capo', 'className'),
               Output('at-arima-cell', 'className'), Output('ar-cerca-riga', 'className'),
+              Output('cot-cerca-riga', 'className'),
               Input('at-tabs', 'value'))
 def at_info(tab):
     val = tab in (None, 'tab-valutazione')
     return (_info_tab(tab), ('nb-solo-cell nb-clicca' if tab == 'tab-indicatori' else 'at-via'),
             'val-cerca' if val else 'at-via', 'val-a-capo' if val else 'at-via',
             'nb-solo-cell nb-clicca' if tab == 'tab-arima' else 'at-via',
-            'val-cerca' if tab == 'tab-arima' else 'at-via')
+            'val-cerca' if tab == 'tab-arima' else 'at-via',
+            'val-cerca' if tab == 'tab-cot' else 'at-via')
 
 
 _AR_NOMI = {'yf:AAPL': 'AAPL — Apple Inc. · Yahoo'}   # valore → etichetta (ticker Yahoo)
 
 
-@app.callback(Output('arima-asset-dropdown', 'options'),
-              Input('arima-asset-dropdown', 'search_value'),
-              Input('at-tabs', 'value'),
-              Input('tab-arima-content', 'children'),     # file cambiato / asset aggiunti
-              State('arima-asset-dropdown', 'value'))
-def ar_cerca(testo, _tab, _contenuto, valore):
-    """Opzioni della tendina ARIMA: asset del file aperto + risultati di Yahoo."""
+def _ar_opzioni(testo, valore):
+    """Opzioni della tendina ARIMA: asset del file aperto + (se si scrive) risultati di
+    Yahoo. I titoli Yahoo non si salvano da nessuna parte: restano fra le opzioni solo
+    finché sono quelli scelti, poi spariscono."""
     import re
     testo = (testo or '').strip()
     file_opts = [{'label': f"📁 {o['label']}", 'value': o['value'],
@@ -1881,6 +1727,15 @@ def ar_cerca(testo, _tab, _contenuto, valore):
         # dal testo come le altre: in cima, Invio riprenderebbe il titolo di prima.
         opts.append({'label': et, 'value': valore, 'search': et})
     return opts
+
+
+@app.callback(Output('arima-asset-dropdown', 'options'),
+              Input('arima-asset-dropdown', 'search_value'),
+              Input('at-tabs', 'value'),
+              Input('tab-arima-content', 'children'),     # file cambiato
+              State('arima-asset-dropdown', 'value'))
+def ar_cerca(testo, _tab, _contenuto, valore):
+    return _ar_opzioni(testo, valore)
 
 
 # ── Pannello File: toggle, lista, salva, carica, elimina ──────────────────────
@@ -1981,23 +1836,28 @@ def _at_switch_tab(tab):
 
 
 @app.callback(
-    Output('cot-chart', 'figure'),
+    Output('cot-grafici', 'children'),
     Output('cot-summary', 'children'),
-    Output('cot-chart', 'style'),
+    Output('cot-st-finestre', 'children'),
     Input('cot-instrument', 'value'),
     Input('cot-range', 'value'),
     Input('cot-refresh', 'n_clicks'),
+    Input('cot-st-base', 'value'),
+    Input('cot-st-m1', 'value'),
+    Input('cot-st-m2', 'value'),
+    Input('cot-st-m3', 'value'),
+    Input('val-cell', 'data'),
 )
-def _update_cot(key, year_range, n):
+def _update_cot(key, year_range, n, base, m1, m2, m3, cell):
     if not key:
         raise PreventUpdate
     # il pulsante 🔄 forza il refetch invalidando la cache dello strumento
     if callback_context.triggered_id == 'cot-refresh':
         _COT_CACHE.pop(key, None)
-    fig, summary = _cot_fig_and_summary(key, year_range)
-    h = int(getattr(fig.layout, 'height', None) or 1400)
-    style = {'width': '100%', 'height': f'{h}px'}
-    return fig, summary, style
+    finestre = _cot_finestre_stoc(base, (m1, m2, m3))
+    figure, summary, label = _cot_figure(key, year_range, finestre, bool(cell))
+    fin = '= ' + ' · '.join(f'{x} gg' for x in finestre)
+    return _ar_grafici(f'Posizionamento COT — {label}', figure), summary, fin
 
 
 # ─────────────────────────────────────────────────────────────────────────────
