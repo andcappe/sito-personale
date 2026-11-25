@@ -159,7 +159,8 @@ def scatter_fig(orizzonte='rend_5a', tipologie=None, categorie=None, search=''):
             bordercolor='#d00000' if n_match else '#ccc', borderwidth=1, borderpad=4,
         )
     fig.update_layout(
-        title=dict(text=f'Rischio × Rendimento medio annuo ({oriz_lbl}) — dati COVIP fine 2025',
+        title=dict(text=f'Rischio × Rendimento medio annuo ({oriz_lbl})'
+                        '<br><span style="font-size:11px;color:#6b7a99">dati COVIP fine 2025</span>',
                    font=dict(size=14, color='#1a3a6b'), x=0.02),
         xaxis=dict(title='Categoria di rischio →', tickmode='array',
                    tickvals=list(RANK_LABEL.keys()),
@@ -168,8 +169,8 @@ def scatter_fig(orizzonte='rend_5a', tipologie=None, categorie=None, search=''):
         yaxis=dict(title=f'Rendimento medio annuo % ({oriz_lbl})', gridcolor='#eee', zeroline=False),
         plot_bgcolor='#f8f9fb', paper_bgcolor='white',
         font=dict(family='Inter, sans-serif', size=11),
-        legend=dict(orientation='h', y=1.08, x=0), height=560,
-        margin=dict(t=70, b=50, l=60, r=20), hovermode='closest',
+        legend=dict(orientation='h', yanchor='top', y=-0.24, x=0), height=580,
+        margin=dict(t=70, b=140, l=60, r=20), hovermode='closest',
     )
     return fig
 

@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from scipy.optimize import minimize
 
-from dash import html, dcc, callback_context, no_update, ALL, ctx
+from dash import html, dcc, no_update, ALL, ctx
 
 import data_core as _dc   # Finestra Temporale condivisa
 from dash.dependencies import Input, Output, State

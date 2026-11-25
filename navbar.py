@@ -126,6 +126,89 @@ NAVBAR_JS = """
 if (location.search.indexOf('embed=1') !== -1)
   document.documentElement.classList.add('nb-embed');
 """ + r"""
+// Grafici disegnati mentre il loro tab era nascosto (25/11/2026): Plotly li fa larghi
+// 700 px, i suoi predefiniti, e quando il tab si apre restano così (sul cellulare la
+// pagina scorre di lato). Dopo ogni clic (tab, tendina «Tabs Strumenti», sezioni) si
+// riprova per qualche secondo, perché il tab si mostra spesso con un callback del
+// server: si ridisegna solo un grafico visibile, senza larghezza fissa, la cui
+// larghezza non coincide con quella del riquadro.
+(function () {
+  function adatta() {
+    if (!window.Plotly) return;
+    document.querySelectorAll('.js-plotly-plot').forEach(function (g) {
+      if (!g.offsetParent || !g._fullLayout || (g.layout && g.layout.width)) return;
+      if (Math.abs(g._fullLayout.width - g.offsetWidth) > 2) {
+        try { Plotly.Plots.resize(g); } catch (e) {}
+      }
+    });
+  }
+  document.addEventListener('click', function () {
+    [150, 600, 1500, 3000].forEach(function (t) { setTimeout(adatta, t); });
+  }, true);
+
+  // Titolo e legenda orizzontale sopra il grafico: quando la legenda va su più righe
+  // (schermo stretto, molte serie) sale sul titolo. Se le due scatole si toccano si
+  // allarga il margine alto di quanto serve (al massimo 3 tentativi per disegno).
+  // Cellulare: con tante serie la legenda orizzontale va su una voce per riga e si
+  // prende tutta l'altezza (grafico schiacciato a zero). Se supera il 40% della figura
+  // il riquadro si allunga quanto la legenda + 320 px; torna com'era quando le serie calano.
+  function allungaPerLegenda(g) {
+    var box = g.closest('.dash-graph'), leg = g.querySelector('.legend'), fl = g._fullLayout;
+    if (!box || !fl || window.innerWidth > 900 || (g.layout && g.layout.height)) return false;
+    if (box.dataset.nbMinH === undefined) box.dataset.nbMinH = box.style.minHeight || '';
+    var hl = leg ? leg.getBoundingClientRect().height : 0;
+    var base = box.dataset.nbAltBase ? +box.dataset.nbAltBase : box.offsetHeight;
+    if (hl > 0.4 * base) {
+      var voluto = Math.ceil(hl + 320);
+      if (Math.abs(box.offsetHeight - voluto) < 20) return false;
+      box.dataset.nbAltBase = base;
+      box.style.minHeight = voluto + 'px';
+    } else if (box.dataset.nbAltBase) {
+      box.style.minHeight = box.dataset.nbMinH;
+      delete box.dataset.nbAltBase;
+    } else return false;
+    try { Plotly.Plots.resize(g); } catch (e) {}
+    return true;
+  }
+  function sistemaTitolo(g) {
+    if (allungaPerLegenda(g)) return;
+    var leg0 = g.querySelector('.legend'), fl = g._fullLayout;
+    // Legenda ancorata al bordo della figura (legend.yref='container'): se copre i
+    // titoli dei riquadri (annotazioni) si abbassa il grafico quanto basta, così la
+    // legenda può andare a capo quante volte vuole la larghezza dello schermo.
+    if (leg0 && fl && fl.legend && fl.legend.yref === 'container') {
+      var bl = leg0.getBoundingClientRect(), giu = 0;
+      g.querySelectorAll('.infolayer .annotation').forEach(function (an) {
+        var r = an.getBoundingClientRect();
+        if (r.width && r.left < bl.right && bl.left < r.right && r.top < bl.bottom && bl.top < r.bottom)
+          giu = Math.max(giu, Math.ceil(bl.bottom - r.top) + 4);
+      });
+      if (!giu) { g._nbLeg = 0; return; }
+      if ((g._nbLeg = (g._nbLeg || 0) + 1) > 3) return;
+      try { Plotly.relayout(g, {'margin.t': fl.margin.t + giu}); } catch (e) {}
+      return;
+    }
+    var tit = g.querySelector('.g-gtitle text'), leg = leg0;
+    if (!tit || !leg || !g._fullLayout || !tit.textContent.trim()) return;
+    var a = tit.getBoundingClientRect(), b = leg.getBoundingClientRect();
+    if (!a.width || !b.width) return;
+    var tocca = a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+    if (!tocca) { g._nbTit = 0; return; }
+    if ((g._nbTit = (g._nbTit || 0) + 1) > 3) return;
+    var dy = Math.ceil(a.bottom - b.top) * 2 + 6;
+    try { Plotly.relayout(g, {'margin.t': g._fullLayout.margin.t + dy}); } catch (e) {}
+  }
+  function aggancia() {
+    if (!window.Plotly) return;
+    document.querySelectorAll('.js-plotly-plot').forEach(function (g) {
+      if (g._nbAgganciato || !g.on) return;
+      g._nbAgganciato = true;
+      g.on('plotly_afterplot', function () { setTimeout(function () { sistemaTitolo(g); }, 0); });
+      sistemaTitolo(g);
+    });
+  }
+  setInterval(aggancia, 1500);
+})();
 // Legenda a tutto schermo (cellulare, 23/11/2026): un pulsante .nb-legenda-btn con
 // data-grafico=<id del dcc.Graph> apre l'elenco delle voci della legenda principale
 // ('legend') con colore e nome intero; un tocco accende/spegne la voce e tutto il suo

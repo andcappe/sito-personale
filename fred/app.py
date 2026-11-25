@@ -7,9 +7,7 @@ import os
 import io, base64, warnings, json, urllib.request, math
 from scipy import stats as scipy_stats
 import numpy as np
-from scipy.optimize import minimize_scalar
 import pandas as pd
-import pandas.tseries.offsets as offsets
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dash import Dash, html, dcc, callback_context, Output, Input, State, ALL, no_update
@@ -590,15 +588,18 @@ def make_line_chart(df: pd.DataFrame, title: str,
         ))
     if zero_line:
         fig.add_hline(y=0, line_color="#666", line_dash="dot", line_width=1)
+    # Il titolo è il titolo della legenda (sopra le voci): titolo e legenda sono un
+    # blocco solo, e con tante serie (o sul cellulare) non possono più sovrapporsi.
     fig.update_layout(
-        title=dict(text=title, font=dict(size=12, color="#333"), x=0.01),
         yaxis_title=y_label,
         hovermode="closest",      # ← era "x unified"
-        autosize=True, 
+        autosize=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="left", x=0, font=dict(size=9),
+                    title=dict(text=title, side="top",
+                               font=dict(size=12, color="#333")),
                     bgcolor="rgba(255,255,255,0.8)"),
-        margin=dict(t=50, b=35, l=60, r=20),
+        margin=dict(t=30, b=35, l=60, r=20),
         paper_bgcolor="white", plot_bgcolor="#f8f8f8",
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8", zeroline=False)
@@ -704,6 +705,7 @@ def make_mvpq_chart(df: pd.DataFrame, mode: str,
     else:
         fig = make_subplots(rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.10,
                             subplot_titles=[_titles[p] for p in panels])
+        fig.update_annotations(font_size=11)   # titoli dei riquadri (le μ si aggiungono dopo)
 
     for _i, _p in enumerate(panels):
         rc = {} if n == 1 else dict(row=_i + 1, col=1)
@@ -715,6 +717,8 @@ def make_mvpq_chart(df: pd.DataFrame, mode: str,
                 line=dict(color="#d62728", width=2.5),
                 hovertemplate="P·Q: %{y:.1f}<extra></extra>"), **rc)
         elif _p == "yoy":
+            # etichette delle medie nel margine destro, la più alta spostata in su
+            _sh_mv, _sh_pq = (7, -7) if mv_yoy_mean >= pq_yoy_mean else (-7, 7)
             fig.add_trace(go.Scatter(x=mv_yoy.index, y=mv_yoy.values, name="M·V YoY",
                 line=dict(color="#1f77b4", width=2.5),
                 hovertemplate="M·V YoY: %{y:.2f}%<extra></extra>"), **rc)
@@ -727,12 +731,13 @@ def make_mvpq_chart(df: pd.DataFrame, mode: str,
                 name="Gap− (PQ>MV)", marker_color="rgba(214,39,40,0.35)"), **rc)
             fig.add_hline(y=0, line_color="#555", line_dash="dot", line_width=1, **rc)
             fig.add_hline(y=mv_yoy_mean, line_color="#1f77b4", line_dash="dashdot", line_width=1.2,
-                          annotation_text=f"μ M·V={mv_yoy_mean:.2f}%", annotation_position="right",
+                          annotation_text=f"μ M·V={mv_yoy_mean:.2f}%", annotation_position="right", annotation_yshift=_sh_mv,
                           annotation_font=dict(size=9, color="#1f77b4"), **rc)
             fig.add_hline(y=pq_yoy_mean, line_color="#d62728", line_dash="dashdot", line_width=1.2,
-                          annotation_text=f"μ P·Q={pq_yoy_mean:.2f}%", annotation_position="right",
+                          annotation_text=f"μ P·Q={pq_yoy_mean:.2f}%", annotation_position="right", annotation_yshift=_sh_pq,
                           annotation_font=dict(size=9, color="#d62728"), **rc)
         else:  # cum
+            _sh_mv, _sh_pq = (7, -7) if mv_cum_mean >= pq_cum_mean else (-7, 7)
             fig.add_trace(go.Scatter(x=mv.index, y=mv.values, name="M·V CumProd",
                 line=dict(color="#1f77b4", width=2.5),
                 hovertemplate="M·V cum: %{y:.2f}%<extra></extra>"), **rc)
@@ -741,24 +746,26 @@ def make_mvpq_chart(df: pd.DataFrame, mode: str,
                 hovertemplate="P·Q cum: %{y:.2f}%<extra></extra>"), **rc)
             fig.add_hline(y=0, line_color="#999", line_dash="dot", line_width=1, **rc)
             fig.add_hline(y=mv_cum_mean, line_color="#1f77b4", line_dash="dashdot", line_width=1.2,
-                          annotation_text=f"μ M·V={mv_cum_mean:.2f}%", annotation_position="right",
+                          annotation_text=f"μ M·V={mv_cum_mean:.2f}%", annotation_position="right", annotation_yshift=_sh_mv,
                           annotation_font=dict(size=9, color="#1f77b4"), **rc)
             fig.add_hline(y=pq_cum_mean, line_color="#d62728", line_dash="dashdot", line_width=1.2,
-                          annotation_text=f"μ P·Q={pq_cum_mean:.2f}%", annotation_position="right",
+                          annotation_text=f"μ P·Q={pq_cum_mean:.2f}%", annotation_position="right", annotation_yshift=_sh_pq,
                           annotation_font=dict(size=9, color="#d62728"), **rc)
         if n == 1:
             fig.update_yaxes(title_text=_yax[_p])
         else:
             fig.update_yaxes(title_text=_yax[_p], title_font=dict(size=9), **rc)
 
+    # Niente titolo nella figura (lo dà l'intestazione HTML «MV = PQ — Teoria
+    # Quantitativa della Moneta»): la legenda sta in cima, ancorata al bordo della
+    # figura, e se andando a capo copre i titoli dei riquadri NAVBAR_JS abbassa il grafico.
     fig.update_layout(
-        title=dict(text="MV = PQ  —  M·V vs P·Q", font=dict(size=11), x=0.01),
         hovermode="closest",
         autosize=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+        legend=dict(orientation="h", yref="container", yanchor="top", y=1,
                     xanchor="left", x=0, font=dict(size=9),
                     bgcolor="rgba(255,255,255,0.8)"),
-        margin=dict(t=50, b=35, l=60, r=100),
+        margin=dict(t=50 if n > 1 else 40, b=35, l=60, r=100),
         paper_bgcolor="white", plot_bgcolor="#f8f8f8",
         barmode="overlay",
     )
@@ -2089,6 +2096,22 @@ app.index_string = ("""
 @keyframes spin {
     from { transform: rotate(0deg); }
     to   { transform: rotate(360deg); }
+}
+/* Cellulare: le righe «colonna di comandi larga 190–420 px | grafici (flex 1)» di
+   tutti i tab diventano una colonna, altrimenti ai grafici restano ~180 px e titoli,
+   legende e assi si sovrappongono. Le colonne perdono larghezza e altezza fisse. */
+@media (max-width: 900px) {
+  #main-tabs-parent div[style*="display: flex"]:has(> div[style*="min-width: 0"]):has(> div[style*="min-width: 1"], > div[style*="min-width: 2"], > div[style*="min-width: 3"], > div[style*="min-width: 4"]) {
+    flex-direction: column !important;
+  }
+  #main-tabs-parent div[style*="display: flex"]:has(> div[style*="min-width: 0"]):has(> div[style*="min-width: 1"], > div[style*="min-width: 2"], > div[style*="min-width: 3"], > div[style*="min-width: 4"]) > div {
+    width: 100% !important; min-width: 0 !important; max-width: none !important;
+    height: auto !important; border-right: none !important;
+  }
+  /* formule della Guida: le righe lunghe vanno a capo invece di allargare la pagina */
+  #main-tabs-parent pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* anni degli slider: sul cellulare uno ogni quattro (più l'ultimo), sennò si accavallano */
+  #main-tabs-parent .rc-slider-mark-text:not(:nth-child(4n+1)):not(:last-child) { display: none; }
 }
 /* embed: nasconde la barra delle tab → mostra solo la tab attiva */
 html.fred-embed #main-tabs > div:first-child { display: none !important; }
@@ -4835,7 +4858,7 @@ app.layout = html.Div([
                     dcc.Loading(type="circle", children=[
                         dcc.Graph(id="chart-mvpq",
                                   figure=empty_fig("Clicca ▶ AGGIORNA per caricare i dati"),
-                                  style={"height": "43vh", "width": "100%"},
+                                  style={"height": "43vh", "minHeight": "420px", "width": "100%"},
                                   config={"responsive": True, "scrollZoom": True}),
                     ]),
                 ], style={"flex": "1", "min-width": "0",
@@ -6747,15 +6770,17 @@ def register_shock_callbacks(app):
 
         # Marcatori eventi storici
         events_sel = events_sel or []
+        n_ev = 0   # etichette a scalini: eventi vicini non si sovrappongono
         for ev_date_str, ev_label, ev_color in SHOCK_EVENTS:
             if ev_date_str in events_sel:
                 ev_ts = pd.Timestamp(ev_date_str)
                 if start <= ev_ts <= end:
+                    n_ev += 1
                     fig.add_shape(type="line",
                                   x0=ev_date_str, x1=ev_date_str,
                                   y0=0, y1=1, yref="paper",
                                   line=dict(color=ev_color, dash="dash", width=1.5))
-                    fig.add_annotation(x=ev_date_str, y=1, yref="paper",
+                    fig.add_annotation(x=ev_date_str, y=1 - 0.065 * (n_ev - 1), yref="paper",
                                        text=ev_label, showarrow=False,
                                        xanchor="left", yanchor="top",
                                        font=dict(size=9, color=ev_color),
@@ -8882,7 +8907,7 @@ def register_new_tab_callbacks(app):
         prevent_initial_call=True,
     )
     def arima_step2(n_clicks, step1_data):
-        _err = lambda m: (None, dash.no_update, dash.no_update, dash.no_update, f"❌ {m}")
+        _err = lambda m: (None, no_update, no_update, no_update, f"❌ {m}")
         if not step1_data:
             return _err("Esegui prima il Passo ①.")
 
@@ -10755,7 +10780,6 @@ def register_new_tab_callbacks(app):
                      exp_for_reg, gap_for_reg,
                      stored, api_key):
         import statsmodels.api as sm_api
-        import warnings
         import traceback
 
         try:
@@ -11002,8 +11026,6 @@ def register_new_tab_callbacks(app):
         # Transizione: nairu_t = nairu_{t-1} + η_t        η ~ N(0,σ²_η)
         if "pi" in df.columns and "unemp" in df.columns:
             try:
-                from statsmodels.tsa.statespace.mlemodel import MLEModel
-                import statsmodels.tsa.statespace.tools as ss_tools
 
                 dpi_kf   = df["pi"].diff().dropna()
                 unemp_kf = df["unemp"].reindex(dpi_kf.index).dropna()
@@ -11597,7 +11619,6 @@ def register_new_tab_callbacks(app):
     def _pc_scatter_fig(reg_df, gap_col, exp_col, pi_pred, kappa, beta,
                          pi_star, use_gap_mode, freq):
         """Scatter π vs output gap con retta stimata e colorazione temporale."""
-        import plotly.express as px
         n = len(reg_df)
         norm_t = np.linspace(0, 1, n)
         colors = [f"rgb({int(31+165*t)},{int(119+(-80)*t)},{int(180+(-140)*t)})"
@@ -11647,7 +11668,6 @@ def register_new_tab_callbacks(app):
         """Stima GMM Galí-Gertler (1999): π_t = θ·π_{t-1} + γ·π_{t+1} + λ·mc_t + ε_t"""
         import warnings
         from statsmodels.sandbox.regression.gmm import LinearIVGMM
-        import statsmodels.api as _sm
 
         # ── sceglie il miglior proxy mc_t disponibile ─────────────────────────
         mc_col = None

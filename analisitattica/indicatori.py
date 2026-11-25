@@ -22,7 +22,6 @@ calcolano su tutta la storia fino ad A, così le finestre lunghe hanno dati già
 al primo giorno mostrato.
 """
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots

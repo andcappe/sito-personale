@@ -9,7 +9,6 @@ import pickle
 import sys
 import threading
 import os
-import base64
 from datetime import datetime
 from pathlib import Path
 
@@ -1467,7 +1466,6 @@ def _fe_current_sig(ns):
     prevent_initial_call='initial_duplicate',
 )
 def on_page_load(_):
-    import uuid as _uuid
     # Firma iniziale coerente col sync live: impedisce a fe_live_sync di ri-scrivere
     # subito i dati appena caricati (causa del doppio/triplo caricamento all'apertura).
     _sig0 = _fe_current_sig(_read_user_json())
@@ -1927,7 +1925,7 @@ def _fig_senza_portafogli():
         paper_bgcolor='white', plot_bgcolor='#f8faff',
         xaxis=dict(visible=False), yaxis=dict(visible=False),
         font=dict(family='Inter, sans-serif', color='#1a3a5c', size=11),
-        annotations=[dict(text='Nessun portafoglio: spunta almeno 2 asset in P1, P2 o P3 '
+        annotations=[dict(text='Nessun portafoglio:<br>spunta almeno 2 asset in P1, P2 o P3<br>'
                                'e premi Calcola Frontiera',
                           xref='paper', yref='paper', x=0.5, y=0.5,
                           showarrow=False, font=dict(size=13, color='#6b7a99'))])

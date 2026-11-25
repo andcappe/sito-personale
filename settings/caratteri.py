@@ -12,7 +12,8 @@ Come funziona
   quindi non serve toccare le centinaia di stili sparsi nei file app.py.
 - Il testo in `monospace` (tabelle numeriche di Macro e Valutazione) prende
   CARATTERE_NUMERI; le icone Font Awesome restano intatte.
-- `imposta_plotly()` mette lo stesso carattere come predefinito dei grafici.
+- `imposta_plotly()` mette lo stesso carattere e le dimensioni di GRAFICI come
+  predefiniti dei grafici.
 - `in_html(testo)` fa lo stesso per le pagine HTML scritte a mano (homepage, login).
 
 Per cambiare carattere: modificare CARATTERE (e, se serve, il nome su Google
@@ -49,6 +50,19 @@ FONT = {
 # Nomi degli asset nelle griglie (Analisi Portafoglio, Frontiera, Matrice
 # Correlazioni): stessa dimensione e peso ovunque; il colore lo decide ogni pagina.
 NOME_ASSET = {'fontSize': '12px', 'fontWeight': '600'}
+
+
+# Grafici Plotly (px): dimensioni predefinite di tutti i grafici del sito.
+# Valgono dove un grafico non scrive una sua dimensione: quelle scritte a mano
+# nei file app.py restano come sono.
+GRAFICI = {
+    'testo':        11,   # testo generale, annotazioni, etichette sui punti
+    'titolo':       14,   # titolo del grafico
+    'titolo_assi':  12,   # titolo degli assi x/y
+    'tacche':       11,   # numeri e date sugli assi
+    'legenda':      11,   # voci della legenda
+    'tooltip':      12,   # riquadro al passaggio del mouse
+}
 
 
 # ─── Da qui in giù non serve toccare niente ──────────────────────────────────
@@ -106,11 +120,21 @@ def installa(app) -> None:
 
 
 def imposta_plotly() -> None:
-    """Carattere predefinito dei grafici Plotly (il CSS lo impone comunque)."""
+    """Carattere e dimensioni predefinite dei grafici Plotly (dizionario GRAFICI)."""
     try:
         import plotly.io as pio
+        g = GRAFICI
         for nome in ("plotly", "plotly_white", "simple_white"):
-            if nome in pio.templates:
-                pio.templates[nome].layout.font.family = CARATTERE.replace("'", "")
+            if nome not in pio.templates:
+                continue
+            lay = pio.templates[nome].layout
+            lay.font.family = CARATTERE.replace("'", "")
+            lay.font.size = g['testo']
+            lay.title.font.size = g['titolo']
+            lay.legend.font.size = g['legenda']
+            lay.hoverlabel.font.size = g['tooltip']
+            for asse in (lay.xaxis, lay.yaxis):
+                asse.title.font.size = g['titolo_assi']
+                asse.tickfont.size = g['tacche']
     except Exception:
         pass

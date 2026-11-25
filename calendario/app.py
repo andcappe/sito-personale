@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta
 
 import plotly.graph_objects as go
 import requests
-from dash import Dash, html, dcc, Input, Output, State, ctx, no_update
+from dash import Dash, html, dcc, Input, Output, State, ctx
 
 # La cartella superiore ospita navbar.py e settings/ (import condivisi del sito)
 _PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -276,7 +276,10 @@ def timeline_fig(offices=None, period='6m'):
     oggi = date.today()
     if w0 <= oggi <= w1:
         fig.add_vline(x=oggi, line=dict(color='#16a34a', width=1.5, dash='dot'))
-        fig.add_annotation(x=oggi, y=1.03, yref='paper', text='oggi', showarrow=False,
+        # in basso dentro il grafico: in alto si sovrapponeva alle date FOMC
+        fig.add_annotation(x=oggi, y=0, yref='paper', yanchor='bottom', xanchor='left',
+                           xshift=2, text='oggi', showarrow=False,
+                           bgcolor='rgba(255,255,255,0.8)',
                            font=dict(size=10, color='#16a34a'))
 
     # un trace per tipo di evento (legenda per tipo, colore per ufficio, simbolo per tipo)

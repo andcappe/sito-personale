@@ -89,6 +89,14 @@ def _safe_load(module_name, folder):
         _tb.print_exc()
         return None
 
+# Caratteri e dimensioni dei grafici (settings/caratteri.py) prima di montare le app:
+# le figure costruite all'import prendono il template di quel momento.
+try:
+    from settings import caratteri as _car_grafici
+    _car_grafici.imposta_plotly()
+except Exception as _e:
+    print(f"⚠ [caratteri] grafici non impostati: {_e}", flush=True)
+
 portafoglio_srv = _safe_load("_app_portafoglio", "portafoglio")
 macro_srv       = _safe_load("_app_macro",       "macro")
 frontiera_srv   = _safe_load("_app_frontiera",   "frontiera-efficiente")
@@ -461,7 +469,6 @@ def _is_public(path: str) -> bool:
 # Gli stessi delle dashboard, da settings/caratteri.py (le email restano in Arial:
 # i programmi di posta non caricano i caratteri web).
 from settings import caratteri as _caratteri  # noqa: E402
-_caratteri.imposta_plotly()   # carattere predefinito dei grafici di tutte le dashboard
 _BASE_STYLE = _BASE_STYLE.replace('__CARATTERE__', _caratteri.CARATTERE)
 _LOGIN_HTML, _REGISTER_HTML, _FORGOT_HTML, _RESET_HTML, _SUSPENDED_HTML, _ADMIN_HTML_HEAD = (
     _caratteri.in_html(h.replace('__CARATTERE__', _caratteri.CARATTERE))
@@ -1007,7 +1014,7 @@ if calendario_srv:
     _register_auth(calendario_srv)
 
 # ─── Bootstrap admin di default ───────────────────────────────────────────────
-from auth import add_user as _add_user, update_user as _upd_user, list_users as _list_users, get_user as _get_user
+from auth import add_user as _add_user, update_user as _upd_user, list_users as _list_users
 _has_admin = any(u.get('role') == 'admin' for u in _list_users())
 if not _has_admin:
     _add_user(ADMIN_EMAIL, ADMIN_PASSWORD, role='admin')

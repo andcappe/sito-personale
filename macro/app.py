@@ -6,7 +6,6 @@ Navbar identica al sito portafoglio + Analisi Monetaria completa da FRED/BCE/Eur
 import atexit
 import io
 import json
-import math
 import os
 import pickle
 import threading
@@ -14,15 +13,11 @@ import urllib.request
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import numpy as np
 import pandas as pd
-import pandas.tseries.offsets as offsets
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from dash import Dash, html, dcc, Input, Output, State, ALL, callback_context, no_update
-from dash.exceptions import PreventUpdate
+from dash import Dash, html, dcc, Input, Output, State, callback_context, no_update
 
 warnings.filterwarnings("ignore")
 

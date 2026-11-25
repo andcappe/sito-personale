@@ -12,7 +12,6 @@ import os
 import sys
 import uuid
 import pickle
-import requests
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -1755,7 +1754,6 @@ def _do_gestisci_download(new_tickers, new_descr, new_valuta, start_date, userna
     asset non riscaricati. azzera_controllo: la lista è stata riscritta, i vecchi problemi
     di download nel Controllo asset non valgono più. problemi_extra: righe della lista
     non scaricate apposta (ticker già introvabili), da tenere nel Controllo asset."""
-    import shutil as _shutil
     _prima = (list(new_tickers), list(new_descr), list(new_valuta))
     new_tickers, new_descr, new_valuta, _saltati = _introvabili_filtra(
         new_tickers, new_descr, new_valuta)
