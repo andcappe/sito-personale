@@ -45,7 +45,7 @@ server = app.server
 
 app.index_string = '''<!DOCTYPE html><html>
 <head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
-<style>''' + SITE_CSS + indicatori.CSS + '''
+<style>''' + SITE_CSS + indicatori.CSS + valutazione.CSS + '''
   /* Menu «Strumenti» (come in Analisi di Portafoglio): <details> nativo; si chiude
      con un clic fuori o su una voce (script sotto). */
   .pf-strumenti { position: relative; display: inline-block; }
@@ -78,6 +78,15 @@ document.addEventListener('click', function(e){
     var dentro = d.contains(e.target);
     if (!dentro || e.target.closest('.pf-voce')) setTimeout(function(){ d.removeAttribute('open'); }, 0);
   });
+  // Valutazione sul cellulare: un grafico disegnato a sezione chiusa nasce largo 0.
+  var testa = e.target.closest && e.target.closest('.val-sezioni .nb-espandi-btn');
+  if (testa && window.Plotly) {
+    setTimeout(function(){
+      testa.parentNode.querySelectorAll('.js-plotly-plot').forEach(function(g){
+        try { Plotly.Plots.resize(g); } catch (err) {}
+      });
+    }, 60);
+  }
 });
 </script></footer></body></html>'''
 
@@ -1119,9 +1128,10 @@ _INFO_TITOLO = {'font-size': '11px', 'font-weight': '600', 'color': '#5a6b85',
 
 _INFO = {
     'tab-valutazione': ('💹 Valutazione', [
-        ('Modelli', 'DCF · DDM · Graham · P/E relativo · EV/EBITDA · heatmap di sensitività · '
+        ('Modelli', 'DCF · DDM · Graham · P/E relativo · EV/EBITDA · sensitività WACC × g (dentro DCF) · '
                     'SaaS. Dati fondamentali da Yahoo Finance, prospetti di bilancio da Alpha Vantage.'),
-        ('Simbolo', 'Ticker di Yahoo Finance, es. AAPL, ENI.MI, MC.PA.'),
+        ('Cerca titolo', 'Scrivi il nome della società o il ticker Yahoo nella casella in alto '
+                         '(es. «apple», «eni», ENI.MI), scegli dalla lista e premi ▶ Carica ticker.'),
         ('⟳ Aggiorna bilanci', 'Solo dopo una trimestrale appena uscita: costa 3 delle 25 '
                                'richieste giornaliere di Alpha Vantage.'),
         ('🎯 Valori consigliati', 'Li applica già ▶ al caricamento. Il tab 🎯 Parametri mostra '
@@ -1241,6 +1251,10 @@ def _data_toolbar():
                           'font-size': '12px', 'padding': '5px 12px', 'border': '1px solid #b8c4d4',
                           'border-radius': '4px', 'background': '#fff', 'text-decoration': 'none',
                           'white-space': 'nowrap', 'line-height': '18px'}),
+            # Valutazione: ricerca del titolo + ▶ Carica ticker (sul cellulare a capo,
+            # sotto il file aperto). Visibili solo sul sotto-tab Valutazione (at_info).
+            html.Div(id='val-a-capo', className='val-a-capo'),
+            valutazione.barra_ricerca(),
             # Menu «Strumenti»: File · Carica file · Template · Esporta dati, voci uguali.
             # Solo da PC: sul cellulare il menu Strumenti non c'è (scelta dell'utente).
             html.Details(className='pf-strumenti nb-nascondi-cell', children=[
@@ -1783,9 +1797,12 @@ app.clientside_callback(
 
 
 @app.callback(Output('at-info-corpo', 'children'), Output('at-calcola-cell', 'className'),
+              Output('val-cerca-riga', 'className'), Output('val-a-capo', 'className'),
               Input('at-tabs', 'value'))
 def at_info(tab):
-    return _info_tab(tab), ('nb-solo-cell nb-clicca' if tab == 'tab-indicatori' else 'at-via')
+    val = tab in (None, 'tab-valutazione')
+    return (_info_tab(tab), ('nb-solo-cell nb-clicca' if tab == 'tab-indicatori' else 'at-via'),
+            'val-cerca' if val else 'at-via', 'val-a-capo' if val else 'at-via')
 
 
 # ── Pannello File: toggle, lista, salva, carica, elimina ──────────────────────

@@ -1071,8 +1071,8 @@ _PE_DEF, _EV_DEF = 18.0, 11.0
 # nello slider, quindi nasce già sul suo passo e dentro i suoi estremi.
 _SLIDER_LIMITI = {
     "val-wacc":       (0.5,  4.0, 20.0),
-    "val-g1":         (0.5,  0.0, 60.0),
-    "val-g2":         (0.5,  0.0, 45.0),
+    "val-g1":         (0.5,  0.0, 200.0),
+    "val-g2":         (0.5,  0.0, 200.0),
     "val-gterm":      (0.25, 0.0,  8.75),
     "val-fcf-margin": (0.5,  1.0, 50.0),
     "val-ke":         (0.5,  4.0, 20.0),
@@ -1380,7 +1380,8 @@ def stima_crescita_flussi(righe):
     }
 
 
-def parametri_consigliati(info, fin, cf, bs, storia=None, dividendi=None):
+def parametri_consigliati(info, fin, cf, bs, storia=None, dividendi=None,
+                          cf_q=None, fin_q=None):
     """Valore di partenza di ogni slider, ricavato dai conti del titolo.
 
     Torna `{id_slider: {"v": valore, "come": spiegazione, "avviso": ...}}` più
@@ -1563,11 +1564,71 @@ def parametri_consigliati(info, fin, cf, bs, storia=None, dividendi=None):
         except Exception:
             dettaglio_marg.append(f"{m:.1f}%")
     marg = _mediana(margini)
+
+    # Margine degli ultimi 4 trimestri (TTM): gli esercizi annuali di Yahoo
+    # sono al massimo 4 e la mediana guarda indietro. Un'azienda che ha appena
+    # girato (SanDisk: tre esercizi negativi, poi +57% e TTM +60%) risultava
+    # "una che brucia cassa" anche con un flusso positivo oggi.
+    marg_ttm = None
+    try:
+        rq_fcf = _riga_bilancio(cf_q, "Free Cash Flow")
+        rq_ocf = _riga_bilancio(cf_q, "Operating Cash Flow",
+                                "Cash Flow From Continuing Operating Activities")
+        rq_cap = _riga_bilancio(cf_q, "Capital Expenditure", "Purchase Of PPE")
+        rq_rev = _riga_bilancio(fin_q, "Total Revenue", "Operating Revenue")
+        rq_int = _riga_bilancio(fin_q, "Interest Expense",
+                                "Interest Expense Non Operating")
+        if rq_rev is not None and (rq_fcf is not None or rq_ocf is not None):
+            somma_f = somma_r = 0.0
+            n = 0
+            for col in rq_rev.index:           # dal trimestre più recente
+                rv = _cella(rq_rev, col)
+                f_ = _cella(rq_fcf, col)
+                if f_ is None:
+                    a, b = _cella(rq_ocf, col), _cella(rq_cap, col)
+                    f_ = (a - abs(b)) if (a is not None and b is not None) else None
+                if rv is None or rv <= 0 or f_ is None:
+                    if n:                      # buco dopo il primo: serie non contigua
+                        break
+                    continue
+                somma_f += f_ + abs(_cella(rq_int, col) or 0.0) * (1 - aliq)
+                somma_r += rv
+                n += 1
+                if n == 4:
+                    break
+            if n == 4 and somma_r > 0:
+                marg_ttm = somma_f / somma_r * 100
+    except Exception:
+        marg_ttm = None
+    if marg_ttm is not None:
+        dettaglio_marg = dettaglio_marg + [f"ultimi 4 trimestri: {marg_ttm:.1f}%"]
     det["margini_fcf"] = dettaglio_marg
+    # Il periodo più recente: TTM se c'è, altrimenti l'ultimo esercizio.
+    marg_ult = marg_ttm if marg_ttm is not None else (margini[0] if margini else None)
+
+    if marg is not None and marg <= 0 and marg_ult is not None and marg_ult > 0:
+        # Storico misto: anni negativi e flusso positivo oggi. Si consiglia
+        # una media di ciclo (esercizi + TTM), non il solo picco recente.
+        media = sum(margini + ([marg_ttm] if marg_ttm is not None else [])) / (
+            len(margini) + (1 if marg_ttm is not None else 0))
+        scelto = media if media > 0 else marg_ult
+        _put("val-fcf-margin", scelto,
+             (f"storico misto ({' · '.join(dettaglio_marg)}): la mediana degli "
+              f"esercizi è negativa ({marg:.1f}%) ma il periodo più recente è "
+              f"positivo ({marg_ult:.1f}%), quindi il DCF si applica. "
+              + (f"Consigliata la media di tutti i periodi ({media:.1f}%), "
+                 f"un margine di ciclo" if media > 0 else
+                 f"La media dei periodi è ancora negativa ({media:.1f}%): "
+                 f"consigliato il margine più recente")
+              + f". Unlevered = FCF + oneri finanziari × (1 − {aliq*100:.0f}%)"),
+             ("l'azienda ha appena invertito la rotta: se il margine attuale "
+              f"({marg_ult:.1f}%) è la nuova normalità alza lo slider, se è un "
+              "picco di ciclo lascialo più basso"))
+        marg = scelto
     # Un'azienda che brucia cassa non ha un margine da consigliare: portarlo
     # all'1% del minimo dello slider inventerebbe un flusso positivo e il DCF
     # stamperebbe un prezzo obiettivo per una società che non ne ha uno.
-    if marg is not None and marg <= 0:
+    elif marg is not None and marg <= 0:
         out["val-fcf-margin"] = {
             "v": None,
             "come": (f"il flusso di cassa unlevered è negativo negli esercizi "
@@ -1725,7 +1786,9 @@ def _consigli_titolo(t, info):
         except Exception:
             dividendi = None
         return parametri_consigliati(info, _p("financials"), _p("cashflow"),
-                                     _p("balance_sheet"), storia, dividendi)
+                                     _p("balance_sheet"), storia, dividendi,
+                                     cf_q=_p("quarterly_cashflow"),
+                                     fin_q=_p("quarterly_financials"))
     except Exception:
         import traceback
         traceback.print_exc()
@@ -1838,6 +1901,37 @@ def _dcf_implicito(prezzo, revenue, fcf_margin, wacc, g1, g2, gterm, shares,
     return w_imp, g_imp
 
 
+# ── ricerca su Yahoo per la casella in alto ──────────────────────────────────
+_VAL_NOMI = {}            # ticker → etichetta mostrata (per tenere il nome dopo la scelta)
+_VAL_CERCA_CACHE = {}     # testo → risultati (solo quelli non vuoti)
+
+
+def _yahoo_cerca(testo):
+    """Corrispondenze di Yahoo Finance per un nome o un ticker (azioni, ETF, indici)."""
+    chiave = testo.strip().lower()
+    if chiave in _VAL_CERCA_CACHE:
+        return _VAL_CERCA_CACHE[chiave]
+    try:
+        import yfinance as yf
+        quotes = yf.Search(testo, max_results=8, news_count=0).quotes or []
+    except Exception as e:
+        print(f"[valutazione] ricerca Yahoo «{testo}» non riuscita: {e}")
+        return []
+    out = []
+    for q in quotes:
+        sym = q.get("symbol")
+        if not sym:
+            continue
+        out.append({"symbol": sym,
+                    "nome": q.get("shortname") or q.get("longname") or sym,
+                    "borsa": q.get("exchDisp") or q.get("exchange") or ""})
+    if out:
+        if len(_VAL_CERCA_CACHE) > 500:
+            _VAL_CERCA_CACHE.clear()
+        _VAL_CERCA_CACHE[chiave] = out
+    return out
+
+
 def layout():
     """Tab valutazione titolo azionario — 6 modelli + heatmap sensitività."""
 
@@ -1874,22 +1968,12 @@ def layout():
                                    "padding": "4px 8px", "border-radius": "3px",
                                    "margin-bottom": "8px"})
 
-    sidebar = html.Div([
-        html.B("🔍 Ticker", style={"font-size": "10px", "color": "#1a5276",
-                                    "background": "#eaf4fb", "display": "block",
-                                    "padding": "4px 8px", "border-radius": "3px",
-                                    "margin-bottom": "8px"}),
-        _lbl("Simbolo"),
-        _inp("val-ticker", "Ticker Yahoo Finance", "AAPL"),
-        html.Button("▶ Carica & Valuta", id="btn-run-valuation", n_clicks=0,
-                    style={"width": "100%", "margin-top": "8px",
-                           "background": "#1a3a5c", "color": "white",
-                           "border": "none", "border-radius": "6px",
-                           "padding": "8px", "font-size": "12px",
-                           "cursor": "pointer"}),
+    # La ricerca del titolo e «▶ Carica ticker» stanno nella riga in alto di
+    # Analisi Tattica (`barra_ricerca`), accanto al file aperto.
+    tuning = _sez_val("🎛 Tuning Analisi", [
         html.Div(id="val-fetch-status",
                  style={"font-size": "10px", "color": "#555",
-                        "margin-top": "6px", "white-space": "pre-wrap"}),
+                        "white-space": "pre-wrap"}),
 
         html.Button("⟳ Aggiorna bilanci", id="btn-val-av-aggiorna", n_clicks=0,
                     title="Riscarica da Alpha Vantage i tre prospetti del titolo "
@@ -1913,14 +1997,14 @@ def layout():
                            "border": "1px solid #1a3a5c", "border-radius": "6px",
                            "padding": "6px", "font-size": "11px",
                            "cursor": "pointer"}),
+    ], aperta=True)
 
-        html.Hr(style={"margin": "10px 0"}),
-
+    parametri = _sez_val("🎚 Parametri Modelli di Valutazione", [
         _grp("📉 DCF — flussi di cassa"),
         _sl("val-wacc",    4.0, 20.0, 0.5,  9.0, "WACC — tasso di sconto (%)"),
-        _sl("val-g1", 0.0, 60.0, 0.5, 12.0,
+        _sl("val-g1", 0.0, 200.0, 0.5, 12.0,
             f"Crescita anni 1-{ANNI_FASE1} (%)"),
-        _sl("val-g2", 0.0, 45.0, 0.5, 6.0,
+        _sl("val-g2", 0.0, 200.0, 0.5, 6.0,
             f"Crescita anni {ANNI_FASE1 + 1}-{ANNI_DCF} (%)"),
         # Il massimo qui sotto è solo quello di partenza: `_val_limita_gterm` lo
         # riporta sempre appena sotto il WACC, perché oltre quella soglia
@@ -1963,30 +2047,29 @@ def layout():
             persistence=True, persistence_type="session",
             labelStyle={"display": "block", "font-size": "11px",
                         "color": "#333", "margin-bottom": "4px"}),
+    ])
 
-    ], style={"width": "270px", "min-width": "270px", "padding": "14px",
-              "background": "#fafafa", "border-right": "1px solid #ddd",
-              "overflow-y": "auto", "height": "calc(100vh - 250px)",
-              "min-height": "520px"})
+    sidebar = html.Div([tuning, parametri], className="val-colonna",
+                       style={"width": "270px", "min-width": "270px", "padding": "14px",
+                              "background": "#fafafa", "border-right": "1px solid #ddd",
+                              "overflow-y": "auto", "height": "calc(100vh - 250px)",
+                              "min-height": "520px"})
 
-    results = html.Div([
+    # Sul cellulare i risultati non sono tab ma sezioni una sotto l'altra, nello
+    # stesso ordine; le riempie `_val_render` (sul computer restano vuote).
+    sezioni = html.Div(className="val-sezioni", children=[
+        _sez_val(lab, html.Div(id=f"val-sez-{val}", className="val-sez-corpo"),
+                 aperta=(val == "val-tab-summary"))
+        for lab, val in _VAL_TAB
+    ])
+
+    results = html.Div(className="val-risultati", children=[
         # `persistence` sulla sessione del browser, come lo store qui sotto: se
         # la pagina si ricarica il tab aperto resta quello, invece di riportare
         # l'utente sul Riepilogo perdendo il punto in cui era.
         dcc.Tabs(id="val-result-tabs", value="val-tab-summary",
                  persistence=True, persistence_type="session",
-                 children=[
-                     dcc.Tab(label="📊 Riepilogo",       value="val-tab-summary"),
-                     dcc.Tab(label="🎯 Parametri",        value="val-tab-parametri"),
-                     dcc.Tab(label="🏢 Bilanci",          value="val-tab-bilanci"),
-                     dcc.Tab(label="📚 Bilanci per periodo", value="val-tab-bilanci-periodi"),
-                     dcc.Tab(label="📉 DCF",              value="val-tab-dcf"),
-                     dcc.Tab(label="💰 DDM",              value="val-tab-ddm"),
-                     dcc.Tab(label="📐 Graham",           value="val-tab-graham"),
-                     dcc.Tab(label="📈 P/E & EV/EBITDA",  value="val-tab-multiples"),
-                     dcc.Tab(label="🔥 Sensitività",      value="val-tab-heatmap"),
-                     dcc.Tab(label="📱 SaaS & Growth",   value="val-tab-saas"),
-                 ],
+                 children=[dcc.Tab(label=lab, value=val) for lab, val in _VAL_TAB],
                  style={"font-size": "12px"}),
 
         dcc.Loading(
@@ -1996,7 +2079,6 @@ def layout():
                                      "height": "calc(100vh - 310px)", "min-height": "460px",
                                      "overflow-y": "auto"})),
 
-        dcc.Store(id="store-valuation", storage_type="session"),
     ], style={"flex": "1", "overflow": "hidden"})
 
     return html.Div([
@@ -2004,14 +2086,100 @@ def layout():
             html.H3("Valutazione Titolo Azionario",
                     style={"margin": "0 20px 0 0", "font-size": "15px",
                            "color": "#1a3a5c", "white-space": "nowrap"}),
-        ], style={"display": "flex", "align-items": "center",
+        ], className="nb-nascondi-cell",
+           style={"display": "flex", "align-items": "center",
                   "padding": "8px 16px", "background": "#f0f4fa",
                   "border-bottom": "1px solid #dee2e6",
                   "flex-wrap": "wrap", "gap": "8px"}),
-        html.Div([sidebar, results],
+        html.Div([sidebar, results, sezioni], className="val-corpo",
                  style={"display": "flex", "height": "calc(100vh - 250px)",
                         "min-height": "520px"}),
+        dcc.Store(id="store-valuation", storage_type="session"),
+        dcc.Store(id="val-cell"),          # True = schermo da cellulare (≤ 900 px)
     ])
+
+
+# Tab dei risultati: sul computer dcc.Tabs, sul cellulare sezioni nello stesso ordine.
+_VAL_TAB = [
+    ("📊 Riepilogo",          "val-tab-summary"),
+    ("🎯 Parametri",           "val-tab-parametri"),
+    ("🏢 Bilanci",             "val-tab-bilanci"),
+    ("📚 Bilanci per periodo", "val-tab-bilanci-periodi"),
+    ("📉 DCF",                 "val-tab-dcf"),
+    ("💰 DDM",                 "val-tab-ddm"),
+    ("📐 Graham",              "val-tab-graham"),
+    ("📈 P/E & EV/EBITDA",     "val-tab-multiples"),
+    ("📱 SaaS & Growth",       "val-tab-saas"),
+]
+# Sezioni che dipendono dagli slider dei modelli: muovendo uno slider sul
+# cellulare si ridisegnano solo queste (le altre tengono stato e scorrimento).
+_VAL_TAB_SLIDER = {"val-tab-summary", "val-tab-parametri", "val-tab-dcf", "val-tab-ddm",
+                   "val-tab-graham", "val-tab-multiples"}
+
+
+def _sez_val(titolo, corpo, aperta=False):
+    """Sul computer: gruppo della colonna laterale col suo titolo. Sul cellulare:
+    sezione espandibile (nb-espandi, apertura/chiusura in NAVBAR_JS)."""
+    return html.Div(className="nb-espandi val-sez" + (" nb-aperto" if aperta else ""), children=[
+        html.Div([titolo, html.I(className="fa-solid fa-chevron-down nb-espandi-ico")],
+                 className="nb-espandi-btn val-sez-tit"),
+        html.Div(corpo, className="nb-espandi-corpo"),
+    ])
+
+
+_VAL_CERCA_STILE = {"background": "#1a3a5c", "color": "white", "border": "none",
+                    "border-radius": "4px", "padding": "7px 12px", "font-size": "12px",
+                    "font-weight": "bold", "cursor": "pointer", "white-space": "nowrap"}
+
+
+def barra_ricerca():
+    """Casella di ricerca del titolo (nome o ticker Yahoo) + «▶ Carica ticker».
+    Sta nella riga in alto di Analisi Tattica, visibile solo sul sotto-tab Valutazione."""
+    return html.Div(id="val-cerca-riga", className="val-cerca", children=[
+        dcc.Dropdown(id="val-ticker", options=[{"label": "AAPL", "value": "AAPL"}],
+                     value="AAPL", searchable=True, clearable=False,
+                     placeholder="Nome o ticker Yahoo…",
+                     persistence=True, persistence_type="session",
+                     className="val-cerca-campo", optionHeight=44,
+                     style={"font-size": "12px"}),
+        html.Button([html.Span("▶ Carica ticker", className="nb-nascondi-cell"),
+                     html.Span("▶ Carica", className="nb-solo-cell")],
+                    id="btn-run-valuation", n_clicks=0, title="Carica ticker",
+                    style=_VAL_CERCA_STILE),
+    ])
+
+
+# CSS del tab (aggiunto all'index_string di Analisi Tattica).
+CSS = """
+  .val-cerca { display: flex; align-items: center; gap: 6px; flex: 0 1 460px; min-width: 0; }
+  .val-cerca > div:first-child { flex: 1 1 auto; min-width: 0; }
+  .val-a-capo { display: none; }
+  .val-sezioni { display: none; }
+  .val-sez-tit { font-size: 10px; font-weight: 700; color: #1a5276; background: #eaf4fb;
+    padding: 4px 8px; border-radius: 3px; margin-bottom: 8px; }
+  .val-colonna .val-sez + .val-sez { margin-top: 12px; }
+  @media (max-width: 900px) {
+    .val-cerca { flex: 1 1 0; gap: 4px; }
+    .val-cerca .Select-control, .val-cerca .Select-value-label,
+    .val-cerca .Select-placeholder { font-size: 11px !important; }
+    .val-cerca > button { padding: 7px 8px !important; }
+    .val-corpo { flex-direction: column !important; height: auto !important;
+      min-height: 0 !important; }
+    .val-colonna { width: auto !important; min-width: 0 !important; height: auto !important;
+      min-height: 0 !important; overflow: visible !important; border-right: none !important;
+      padding: 0 !important; background: none !important; display: flex;
+      flex-direction: column; gap: 8px; }
+    .val-colonna .val-sez + .val-sez { margin-top: 0; }
+    .val-risultati { display: none !important; }
+    .val-sezioni { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+    .val-sez { border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc;
+      padding: 8px 12px; }
+    .val-sez-tit { font-size: 12px; color: #1a3a5c; background: none; padding: 4px 0;
+      margin-bottom: 0; border-radius: 0; }
+    .val-sez-corpo { overflow-x: auto; background: #fff; }
+    .val-sez-corpo:empty { display: none; }
+  }
+"""
 
 
 def register_callbacks(app):
@@ -2282,7 +2450,7 @@ def register_callbacks(app):
             d = {}
         ticker = (d.get("ticker") or "").strip().upper()
         if not ticker:
-            return "⚠ Prima carica un titolo con ▶ Carica & Valuta.", no_update
+            return "⚠ Prima carica un titolo con ▶ Carica ticker.", no_update
 
         trascorso = time.time() - _AV_FORZATO.get(ticker, 0)
         if trascorso < _AV_FORZA_OGNI:
@@ -2340,56 +2508,43 @@ def register_callbacks(app):
                                    "padding": "16px"})
 
     # ── ricalcolo: ogni slider rifà i conti sul dato già in memoria ───────────
-    @app.callback(
-        Output("val-tab-content", "children"),
-        Input("store-valuation",  "data"),
-        Input("val-result-tabs",  "value"),
-        Input("val-wacc",         "value"),
-        Input("val-g1",           "value"),
-        Input("val-g2",           "value"),
-        Input("val-gterm",        "value"),
-        Input("val-fcf-margin",   "value"),
-        Input("val-pe-sector",    "value"),
-        Input("val-ev-ebitda",    "value"),
-        Input("val-ke",           "value"),
-        Input("val-ddm-g",        "value"),
-        Input("val-graham-g",     "value"),
-        Input("val-bond-yield",   "value"),
-        Input("val-bilanci-modo", "value"),
-        Input("val-av-agg",       "data"),
-    )
-    def _val_render(stored, active_tab, wacc, g1, g2, gterm, fcf_margin,
-                    pe_sector, ev_ebitda_mult, ke, ddm_g, graham_g, bond_yield,
-                    bilanci_modo, _agg):
+    # Sul computer il contenuto va nel tab aperto (`val-tab-content`); sul
+    # cellulare (`val-cell`) ogni tab è una sezione `val-sez-<tab>` e si
+    # costruiscono tutte. Uno solo dei due lati è pieno, l'altro è vuoto: così
+    # i controlli di «Bilanci per periodo» (val-bp-*) non sono mai doppi.
+    # Le sezioni sono divise in due callback: quelle che dipendono dagli slider
+    # (`_val_render`) e quelle che non ne dipendono (`_val_render_dati`:
+    # Bilanci, Bilanci per periodo, SaaS). In uno solo, il ricalcolo completo
+    # dopo ▶ (lento: Alpha Vantage) era ancora in volo quando i valori
+    # consigliati muovevano gli slider; Dash tiene solo l'ultima risposta, che
+    # ridisegnava le sezioni degli slider e lasciava vuote le altre.
+    def _val_dati(stored):
         import json
-
         if not stored:
-            return html.Div("Inserisci un ticker e clicca ▶ Carica & Valuta.",
-                            style={"padding": "40px", "color": "#888",
-                                   "text-align": "center", "font-size": "14px"})
+            return None
         try:
-            d = json.loads(stored) if isinstance(stored, str) else stored
+            return json.loads(stored) if isinstance(stored, str) else stored
         except Exception:
-            return html.Div("Dati non leggibili: ricarica il titolo.",
-                            style={"padding": "40px", "color": "#888",
-                                   "text-align": "center", "font-size": "14px"})
+            return None
 
-        # `or` non va bene: 0 è un valore legittimo per le crescite.
-        def _n(v, dflt):
-            return float(dflt if v is None else v)
+    def _val_avviso(testo):
+        return html.Div(testo, style={"padding": "40px", "color": "#888",
+                                      "text-align": "center", "font-size": "14px"})
 
-        # Senza questa rete di protezione un errore di calcolo lascia il
-        # pannello con il contenuto del tab precedente e il click sembra non
-        # aver fatto nulla: meglio dire cosa è andato storto.
+    # Senza questa rete di protezione un errore di calcolo lascia il
+    # pannello con il contenuto del tab precedente e il click sembra non
+    # aver fatto nulla: meglio dire cosa è andato storto.
+    def _val_costruisci(d, tab, par, cell=False):
+        # La sensitività WACC × tasso finale è del DCF: sta sotto il DCF, non
+        # in un tab suo (un tab "val-tab-heatmap" rimasto nella sessione del
+        # browser la mostra ancora da sola, invece di una pagina vuota).
+        if tab == "val-tab-dcf":
+            return html.Div([_val_costruisci(d, "val-tab-dcf-solo", par, cell),
+                             _val_costruisci(d, "val-tab-heatmap", par, cell)])
+        if tab == "val-tab-dcf-solo":
+            tab = "val-tab-dcf"
         try:
-            return _val_build_content(
-                d, active_tab,
-                _n(wacc, 9.0) / 100, _n(g1, 12.0) / 100,
-                _n(g2, 6.0) / 100, _n(gterm, 2.5) / 100,
-                _n(fcf_margin, 15.0) / 100, _n(pe_sector, 22.0),
-                _n(ev_ebitda_mult, 12.0), _n(ke, 10.0) / 100,
-                _n(ddm_g, 2.5) / 100, _n(graham_g, 8.0),
-                _n(bond_yield, 4.5) / 100, bilanci_modo or "ttm")
+            return _val_build_content(d, tab, *par, cell=bool(cell))
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -2405,6 +2560,145 @@ def register_callbacks(app):
                       "background": "#fdf2f0", "border": "1px solid #f0c8c0",
                       "border-radius": "6px", "margin": "20px"})
 
+    _SEZ_SLIDER = [v for _l, v in _VAL_TAB if v in _VAL_TAB_SLIDER]
+    _SEZ_DATI = [v for _l, v in _VAL_TAB if v not in _VAL_TAB_SLIDER]
+
+    @app.callback(
+        Output("val-tab-content", "children"),
+        [Output(f"val-sez-{v}", "children") for v in _SEZ_SLIDER],
+        Input("store-valuation",  "data"),
+        Input("val-result-tabs",  "value"),
+        Input("val-wacc",         "value"),
+        Input("val-g1",           "value"),
+        Input("val-g2",           "value"),
+        Input("val-gterm",        "value"),
+        Input("val-fcf-margin",   "value"),
+        Input("val-pe-sector",    "value"),
+        Input("val-ev-ebitda",    "value"),
+        Input("val-ke",           "value"),
+        Input("val-ddm-g",        "value"),
+        Input("val-graham-g",     "value"),
+        Input("val-bond-yield",   "value"),
+        Input("val-bilanci-modo", "value"),
+        Input("val-av-agg",       "data"),
+        Input("val-cell",         "data"),
+    )
+    def _val_render(stored, active_tab, wacc, g1, g2, gterm, fcf_margin,
+                    pe_sector, ev_ebitda_mult, ke, ddm_g, graham_g, bond_yield,
+                    bilanci_modo, _agg, cell):
+        from dash import ctx
+
+        n_sez = len(_SEZ_SLIDER)
+        trig = ctx.triggered_id
+        pulisci = trig in (None, "val-cell", "store-valuation")
+
+        d = _val_dati(stored)
+        if d is None:
+            testo = ("Cerca un titolo in alto e premi ▶ Carica ticker." if not stored
+                     else "Dati non leggibili: ricarica il titolo.")
+            if cell:
+                return [None] + [_val_avviso(testo) if v == "val-tab-summary" else None
+                                 for v in _SEZ_SLIDER]
+            return [_val_avviso(testo)] + ([None] * n_sez if pulisci else [no_update] * n_sez)
+
+        # `or` non va bene: 0 è un valore legittimo per le crescite.
+        def _n(v, dflt):
+            return float(dflt if v is None else v)
+
+        par = (_n(wacc, 9.0) / 100, _n(g1, 12.0) / 100,
+               _n(g2, 6.0) / 100, _n(gterm, 2.5) / 100,
+               _n(fcf_margin, 15.0) / 100, _n(pe_sector, 22.0),
+               _n(ev_ebitda_mult, 12.0), _n(ke, 10.0) / 100,
+               _n(ddm_g, 2.5) / 100, _n(graham_g, 8.0),
+               _n(bond_yield, 4.5) / 100, bilanci_modo or "ttm")
+
+        if not cell:
+            return ([_val_costruisci(d, active_tab, par)]
+                    + ([None] * n_sez if pulisci else [no_update] * n_sez))
+
+        # Cellulare: il tab scelto sul computer non conta; la base dei bilanci
+        # e l'aggiornamento di Alpha Vantage toccano solo l'altro callback.
+        if trig in ("val-result-tabs", "val-bilanci-modo", "val-av-agg"):
+            return [no_update] * (n_sez + 1)
+        return [None if pulisci else no_update] + [_val_costruisci(d, v, par, cell)
+                                                   for v in _SEZ_SLIDER]
+
+    @app.callback(
+        [Output(f"val-sez-{v}", "children") for v in _SEZ_DATI],
+        Input("store-valuation",  "data"),
+        Input("val-bilanci-modo", "value"),
+        Input("val-av-agg",       "data"),
+        Input("val-cell",         "data"),
+    )
+    def _val_render_dati(stored, bilanci_modo, _agg, cell):
+        from dash import ctx
+        trig = ctx.triggered_id
+        d = _val_dati(stored)
+        if not cell or d is None:
+            return [None] * len(_SEZ_DATI)
+        # Questi tab non leggono gli slider: bastano i valori di partenza.
+        par = (0.09, 0.12, 0.06, 0.025, 0.15, 22.0, 12.0, 0.10, 0.025, 8.0, 0.045,
+               bilanci_modo or "ttm")
+        return [_val_costruisci(d, v, par)
+                if (trig != "val-bilanci-modo" or v == "val-tab-bilanci") else no_update
+                for v in _SEZ_DATI]
+
+    # ── modo cellulare: lo decide la larghezza della finestra ─────────────────
+    app.clientside_callback(
+        """
+        function(_id) {
+            var cell = function () { return window.innerWidth <= 900; };
+            if (!window._valCellAscolta) {
+                window._valCellAscolta = true;
+                var ultimo = cell();
+                window.addEventListener('resize', function () {
+                    var ora = cell();
+                    if (ora !== ultimo && window.dash_clientside && dash_clientside.set_props) {
+                        ultimo = ora;
+                        dash_clientside.set_props('val-cell', {data: ora});
+                    }
+                });
+            }
+            return cell();
+        }
+        """,
+        Output("val-cell", "data"),
+        Input("val-cell", "id"),
+    )
+
+    # ── ricerca del titolo su Yahoo (nome o ticker) ───────────────────────────
+    @app.callback(
+        Output("val-ticker", "options"),
+        Input("val-ticker",  "search_value"),
+        State("val-ticker",  "value"),
+        State("val-ticker",  "options"),
+    )
+    def _val_cerca(testo, valore, opzioni):
+        import re
+        # L'opzione scelta resta sempre fra le opzioni, altrimenti Dash la toglie.
+        attuale = []
+        if valore:
+            et = _VAL_NOMI.get(valore) or next(
+                (o.get("label") for o in (opzioni or []) if o.get("value") == valore), valore)
+            _VAL_NOMI.setdefault(valore, et)
+            attuale = [{"label": et, "value": valore, "search": f"{valore} {et}"}]
+        testo = (testo or "").strip()
+        if not testo:
+            return attuale if attuale != (opzioni or []) else no_update
+        if len(testo) < 2:
+            return no_update
+        trovati = []
+        for q in _yahoo_cerca(testo):
+            sym = q["symbol"]
+            et = f"{sym} — {q['nome']}" + (f" · {q['borsa']}" if q["borsa"] else "")
+            _VAL_NOMI[sym] = et
+            trovati.append({"label": et, "value": sym, "search": f"{testo} {et}"})
+        su = testo.upper()
+        if re.fullmatch(r"[A-Z0-9.\-=^]{1,15}", su) and su not in {o["value"] for o in trovati}:
+            trovati.append({"label": f"🔎 {su} — usa come ticker", "value": su,
+                            "search": f"{testo} {su}"})
+        vista = {o["value"] for o in trovati}
+        return trovati + [o for o in attuale if o["value"] not in vista]
 
     def _val_fmt_num(v, decimals=2, suffix=""):
         """Formatta numero grande in M/B."""
@@ -2502,8 +2796,8 @@ def register_callbacks(app):
             },
             number={"suffix": "", "valueformat": ".1f"}
         ))
-        fig_r40.update_layout(margin=dict(t=40, b=10, l=20, r=20),
-                               paper_bgcolor="white", height=200)
+        fig_r40.update_layout(margin=dict(t=40, b=10, l=40, r=40),
+                               paper_bgcolor="white", height=240)
 
         # ── Radar dei margini ─────────────────────────────────────────────────
         categories = ["Gross Margin", "EBITDA Margin", "Op. Margin",
@@ -2522,11 +2816,21 @@ def register_callbacks(app):
             line_color="#1f77b4",
             fillcolor="rgba(31,119,180,0.2)",
             name="Profilo"))
+        # Scala fino al valore più alto (una crescita del 378% usciva dal
+        # grafico, fermo a 100) e margini larghi per le etichette dei raggi.
+        _r_max = max([100.0] + [v for v in values_radar if v is not None]) * 1.05
+        _r_min = min([-10.0] + [v for v in values_radar if v is not None])
+        fig_radar.update_traces(
+            text=[f"{v:.1f}%" for v in values_radar] + [f"{values_radar[0]:.1f}%"],
+            hovertemplate="%{theta}: %{text}<extra></extra>")
         fig_radar.update_layout(
-            polar=dict(radialaxis=dict(visible=True, range=[-10, 100])),
-            title=dict(text="Profilo dei margini (%)", font=dict(size=11)),
-            margin=dict(t=40, b=10, l=40, r=40),
-            paper_bgcolor="white", height=280)
+            polar=dict(radialaxis=dict(visible=True, range=[_r_min, _r_max],
+                                       tickfont=dict(size=9), angle=90,
+                                       tickangle=90),
+                       angularaxis=dict(tickfont=dict(size=11))),
+            title=dict(text="Profilo dei margini (%)", font=dict(size=12)),
+            margin=dict(t=50, b=40, l=80, r=80),
+            paper_bgcolor="white", height=340)
 
         # ── P/S & EV/Rev benchmark ────────────────────────────────────────────
         # Benchmarks SaaS 2025-2026 (normalizzati dopo il de-rating post-2021)
@@ -2621,7 +2925,7 @@ def register_callbacks(app):
                         f"({rev_growth*100:.1f}% crescita + {ebitda_margins*100:.1f}% EBITDA margin)",
                         style={"textAlign": "center", "color": r40_col,
                                "fontWeight": "bold", "fontSize": "12px",
-                               "marginTop": "-8px"}),
+                               "margin": "6px 0 0"}),
                 ], style={"flex": "1", "minWidth": "220px"}),
 
                 # Radar margini
@@ -2716,8 +3020,11 @@ def register_callbacks(app):
     def _val_build_content(d, active_tab, wacc, g1, g2, gterm,
                             fcf_margin, pe_sector, ev_mult, ke,
                             ddm_g, graham_g_pct, bond_yield,
-                            bilanci_modo="ttm"):
-        """Renderizza il tab attivo con i dati fondamentali d."""
+                            bilanci_modo="ttm", cell=False):
+        """Renderizza il tab attivo con i dati fondamentali d.
+
+        `cell` = schermo stretto: alcuni grafici cambiano forma (barre
+        orizzontali al posto di quelle verticali, le etichette non ci stanno)."""
         import plotly.graph_objects as go
 
         price    = d.get("price", 0) or 0
@@ -3061,22 +3368,55 @@ def register_callbacks(app):
                 colors.append("#2ca02c" if v and v > price else "#d62728")
             colors.append("#1f77b4")
 
-            fig_bar = go.Figure(go.Bar(
-                x=labels, y=values,
-                marker_color=colors,
-                text=[f"{v:.1f}" if v else "" for v in values],
-                textposition="outside",
-            ))
-            fig_bar.add_hline(y=price, line_color="#333", line_dash="dash",
-                               line_width=2,
-                               annotation_text=f"Prezzo corrente {price:.2f}")
-            fig_bar.update_layout(
-                title=dict(text=f"{name} — Fair Value per modello vs prezzo corrente ({currency})",
-                           font=dict(size=12)),
-                yaxis_title=f"Prezzo ({currency})",
-                margin=dict(t=50, b=40, l=55, r=20),
-                paper_bgcolor="white", plot_bgcolor="#f8f8f8",
-                showlegend=False)
+            # Grafico grande: etichette su due righe (si leggono anche sul
+            # telefono senza ruotarle), valori sopra le barre, spazio in alto
+            # perché il testo "outside" non venga tagliato.
+            # Sul cellulare barre orizzontali (nomi a sinistra, in ordine dall'alto).
+            _ymax = max([v for v in values if v] + [price]) if values else price
+            _testi = [f"{v:,.2f}" if v else "" for v in values]
+            if cell:
+                fig_bar = go.Figure(go.Bar(
+                    y=labels, x=values, orientation="h",
+                    marker_color=colors, text=_testi,
+                    textposition="outside", cliponaxis=False,
+                    textfont=dict(size=13, color="#1a3a5c"),
+                    hovertemplate="%{y}: %{x:,.2f} " + currency + "<extra></extra>",
+                ))
+                fig_bar.add_vline(x=price, line_color="#888", line_dash="dash",
+                                   line_width=2, layer="below")
+                fig_bar.update_layout(
+                    title=dict(text=f"Fair Value per modello ({currency})",
+                               font=dict(size=14), x=0, xanchor="left"),
+                    xaxis=dict(range=[0, _ymax * 1.28], tickfont=dict(size=11)),
+                    yaxis=dict(autorange="reversed", tickfont=dict(size=12),
+                               automargin=True),
+                    bargap=0.3,
+                    margin=dict(t=40, b=30, l=10, r=10),
+                    paper_bgcolor="white", plot_bgcolor="#f8f8f8",
+                    showlegend=False)
+            else:
+                fig_bar = go.Figure(go.Bar(
+                    x=[l.replace(" ", "<br>", 1) for l in labels], y=values,
+                    marker_color=colors, text=_testi,
+                    textposition="outside", cliponaxis=False,
+                    textfont=dict(size=14, color="#1a3a5c"),
+                    hovertemplate="%{x}: %{y:,.2f} " + currency + "<extra></extra>",
+                ))
+                fig_bar.add_hline(y=price, line_color="#333", line_dash="dash",
+                                   line_width=2,
+                                   annotation_text=f"Prezzo {price:,.2f}",
+                                   annotation_position="top left",
+                                   annotation_font=dict(size=12))
+                fig_bar.update_layout(
+                    title=dict(text=f"{name} — Fair Value per modello ({currency})",
+                               font=dict(size=15), x=0, xanchor="left"),
+                    yaxis=dict(title=f"Prezzo ({currency})", range=[0, _ymax * 1.15],
+                               tickfont=dict(size=12)),
+                    xaxis=dict(tickangle=0, tickfont=dict(size=12), automargin=True),
+                    bargap=0.25,
+                    margin=dict(t=50, b=20, l=55, r=10),
+                    paper_bgcolor="white", plot_bgcolor="#f8f8f8",
+                    showlegend=False)
 
             return html.Div([
                 html.Div([
@@ -3126,7 +3466,8 @@ def register_callbacks(app):
                            "margin-bottom": "20px"}),
 
                 html.Hr(),
-                dcc.Graph(figure=fig_bar, style={"height": "320px"},
+                dcc.Graph(figure=fig_bar, responsive=True,
+                          style={"height": "440px" if cell else "560px", "width": "100%"},
                           config={"displayModeBar": False}),
             ], style={"padding": "14px 16px 30px"})
 
@@ -3627,7 +3968,7 @@ def register_callbacks(app):
             if not sugg:
                 return html.Div(
                     "I valori consigliati si calcolano quando carichi il titolo: "
-                    "premi ▶ Carica & Valuta.",
+                    "premi ▶ Carica ticker.",
                     style={"padding": "40px", "color": "#888",
                            "text-align": "center", "font-size": "13px"})
             det = sugg.get("_det") or {}
@@ -3887,26 +4228,54 @@ def register_callbacks(app):
             yrs  = [r[0] for r in fcf_rows]
             pvs  = [r[3] for r in fcf_rows]
             cols = ["#1f77b4" if yr <= ANNI_FASE1 else "#ff7f0e" for yr in yrs]
-            fig_dcf = go.Figure()
+            # Due riquadri con scale proprie: il Terminal Value vale spesso più
+            # di tutti i flussi insieme e, sullo stesso asse, li schiacciava a
+            # zero. A sinistra i flussi anno per anno, a destra il TV.
+            from plotly.subplots import make_subplots
+
+            def _spazio(vals):
+                vals = [v for v in vals if v is not None] or [0]
+                top, bot = max(vals + [0]), min(vals + [0])
+                pad = (top - bot) * 0.15 or 1
+                return [bot - (pad if bot < 0 else 0), top + pad]
+
+            _quota_tv = (pv_tv / dcf_ev * 100) if dcf_ev else None
+            fig_dcf = make_subplots(
+                rows=1, cols=2, column_widths=[0.75, 0.25] if cell else [0.8, 0.2],
+                horizontal_spacing=0.12 if cell else 0.07,
+                subplot_titles=(
+                    "FCF scontati" if cell else "FCF scontati, anno per anno",
+                    ("TV" if cell else "Terminal Value")
+                    + (f"<br>{_quota_tv:.0f}%" + ("" if cell else " del valore")
+                       if _quota_tv is not None else "")))
             fig_dcf.add_trace(go.Bar(
-                x=[f"Anno {y}" for y in yrs], y=pvs,
+                x=[str(y) if cell else f"Anno {y}" for y in yrs], y=pvs,
                 marker_color=cols,
                 name="PV FCF",
                 text=[_val_fmt_num(p) for p in pvs],
-                textposition="outside"))
+                textposition="outside", cliponaxis=False,
+                textfont=dict(size=10 if cell else 12),
+                hovertemplate="Anno %{x}: %{y:,.0f}<extra></extra>"), row=1, col=1)
             fig_dcf.add_trace(go.Bar(
-                x=["Terminal Value"], y=[pv_tv],
+                x=["TV"], y=[pv_tv],
                 marker_color="#9467bd",
                 name="PV Terminal Value",
                 text=[_val_fmt_num(pv_tv)],
-                textposition="outside"))
+                textposition="outside", cliponaxis=False,
+                textfont=dict(size=10 if cell else 12),
+                hovertemplate="Terminal Value: %{y:,.0f}<extra></extra>"), row=1, col=2)
+            fig_dcf.update_yaxes(range=_spazio(pvs), tickfont=dict(size=10),
+                                 title_text=currency, row=1, col=1)
+            fig_dcf.update_yaxes(range=_spazio([pv_tv]), tickfont=dict(size=10),
+                                 row=1, col=2)
+            fig_dcf.update_xaxes(tickangle=0, tickfont=dict(size=11),
+                                 title_text="Anno" if cell else None, row=1, col=1)
+            fig_dcf.update_xaxes(tickfont=dict(size=11), row=1, col=2)
+            fig_dcf.update_annotations(font=dict(size=12 if cell else 13))
             fig_dcf.update_layout(
-                title=dict(text="Valore Attuale dei FCF per anno + Terminal Value",
-                           font=dict(size=11)),
-                yaxis_title=currency,
-                margin=dict(t=45, b=30, l=55, r=20),
-                paper_bgcolor="white", plot_bgcolor="#f8f8f8",
-                legend=dict(orientation="h", y=1.04, x=0, font=dict(size=9)))
+                bargap=0.25, showlegend=False,
+                margin=dict(t=60, b=30, l=55 if not cell else 45, r=10),
+                paper_bgcolor="white", plot_bgcolor="#f8f8f8")
 
             return html.Div([
                 html.H4(f"DCF — {ANNI_DCF} anni ({ANNI_FASE1} a g1 + {ANNI_FASE2} a g2) "
@@ -4050,8 +4419,8 @@ def register_callbacks(app):
                             html.P([html.B("Note: "),
                                     "Il DCF è molto sensibile a WACC e tasso finale: con "
                                     f"{ANNI_DCF} anni espliciti la perpetuità pesa da sola "
-                                    "la maggior parte del fair value. Usa la tab Sensitività "
-                                    "per vedere l'intervallo al variare di WACC e g."],
+                                    "la maggior parte del fair value. La sensitività qui sotto "
+                                    "mostra l'intervallo al variare di WACC e g."],
                                    style={"font-size": "11px", "color": "#888",
                                           "line-height": "1.5", "margin-top": "10px"}),
                         ]),
@@ -4061,7 +4430,9 @@ def register_callbacks(app):
                            "gap": "12px", "margin": "14px 0"}),
 
                 html.Hr(),
-                dcc.Graph(figure=fig_dcf, style={"height": "320px"},
+                dcc.Graph(figure=fig_dcf, responsive=True,
+                          style={"height": "420px" if cell else "480px",
+                                 "width": "100%"},
                           config={"displayModeBar": False}),
             ], style={"padding": "14px 16px 30px"})
 
@@ -4399,17 +4770,21 @@ def register_callbacks(app):
                 text=[["n.d." if v is None else f"{v:+.0f}%" for v in row]
                       for row in z_pct],
                 texttemplate="%{text}",
+                textfont=dict(size=9 if cell else 11),
+                showscale=not cell,
                 colorbar=dict(title="Upside/Downside %",
                               tickfont=dict(size=9))))
-            # Marca il punto corrente (WACC e gterm degli slider)
             fig_heat.update_layout(
                 title=dict(
-                    text=f"DCF Sensitività — Upside/Downside% vs Prezzo {price:.2f} {currency}  "
-                         f"[FCF margin={fcf_m*100:.1f}%, g1={g1*100:.1f}%, g2={g2*100:.1f}%]",
-                    font=dict(size=11)),
+                    text=(f"Upside/Downside % vs prezzo {price:.2f} {currency}"
+                          if cell else
+                          f"Upside/Downside % vs prezzo {price:.2f} {currency}  "
+                          f"[FCF margin {fcf_m*100:.1f}%, g1 {g1*100:.1f}%, "
+                          f"g2 {g2*100:.1f}%]"),
+                    font=dict(size=12), x=0, xanchor="left"),
                 xaxis_title="Tasso finale g",
                 yaxis_title="WACC",
-                margin=dict(t=55, b=40, l=65, r=20),
+                margin=dict(t=45, b=45, l=55, r=10),
                 paper_bgcolor="white")
 
             # Secondo heatmap: prezzo assoluto
@@ -4421,18 +4796,20 @@ def register_callbacks(app):
                 text=[["n.d." if v is None else f"{v:.1f}" for v in row]
                       for row in z_vals],
                 texttemplate="%{text}",
+                textfont=dict(size=9 if cell else 11),
+                showscale=not cell,
                 colorbar=dict(title=f"Fair Value ({currency})",
                               tickfont=dict(size=9))))
             fig_heat2.update_layout(
-                title=dict(text=f"DCF Fair Value assoluto ({currency})",
-                           font=dict(size=11)),
+                title=dict(text=f"Fair Value DCF ({currency})",
+                           font=dict(size=12), x=0, xanchor="left"),
                 xaxis_title="Tasso finale g",
                 yaxis_title="WACC",
-                margin=dict(t=45, b=40, l=65, r=20),
+                margin=dict(t=45, b=45, l=55, r=10),
                 paper_bgcolor="white")
 
             return html.Div([
-                html.H4("Analisi di Sensitività DCF — WACC × tasso finale",
+                html.H4("🔥 Sensitività del DCF — WACC × tasso finale",
                         style={"font-size": "14px", "margin": "0 0 6px",
                                "color": "#1a3a5c", "border-bottom": "2px solid #1a3a5c",
                                "padding-bottom": "6px"}),
@@ -4441,10 +4818,12 @@ def register_callbacks(app):
                        "del DCF per quella combinazione di WACC e g terminale.",
                        style={"font-size": "11px", "color": "#666",
                               "margin": "0 0 12px"}),
-                dcc.Graph(figure=fig_heat, style={"height": "360px"},
+                dcc.Graph(figure=fig_heat, responsive=True,
+                          style={"height": "440px", "width": "100%"},
                           config={"displayModeBar": False}),
                 html.Hr(style={"margin": "16px 0"}),
-                dcc.Graph(figure=fig_heat2, style={"height": "320px"},
+                dcc.Graph(figure=fig_heat2, responsive=True,
+                          style={"height": "440px", "width": "100%"},
                           config={"displayModeBar": False}),
             ], style={"padding": "14px 16px 30px"})
 

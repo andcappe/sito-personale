@@ -980,6 +980,8 @@ ADL_USA_SERIES = {
     "UNRATE":     ("Disoccupazione USA (%)",       "M"),
     "CPIAUCSL":   ("CPI USA (indice)",             "M"),
     "CPILFESL":   ("Core CPI USA (indice)",        "M"),
+    "PCEPI":      ("PCE USA (indice prezzi)",      "M"),
+    "PCEPILFE":   ("Core PCE USA (indice prezzi)", "M"),
     "M2SL":       ("M2 USA (mld $)",              "M"),
     "FEDFUNDS":   ("Fed Funds Rate (%)",           "M"),
     # Tassi (giornalieri → mensile)
