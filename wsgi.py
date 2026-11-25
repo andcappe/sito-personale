@@ -237,7 +237,7 @@ __STYLE__
   <div class="card">
     <div class="logo">
       <h1>A·C Dashboard</h1>
-      <p>Analisi Rischi di Portafoglio</p>
+      <p>Analisi Strategica di Portafoglio</p>
     </div>
     __MSG__
     <form method="post">

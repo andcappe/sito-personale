@@ -1293,7 +1293,14 @@ def _build_macro_cache(reason='schedulato', solo=None):
                   f"precedente ({_motivo})", flush=True)
         data = merged
 
-        blob = {'data': data, 'ts': _t.time()}
+        # Un completamento parziale (solo=…) NON rinfresca l'età della cache: gli
+        # altri dataset restano vecchi come prima. Rimettere ts = adesso faceva
+        # sembrare fresca una cache ferma da mesi (ADL con CPI a luglio a fine
+        # novembre) e il rebuild completo dopo 7 giorni non partiva più.
+        _ts = _t.time()
+        if solo is not None and _MACRO_CACHE_TS:
+            _ts = _MACRO_CACHE_TS
+        blob = {'data': data, 'ts': _ts}
         try:
             os.makedirs(_MACRO_CACHE_DIR, exist_ok=True)
             _tmp = _MACRO_CACHE_F + '.tmp'
@@ -3466,6 +3473,106 @@ def _arima_tab_layout():
 
 
 # =============================================================================
+# ── Previsione ADL: mese successivo + cono dei mesi dopo ─────────────────────
+_ADL_ORIZZONTE = 12   # periodi previsti dopo l'ultimo dato
+
+def _adl_passo(idx):
+    """Passo della serie (mensile, trimestrale…) dalla distanza mediana fra le date."""
+    gg = float(np.median(np.diff(idx.values).astype("timedelta64[D]").astype(float))) if len(idx) > 1 else 30
+    if 25 <= gg <= 35:
+        return pd.DateOffset(months=1)
+    if 85 <= gg <= 95:
+        return pd.DateOffset(months=3)
+    if 360 <= gg <= 370:
+        return pd.DateOffset(years=1)
+    return pd.Timedelta(days=max(1, round(gg)))
+
+
+def _adl_previsione(fig, model, y_series, origine, X_src, H=_ADL_ORIZZONTE):
+    """Aggiunge a `fig` la previsione ricorsiva del modello dopo `origine` (ultimo
+    periodo stimato): punto del periodo successivo + cono al 68% e 95%.
+    - Y ritardata: dato reale fino all'origine, poi la previsione dei passi prima.
+    - X: dato reale se c'è — i ritardi già stimati e le X uscite dopo l'ultima Y
+      (Y pubblicata in ritardo: CPI a giugno, Brent a settembre) — altrimenti
+      l'ultimo valore resta costante. Dummy a 0.
+    - Cono: varianza dell'errore di previsione σ²·Σψᵢ², con ψ dai coefficienti AR
+      (incertezza dei parametri e delle X future non inclusa)."""
+    try:
+        par = model.params
+        y_hist = list(y_series.loc[:origine].values.astype(float))
+        n0 = len(y_hist)                       # posizione del primo periodo previsto
+        passo = _adl_passo(y_series.index)
+        date = [origine + passo * (h + 1) for h in range(H)]
+
+        def _x_val(serie, lag, h, oltre):
+            quando = origine + passo * (h + 1 - lag)
+            if quando <= origine:                       # lag: dato già nella stima
+                return float(serie.loc[:quando].dropna().iloc[-1])
+            if oltre is not None:                       # X uscita dopo l'ultima Y
+                o = oltre.loc[:quando].dropna()
+                if len(o):
+                    return float(o.iloc[-1])            # oltre la sua fine: ultimo valore
+            return float(serie.loc[:origine].dropna().iloc[-1])
+
+        prev = []
+        for h in range(H):
+            v = 0.0
+            for nome, b in par.items():
+                if nome == "const":
+                    v += b
+                elif nome in X_src:
+                    serie, lag, oltre = X_src[nome]
+                    if serie is None:            # Y(t-lag)
+                        k = n0 + h - lag
+                        v += b * (y_hist[k] if k < n0 else prev[k - n0])
+                    else:
+                        v += b * _x_val(serie, lag, h, oltre)
+                # dummy: 0 nel futuro
+            prev.append(v)
+
+        # ψ dalla parte AR e varianza cumulata dell'errore
+        ar = {lag: float(par[n]) for n, (sr, lag, _o) in X_src.items() if sr is None and n in par}
+        psi = [1.0]
+        for k in range(1, H):
+            psi.append(sum(ar.get(j, 0.0) * psi[k - j] for j in ar if j <= k))
+        sigma = float(np.sqrt(model.scale))
+        se = np.sqrt(np.cumsum(np.square(psi))) * sigma
+
+        # partenza del cono dall'ultimo osservato, così il disegno è continuo
+        x0, y0 = origine, float(y_series.loc[origine])
+        xs = [x0] + date
+        prev = np.array(prev)
+        for z, alfa, nome in ((1.96, 0.13, "Cono 95%"), (1.0, 0.25, "Cono 68%")):
+            su = [y0] + list(prev + z * se)
+            giu = [y0] + list(prev - z * se)
+            fig.add_trace(go.Scatter(x=xs + xs[::-1], y=su + giu[::-1], fill="toself",
+                                     fillcolor=f"rgba(255,127,14,{alfa})", line=dict(width=0),
+                                     hoverinfo="skip", name=nome))
+        fig.add_trace(go.Scatter(x=xs, y=[y0] + list(prev), name=f"Previsione ({H} periodi)",
+                                 mode="lines", line=dict(color="#ff7f0e", width=1.8, dash="dash"),
+                                 customdata=[[0, 0]] + [[prev[i] - 1.96 * se[i], prev[i] + 1.96 * se[i]] for i in range(H)],
+                                 hovertemplate="%{y:.3f}  (95%: %{customdata[0]:.3f} … %{customdata[1]:.3f})<extra>Previsione</extra>"))
+        etich = date[0].strftime("%m/%Y")
+        fig.add_trace(go.Scatter(
+            x=[date[0]], y=[prev[0]], mode="markers+text", name=f"Prossimo periodo {etich}",
+            marker=dict(color="#ff7f0e", size=10, line=dict(color="#7a3d00", width=1.5)),
+            text=[f"{etich}: {prev[0]:.2f}"], textposition="top center", textfont=dict(size=10, color="#7a3d00"),
+            error_y=dict(type="data", symmetric=True, array=[1.96 * se[0]], color="#7a3d00", thickness=1.2, width=5),
+            hovertemplate=f"{etich}: %{{y:.3f}} ± {1.96 * se[0]:.3f} (95%)<extra></extra>"))
+
+        # apertura sugli ultimi 5 anni + previsione (doppio clic = tutta la storia);
+        # l'asse y si adatta solo a ciò che si vede, altrimenti il cono resta schiacciato
+        da = max(y_series.index[0], origine - pd.DateOffset(years=5))
+        vis = y_series.loc[da:origine].dropna()
+        lo = min(float(vis.min()), float((prev - 1.96 * se).min()))
+        hi = max(float(vis.max()), float((prev + 1.96 * se).max()))
+        marg = (hi - lo) * 0.06 or 1.0
+        fig.update_xaxes(range=[da, date[-1] + (date[-1] - date[0]) / max(H, 1)])
+        fig.update_yaxes(range=[lo - marg, hi + marg])
+    except Exception as e:
+        print(f"⚠ [ADL] previsione non riuscita: {e}", flush=True)
+
+
 # Pipeline options usate nell'ADL (Y e ogni X) — stessa logica del tab Confronto
 ADL_PIPE_OPTS = [
     {"label": "—",         "value": "none"},
@@ -9938,6 +10045,7 @@ def register_new_tab_callbacks(app):
         # della pipeline inventerebbe mesi "fantasma" ripetendo l'ultimo valore
         # dell'indice, falsando lo YoY osservato (es. luglio 2026 = giu2026/lug2025).
         _y_last_real = df[y_col].last_valid_index()
+        df_oltre = df   # senza taglio: le X già uscite dopo l'ultima Y servono alla previsione
         if _y_last_real is not None:
             df = df.loc[:_y_last_real]
 
@@ -10040,8 +10148,10 @@ def register_new_tab_callbacks(app):
 
         # Costruisci X
         X_dict = {}
+        X_src  = {}   # colonna → (serie prima dello shift, lag): serve alla previsione
         for lag in sorted(ar_lags or []):
             X_dict[f"Y(t-{lag})"] = y_series.shift(lag)
+            X_src[f"Y(t-{lag})"]  = (None, lag, None)
         for av, id_d, lags in zip(x_active_vals, x_active_ids, x_lags_vals):
             if not av:
                 continue
@@ -10053,8 +10163,13 @@ def register_new_tab_callbacks(app):
             except Exception as _ex:
                 return err8(f"Errore pipeline X '{col}': {_ex}")
             clbl = f"{col} [{x_lbl}]"
+            try:
+                x_oltre = _adl_pipeline(df_oltre[col], x_pipes.get(col, []))[0]
+            except Exception:
+                x_oltre = None
             for lag in sorted(lags or [0]):
                 X_dict[f"{clbl}_L{lag}" if lag > 0 else clbl] = x_base.shift(lag)
+                X_src[f"{clbl}_L{lag}" if lag > 0 else clbl]  = (x_base, lag, x_oltre)
 
         if not X_dict:
             return err8("Seleziona almeno una variabile X o un lag AR di Y")
@@ -10216,6 +10331,8 @@ def register_new_tab_callbacks(app):
                     annotation_font=dict(size=8, color="#555"),
                 )       
         
+        _adl_previsione(fig_fit, model, y_series, y_fit.index[-1], X_src)
+
         fig_fit.update_layout(
             title=dict(text=f"{y_label}  |  R²={model.rsquared:.4f}  "
                              f"R²adj={model.rsquared_adj:.4f}  "

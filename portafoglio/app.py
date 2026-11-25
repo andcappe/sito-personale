@@ -3705,7 +3705,7 @@ app.layout = html.Div([
     # ── Intestazione pagina (nascosta su cellulare: nb-nascondi-cell) ────────
     html.Div(className='nb-nascondi-cell', children=[
         html.H1([
-            'Analisi Rischi di Portafoglio',
+            'Analisi Strategica di Portafoglio',
             html.Span(' - ', style={'color': '#9baabf'}),
             html.Span('Analisi delle metriche dei rischi Finanziari', style={
                 'font-size': '1.1rem', 'font-weight': '400', 'color': '#4a5d7a',
