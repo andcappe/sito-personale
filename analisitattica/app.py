@@ -59,6 +59,13 @@ app.index_string = '''<!DOCTYPE html><html>
   .pf-voce:hover { background: #f0f4fa !important; }
   @media (max-width: 600px) { .pf-strumenti-menu { left: auto; right: 0; } }
   .at-via { display: none !important; }
+  @media (min-width: 901px) { .at-ar-sez, .at-ar-corpo { display: contents; } }
+  @media (max-width: 900px) {
+    .at-ar-sez { flex: 1 1 100%; border: 1px solid #e2e8f0; border-radius: 6px;
+                 background: #f8fafc; padding: 8px 10px; margin: 6px 0; }
+    .at-ar-sez .nb-espandi-btn { font-size: 12px; font-weight: 700; color: #1a3a5c; }
+    .at-ar-corpo { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  }
   @media (max-width: 900px) {
     .at-info-btn { background-color: #0066cc !important; padding: 7px 10px !important; }
   }
@@ -291,15 +298,15 @@ def get_arima_analysis_tab(options_tickers):
     return html.Div([
         # ── Header con controlli ──────────────────────────────────────────
         html.Div([
-            html.H3('Analisi ARIMA per Asset',
+            html.H3('Analisi ARIMA per Asset', className='nb-nascondi-cell',
                     style={'margin-right': '20px', 'white-space': 'nowrap', 'font-size': '16px'}),
-            html.Div([
-                html.Label("Asset:", style={'margin-right': '6px', 'font-size': '11px',
-                                             'white-space': 'nowrap'}),
-                dcc.Dropdown(id='arima-asset-dropdown', options=options_tickers or [],
-                             value=first, placeholder="Seleziona asset…",
-                             style={'width': '230px', 'font-size': '11px'}),
-            ], style={'display': 'flex', 'align-items': 'center', 'margin-right': '12px'}),
+            # L'asset si sceglie nella riga in alto (arima-asset-dropdown, _data_toolbar).
+            # «Parametri»: sul computer i campi restano nella riga (display: contents,
+            # intestazione nascosta); sul cellulare scheda espandibile chiusa.
+            html.Div(className='nb-espandi at-ar-sez', children=[
+            html.Div(['Parametri', html.I(className='fa-solid fa-chevron-down nb-espandi-ico')],
+                     className='nb-espandi-btn nb-testa-cell'),
+            html.Div(className='nb-espandi-corpo at-ar-corpo', children=[
             html.Div([
                 html.Label("Orizzonte (gg):", style={'margin-right': '5px', 'font-size': '11px',
                                                       'white-space': 'nowrap'}),
@@ -328,7 +335,11 @@ def get_arima_analysis_tab(options_tickers):
             ], style={'display': 'flex', 'align-items': 'center', 'border': '1px solid #ccc',
                       'border-radius': '4px', 'padding': '3px 8px', 'margin-right': '12px',
                       'background': '#f5f5f5'}),
+            ]),
+            ]),
+            # Sul cellulare il pulsante sta nella riga in alto (at-arima-cell).
             html.Button('▶  Esegui Analisi ARIMA', id='run-arima-tab-button', n_clicks=0,
+                        className='nb-nascondi-cell',
                         style={'background-color': '#0066cc', 'color': 'white', 'border': 'none',
                                'padding': '8px 18px', 'border-radius': '4px', 'cursor': 'pointer',
                                'font-weight': 'bold', 'font-size': '12px'}),
@@ -350,7 +361,7 @@ def get_arima_analysis_tab(options_tickers):
             html.Div([
                 dcc.Loading(type='circle', color='#1b7a34', children=[
                     html.Div(id='weights-grid-container-arima',
-                             children=_build_asset_grid(asset_names, [first] if first else [])),
+                             children=_build_asset_grid(asset_names, [])),
                 ]),
             ], style={'width': '46%', 'vertical-align': 'top', 'padding-right': '10px',
                       'border-right': '1px solid #eee', 'overflow-y': 'auto', 'max-height': '90vh'}),
@@ -1255,6 +1266,18 @@ def _data_toolbar():
             # sotto il file aperto). Visibili solo sul sotto-tab Valutazione (at_info).
             html.Div(id='val-a-capo', className='val-a-capo'),
             valutazione.barra_ricerca(),
+            # ARIMA: asset da analizzare = ticker/nome cercato su Yahoo («yf:TICKER») oppure,
+            # dalla freccia, uno degli asset del file aperto (personale o predefinito).
+            # Visibile solo sul sotto-tab ARIMA (at_info).
+            html.Div(id='ar-cerca-riga', className='at-via',
+                     title='Usa nome o ticker di Yahoo, oppure scegli un asset del file', children=[
+                dcc.Dropdown(id='arima-asset-dropdown',
+                             options=[{'label': 'AAPL — Apple Inc. · Yahoo', 'value': 'yf:AAPL'}],
+                             value='yf:AAPL', searchable=True, clearable=False,
+                             placeholder='Usa nome o ticker di Yahoo…',
+                             className='val-cerca-campo', optionHeight=44,
+                             style={'font-size': '12px'}),
+            ]),
             # Menu «Strumenti»: File · Carica file · Template · Esporta dati, voci uguali.
             # Solo da PC: sul cellulare il menu Strumenti non c'è (scelta dell'utente).
             html.Details(className='pf-strumenti nb-nascondi-cell', children=[
@@ -1273,6 +1296,11 @@ def _data_toolbar():
             # Sul cellulare, tab Indicatori: preme ▶ Calcola indicatori (nb-clicca, delega in NAVBAR_JS).
             html.Button('▶ Calcola indicatori', id='at-calcola-cell', className='at-via',
                         **{'data-bersaglio': 'ind-calcola'},
+                        style={**{k: v for k, v in _BTN_PRINCIPALE.items() if k != 'display'},
+                               'white-space': 'nowrap', 'padding': '7px 12px'}),
+            # Sul cellulare, tab ARIMA: preme ▶ Esegui Analisi ARIMA.
+            html.Button('▶ Esegui ARIMA', id='at-arima-cell', className='at-via',
+                        **{'data-bersaglio': 'run-arima-tab-button'},
                         style={**{k: v for k, v in _BTN_PRINCIPALE.items() if k != 'display'},
                                'white-space': 'nowrap', 'padding': '7px 12px'}),
             # ⚙ Descrizione: i testi esplicativi del sotto-tab aperto (come il ⚙ del Portafoglio).
@@ -1445,11 +1473,19 @@ def run_arima_tab_analysis(n_clicks, selected_asset, horizon, max_p, max_q, crit
     from statsmodels.tsa.arima.model import ARIMA as ARIMAModel
 
     try:
-        original_prices = _build_prices()
-        if original_prices is None or selected_asset not in original_prices.columns:
-            return go.Figure(), f"⚠ Asset '{selected_asset}' non trovato nei dati (current.json)."
-
-        prices = original_prices[selected_asset].dropna()
+        if str(selected_asset).startswith('yf:'):
+            # Ticker cercato su Yahoo, non nel file: 10 anni scaricati al volo, in EUR.
+            tk = selected_asset[3:]
+            px = dc.download_series(tk, 'EUR')
+            if px is None or px.empty:
+                return go.Figure(), f"⚠ Nessun dato da Yahoo per '{tk}' (ticker corretto?)."
+            prices = px.dropna()
+            selected_asset = _AR_NOMI.get(selected_asset, tk).split(' · ')[0]
+        else:
+            original_prices = _build_prices()
+            if original_prices is None or selected_asset not in original_prices.columns:
+                return go.Figure(), f"⚠ Asset '{selected_asset}' non trovato nei dati (current.json)."
+            prices = original_prices[selected_asset].dropna()
         if len(prices) < 100:
             return go.Figure(), "⚠ Dati insufficienti (< 100 osservazioni)."
         if len(prices) > 750:
@@ -1798,11 +1834,53 @@ app.clientside_callback(
 
 @app.callback(Output('at-info-corpo', 'children'), Output('at-calcola-cell', 'className'),
               Output('val-cerca-riga', 'className'), Output('val-a-capo', 'className'),
+              Output('at-arima-cell', 'className'), Output('ar-cerca-riga', 'className'),
               Input('at-tabs', 'value'))
 def at_info(tab):
     val = tab in (None, 'tab-valutazione')
     return (_info_tab(tab), ('nb-solo-cell nb-clicca' if tab == 'tab-indicatori' else 'at-via'),
-            'val-cerca' if val else 'at-via', 'val-a-capo' if val else 'at-via')
+            'val-cerca' if val else 'at-via', 'val-a-capo' if val else 'at-via',
+            'nb-solo-cell nb-clicca' if tab == 'tab-arima' else 'at-via',
+            'val-cerca' if tab == 'tab-arima' else 'at-via')
+
+
+_AR_NOMI = {'yf:AAPL': 'AAPL — Apple Inc. · Yahoo'}   # valore → etichetta (ticker Yahoo)
+
+
+@app.callback(Output('arima-asset-dropdown', 'options'),
+              Input('arima-asset-dropdown', 'search_value'),
+              Input('at-tabs', 'value'),
+              Input('tab-arima-content', 'children'),     # file cambiato / asset aggiunti
+              State('arima-asset-dropdown', 'value'))
+def ar_cerca(testo, _tab, _contenuto, valore):
+    """Opzioni della tendina ARIMA: asset del file aperto + risultati di Yahoo."""
+    import re
+    testo = (testo or '').strip()
+    file_opts = [{'label': f"📁 {o['label']}", 'value': o['value'],
+                  'search': f"{o['label']} {o['value']}"} for o in (_asset_options() or [])]
+    yahoo = []
+    if len(testo) >= 2:
+        for q in valutazione._yahoo_cerca(testo):
+            v = f"yf:{q['symbol']}"
+            et = f"{q['symbol']} — {q['nome']}" + (f" · {q['borsa']}" if q['borsa'] else '')
+            _AR_NOMI[v] = et
+            yahoo.append({'label': et, 'value': v, 'search': f"{testo} {et}"})
+        su = testo.upper()
+        if re.fullmatch(r"[A-Z0-9.\-=^]{1,15}", su) and f"yf:{su}" not in {o['value'] for o in yahoo}:
+            _AR_NOMI.setdefault(f"yf:{su}", su)
+            yahoo.append({'label': f"🔎 {su} — usa come ticker", 'value': f"yf:{su}",
+                          'search': f"{testo} {su}"})
+    # Prima riga, non selezionabile: come si usa la casella (la casella mostra sempre
+    # l'asset scelto, quindi un placeholder non si vedrebbe mai). Sparisce quando si scrive.
+    guida = [{'label': '✏️ Usa nome o ticker di Yahoo, oppure scegli un asset del file',
+              'value': '_guida', 'disabled': True}] if not testo else []
+    opts = guida + yahoo + file_opts
+    if valore and valore not in {o['value'] for o in opts}:
+        et = _AR_NOMI.get(valore, valore[3:] if str(valore).startswith('yf:') else valore)
+        # Resta fra le opzioni (altrimenti Dash toglie il valore), in fondo e filtrata
+        # dal testo come le altre: in cima, Invio riprenderebbe il titolo di prima.
+        opts.append({'label': et, 'value': valore, 'search': et})
+    return opts
 
 
 # ── Pannello File: toggle, lista, salva, carica, elimina ──────────────────────

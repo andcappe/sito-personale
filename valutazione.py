@@ -1380,6 +1380,11 @@ def stima_crescita_flussi(righe):
     }
 
 
+# Oltre questo divario (in punti %) fra la misura di crescita più alta e la più
+# bassa, la crescita consigliata è il CAGR e non la mediana.
+_G1_DIVARIO = 30.0
+
+
 def parametri_consigliati(info, fin, cf, bs, storia=None, dividendi=None,
                           cf_q=None, fin_q=None):
     """Valore di partenza di ogni slider, ricavato dai conti del titolo.
@@ -1512,13 +1517,28 @@ def parametri_consigliati(info, fin, cf, bs, storia=None, dividendi=None,
     if cagr_rev is not None: voci.append(f"CAGR {len(ricavi)-1} anni {cagr_rev*100:+.1f}%")
     if yoy_bil  is not None: voci.append(f"ultimo esercizio {yoy_bil*100:+.1f}%")
     if yoy_info is not None: voci.append(f"ultimo trimestre {yoy_info*100:+.1f}%")
-    g1_raw = _mediana([x * 100 for x in (cagr_rev, yoy_bil, yoy_info) if x is not None])
+    misure_g = [x * 100 for x in (cagr_rev, yoy_bil, yoy_info) if x is not None]
+    g1_raw = _mediana(misure_g)
     avviso_g1 = ""
+    # Misure molto distanti (SanDisk: CAGR +49%, ultimo esercizio +175%,
+    # ultimo trimestre +378%) = un anno eccezionale, non un ritmo sostenibile
+    # per sei anni: la mediana prenderebbe il picco. Si usa il CAGR, che
+    # guarda tutto il periodo.
+    g1_ciclo = (cagr_rev is not None and len(misure_g) >= 2
+                and max(misure_g) - min(misure_g) > _G1_DIVARIO
+                and abs(g1_raw - cagr_rev * 100) > 10)
+    if g1_ciclo:
+        g1_raw = cagr_rev * 100
+        avviso_g1 = (f"le misure di crescita sono molto distanti fra loro (oltre "
+                     f"{_G1_DIVARIO:.0f} punti): uso il CAGR di tutto il periodo e "
+                     f"non la mediana ({_mediana(misure_g):.1f}%), che seguirebbe "
+                     f"un anno eccezionale")
     if g1_raw is not None and g1_raw < 0:
         avviso_g1 = ("i ricavi stanno calando: decidi tu se è un passaggio "
                      "temporaneo — allora alza la fase 1 — o la nuova normalità")
     _put("val-g1", 8.0 if g1_raw is None else g1_raw,
-         ("mediana delle misure di crescita dei ricavi disponibili ("
+         (("CAGR dei ricavi" if g1_ciclo else
+           "mediana delle misure di crescita dei ricavi disponibili") + " ("
           + " · ".join(voci) + ")" if voci else
           "storico dei ricavi troppo corto per misurare una crescita (serve più "
           "di un esercizio): 8% convenzionale, da correggere a mano"),
