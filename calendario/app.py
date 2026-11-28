@@ -15,19 +15,21 @@ riunione fino al giorno successivo alla riunione). Le date di pubblicazione dei 
 macro sono lette in tempo reale dal calendario FRED (release/dates), con un fallback
 locale se l'API non risponde. Ogni ente emittente ha un colore per leggere le cadenze.
 """
+import json
 import os
 import sys
 from datetime import date, datetime, timedelta
 
 import plotly.graph_objects as go
 import requests
-from dash import Dash, html, dcc, Input, Output, State, ctx
+from dash import Dash, html, dcc, Input, Output, State, ctx, ALL
+from dash.exceptions import PreventUpdate
 
 # La cartella superiore ospita navbar.py e settings/ (import condivisi del sito)
 _PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
-from navbar import make_navbar                       # noqa: E402
+from navbar import make_navbar, tendina_cell         # noqa: E402
 from settings.browser_css import SITE_CSS            # noqa: E402
 from calendario import trimestrali as tr            # noqa: E402
 
@@ -520,14 +522,13 @@ def _grafici_storici():
                                    'margin': '0 0 2px'}),
             html.Div(sottotitolo, style={'color': '#888', 'fontSize': '11px',
                                          'marginBottom': '4px'}),
-            dcc.Graph(id=graph_id, figure=figura, config={'displayModeBar': False}),
-        ], style={'marginBottom': '18px'})
+            dcc.Graph(id=graph_id, figure=figura, config={'displayModeBar': False},
+                      responsive=True, style={'height': f"{figura.layout.height or 320}px"}),
+        ], className='cal-graf', style={'marginBottom': '12px'})
 
     return html.Div([
-        html.H2('Andamento storico dei dati', style={'color': '#1a3a6b',
-                'fontSize': '17px', 'margin': '26px 0 4px'}),
         html.Div('Serie effettive dai dati ufficiali (fonte FRED — St. Louis Fed).',
-                 style={'color': '#666', 'fontSize': '12px', 'marginBottom': '14px'}),
+                 className='cal-nota', style={'marginBottom': '10px'}),
         blocco('Sussidi di disoccupazione', 'Richieste iniziali settimanali (Dept. of '
                'Labor) e media mobile a 4 settimane.', 'cal-fig-sussidi', fig_sussidi()),
         blocco('Inflazione — CPI e PCE (anno su anno)', 'CPI (BLS) e PCE (BEA), variazione '
@@ -554,103 +555,107 @@ server = app.server
 
 app.index_string = '''<!DOCTYPE html><html>
 <head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
-<style>''' + SITE_CSS + '''</style>
+<style>''' + SITE_CSS + '''
+  .cal-box { border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc;
+             padding: 8px 10px; margin: 0 0 10px; }
+  .cal-box > .nb-espandi-btn { font-size: 13px; font-weight: 700; color: #1a3a6b; margin-bottom: 6px; }
+  .cal-nota { color: #666; font-size: 12px; }
+  .cal-graf { background: #fff; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 4px; }
+  .cal-enti { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+  .cal-ente { display: inline-flex; align-items: flex-start; gap: 7px; }
+  .cal-ente-col { display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+                  margin-top: 2px; flex-shrink: 0; }
+  .cal-ente-nome { display: block; font-size: 12px; color: #1a3a6b; }
+  .cal-ente-cad { display: block; font-size: 10.5px; color: #777; }
+  @media (max-width: 900px) {
+    .cal-pagina { padding-left: 8px !important; padding-right: 8px !important; }
+    .cal-box { padding: 8px; }
+    .cal-enti { flex-direction: column; gap: 8px; }
+  }
+</style>
 </head>
 <body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>'''
 
 
-def _legenda_enti():
-    """Riquadro colori/cadenze per ente emittente."""
-    items = []
-    for off in _OFFICES:
-        items.append(html.Div([
-            html.Span(style={'display': 'inline-block', 'width': '12px', 'height': '12px',
-                             'borderRadius': '3px', 'background': _OFFICE_COLOR[off],
-                             'marginRight': '8px', 'flexShrink': '0'}),
-            html.Div([
-                html.Span(_OFFICE_FULL[off], style={'fontSize': '11.5px', 'fontWeight': '700',
-                                                    'color': '#1a3a6b'}),
-                html.Span(_OFFICE_CADENCE[off], style={'fontSize': '10.5px', 'color': '#777',
-                                                       'display': 'block'}),
-            ]),
-        ], style={'display': 'flex', 'alignItems': 'flex-start', 'marginBottom': '8px'}))
-    return html.Div(items, style={'padding': '12px 14px', 'background': '#f8fafd',
-                                  'border': '1px solid #e8edf5', 'borderRadius': '10px'})
+def _sezione(titolo, corpo, aperto=True):
+    """Riquadro a tutta larghezza; sul cellulare sezione espandibile (aperto=False:
+    chiusa all'avvio sul cellulare; sul computer è sempre aperta)."""
+    return html.Div(className='nb-espandi cal-box' + (' nb-aperto' if aperto else ''), children=[
+        html.Div([titolo, html.I(className='fa-solid fa-chevron-down nb-espandi-ico')],
+                 className='nb-espandi-btn'),
+        html.Div(corpo, className='nb-espandi-corpo'),
+    ])
+
+
+def _ente_etichetta(off):
+    """Voce della scelta degli enti: colore, nome e cadenza (fa anche da legenda)."""
+    return html.Span([
+        html.Span(className='cal-ente-col', style={'background': _OFFICE_COLOR[off]}),
+        html.Span([html.B(_OFFICE_FULL[off], className='cal-ente-nome'),
+                   html.Span(_OFFICE_CADENCE[off], className='cal-ente-cad')]),
+    ], className='cal-ente')
+
+
+# Sotto-tab del calendario, nell'ordine della pagina (anche nella tendina del cellulare)
+_CAL_SOTTOTAB = [('🏛 Calendario economico — riunioni FED', 'macro'),
+                 ('📊 Trimestrali delle società', 'trimestrali')]
 
 
 def serve_layout():
     return html.Div([
         make_navbar('Calendario'),
         html.Div([
-            dcc.Tabs(id='cal-sezione', value='macro', children=[
-                dcc.Tab(label='🏛 Calendario economico — riunioni FED', value='macro'),
-                dcc.Tab(label='📊 Trimestrali delle società', value='trimestrali'),
-            ], style={'marginBottom': '14px'}),
+            dcc.Tabs(id='cal-sezione', value='macro', parent_className='nb-nascondi-cell',
+                     children=[dcc.Tab(label=lab, value=v) for lab, v in _CAL_SOTTOTAB],
+                     style={'marginBottom': '14px'}),
+            tendina_cell('cal-tendina', _CAL_SOTTOTAB),
             html.Div(id='cal-sez-macro', children=_sezione_macro()),
             html.Div(id='cal-sez-trimestrali', children=_sezione_trimestrali(),
                      style={'display': 'none'}),
-        ], style={'padding': '112px 5% 32px', 'fontFamily': 'Inter, sans-serif'}),
+        ], className='cal-pagina',
+           style={'padding': '112px 5% 32px', 'fontFamily': 'Inter, sans-serif'}),
     ])
 
 
 def _sezione_macro():
     return html.Div([
-            html.H2('Calendario economico — dati chiave prima delle riunioni FED',
-                    style={'color': '#1a3a6b', 'fontSize': '20px', 'margin': '0 0 4px'}),
-            html.Div('Riunioni FOMC e blackout della Federal Reserve, sussidi di '
-                     'disoccupazione, inflazione (CPI e PCE) e occupazione (NFP). '
-                     'Date dei dati macro dal calendario FRED; date FOMC ufficiali. '
-                     'Ogni ente emittente ha un colore per leggerne la cadenza.',
-                     style={'color': '#666', 'fontSize': '12px', 'marginBottom': '14px'}),
+        html.Div('Riunioni FOMC e blackout della Federal Reserve, sussidi di disoccupazione, '
+                 'inflazione (CPI e PCE) e occupazione (NFP). Date dei dati macro dal calendario '
+                 'FRED; date FOMC ufficiali. Ogni ente emittente ha un colore per leggerne la cadenza.',
+                 className='cal-nota', style={'marginBottom': '10px'}),
 
-            # ── Controlli ──────────────────────────────────────────────────────
-            html.Div([
-                html.Label('Periodo:', style={'fontSize': '11px', 'fontWeight': '700',
-                                              'color': '#1a3a6b', 'marginRight': '8px'}),
-                dcc.RadioItems(
-                    id='cal-periodo',
-                    options=[{'label': f' {lbl}', 'value': v} for v, lbl in _PERIODI],
-                    value='6m', inline=True,
-                    inputStyle={'marginRight': '3px'},
-                    labelStyle={'marginRight': '12px', 'fontSize': '11px', 'cursor': 'pointer'},
-                ),
-            ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '8px'}),
-            html.Div([
-                html.Label('Ente emittente:', style={'fontSize': '11px', 'fontWeight': '700',
-                                                     'color': '#1a3a6b', 'marginRight': '8px'}),
-                dcc.Checklist(
-                    id='cal-enti',
-                    options=[{'label': f' {_OFFICE_FULL[o]}', 'value': o} for o in _OFFICES],
-                    value=list(_OFFICES), inline=True,
-                    inputStyle={'marginRight': '3px'},
-                    labelStyle={'marginRight': '14px', 'fontSize': '11px', 'cursor': 'pointer'},
-                ),
-            ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap',
-                      'gap': '6px', 'marginBottom': '12px', 'paddingTop': '6px',
-                      'borderTop': '1px solid #eee'}),
+        _sezione('Periodi', dcc.RadioItems(
+            id='cal-periodo',
+            options=[{'label': f' {lbl}', 'value': v} for v, lbl in _PERIODI],
+            value='6m', inline=True,
+            inputStyle={'marginRight': '3px'},
+            labelStyle={'marginRight': '12px', 'fontSize': '12px', 'cursor': 'pointer'},
+        ), aperto=False),
 
-            # ── Timeline + legenda affiancate ──────────────────────────────────
-            html.Div([
-                html.Div(dcc.Graph(id='cal-timeline', figure=timeline_fig(),
-                                   config={'displayModeBar': False}),
-                         style={'flex': '1 1 640px', 'minWidth': '0'}),
-                html.Div(_legenda_enti(), style={'flex': '0 0 240px'}),
-            ], style={'display': 'flex', 'gap': '16px', 'flexWrap': 'wrap',
-                      'alignItems': 'flex-start', 'marginBottom': '20px'}),
+        _sezione('Ente Emittente', dcc.Checklist(
+            id='cal-enti',
+            options=[{'label': _ente_etichetta(o), 'value': o} for o in _OFFICES],
+            value=list(_OFFICES), className='cal-enti',
+            inputStyle={'marginRight': '6px', 'marginTop': '2px'},
+            labelStyle={'display': 'flex', 'alignItems': 'flex-start', 'cursor': 'pointer'},
+        ), aperto=False),
 
-            # ── Tabella cronologica ────────────────────────────────────────────
-            html.H3('Elenco cronologico', style={'color': '#1a3a6b', 'fontSize': '15px',
-                                                 'margin': '0 0 8px'}),
+        _sezione('Grafici', html.Div(
+            dcc.Graph(id='cal-timeline', figure=timeline_fig(), responsive=True,
+                      config={'displayModeBar': False}, style={'height': '380px'}),
+            className='cal-graf')),
+
+        _sezione('Elenco Cronologico', [
             html.Div(id='cal-table', children=build_table(),
-                     style={'maxHeight': '520px', 'overflowY': 'auto',
+                     style={'maxHeight': '520px', 'overflowY': 'auto', 'background': '#fff',
                             'border': '1px solid #e8edf5', 'borderRadius': '10px'}),
             html.Div('Le date future dei dati macro sono programmate e possono variare; '
                      'il blackout FED va dal 2º sabato precedente la riunione al giorno '
                      'successivo. Fonte dati: FRED (St. Louis Fed) e Federal Reserve Board.',
-                     style={'color': '#999', 'fontSize': '10.5px', 'marginTop': '10px'}),
+                     className='cal-nota', style={'marginTop': '8px'}),
+        ]),
 
-            # ── Grafici storici delle serie ────────────────────────────────────
-            _grafici_storici(),
+        _sezione('Grafici Storici Dati', _grafici_storici()),
     ])
 
 
@@ -679,6 +684,32 @@ def _update(period, enti):
 def _cambia_sezione(sezione):
     nascosto = {'display': 'none'}
     return (nascosto, {}) if sezione == 'trimestrali' else ({}, nascosto)
+
+
+# Sul cellulare i sotto-tab sono la tendina «Tabs Strumenti» (come Portafoglio e Analisi Tattica)
+@app.callback(
+    Output('cal-sezione', 'value'),
+    Input({'type': 'cal-tendina-voce', 'index': ALL}, 'n_clicks'),
+    prevent_initial_call=True,
+)
+def _cal_tendina_scegli(clicks):
+    tid = ctx.triggered_id
+    if not tid or not any(clicks):
+        raise PreventUpdate
+    return tid['index']
+
+
+app.clientside_callback(
+    """function (val) {
+        var voci = %s, lab = voci[0][0];
+        voci.forEach(function (v) { if (v[1] === val) lab = v[0]; });
+        return [lab, voci.map(function (v) {
+            return v[1] === val ? 'nb-tendina-voce nb-attiva' : 'nb-tendina-voce'; })];
+    }""" % json.dumps(_CAL_SOTTOTAB),
+    Output('cal-tendina-att', 'children'),
+    Output({'type': 'cal-tendina-voce', 'index': ALL}, 'className'),
+    Input('cal-sezione', 'value'),
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
