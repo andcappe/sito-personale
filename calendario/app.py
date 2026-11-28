@@ -567,6 +567,31 @@ app.index_string = '''<!DOCTYPE html><html>
                   margin-top: 2px; flex-shrink: 0; }
   .cal-ente-nome { display: block; font-size: 12px; color: #1a3a6b; }
   .cal-ente-cad { display: block; font-size: 10.5px; color: #777; }
+  /* Trimestrali: riga in alto (ricerca + ⚙) e menu ⚙ come in Analisi Tattica */
+  .tr-riga { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; flex-wrap: nowrap; }
+  .tr-cerca-campo { font-size: 12px; padding: 6px 9px; width: 240px; min-width: 0; flex: 0 1 240px;
+                    box-sizing: border-box; border: 1px solid #c0d0e8; border-radius: 6px; }
+  .tr-btn { background: #1a3a6b; color: #fff; border: none; border-radius: 6px; padding: 6px 12px;
+            font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .tr-info > summary.tr-btn { padding: 6px 9px; }
+  .tr-ricerca { background: #fffbea; border-color: #f2d36b; }
+  .tr-ricerca-tit { font-weight: 600; font-size: 12px; color: #7a5b00; margin: 10px 0 6px; }
+  .tr-tab-box { background: #fff; border: 1px solid #f2d36b; border-radius: 10px; overflow-x: auto; }
+  .tr-avviso { font-size: 12px; color: #1a3a6b; margin: 8px 0 0; }
+  .tr-avviso:empty { display: none; }
+  .pf-strumenti { position: relative; display: inline-block; }
+  .pf-strumenti > summary { list-style: none; }
+  .pf-strumenti > summary::-webkit-details-marker { display: none; }
+  .pf-strumenti-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 1500;
+    background: #fff; border: 1px solid #c0d0e8; border-radius: 6px; padding: 10px 12px;
+    box-shadow: 0 6px 20px rgba(26,58,107,0.18); min-width: 320px; max-width: 420px; }
+  .tr-info-testo, .tr-info-testo p { font-size: 12px; color: #33475b; line-height: 1.45; margin: 0 0 8px; }
+  .tr-info-testo b { color: #1a3a5c; }
+  @media (max-width: 900px) {
+    .tr-cerca-campo { flex: 1 1 auto; width: auto; }
+    .pf-info > .pf-strumenti-menu { position: fixed; top: auto; left: 16px; right: 16px;
+      min-width: 0; max-width: none; }
+  }
   @media (max-width: 900px) {
     .cal-pagina { padding-left: 8px !important; padding-right: 8px !important; }
     .cal-box { padding: 8px; }
@@ -574,13 +599,20 @@ app.index_string = '''<!DOCTYPE html><html>
   }
 </style>
 </head>
-<body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>'''
+<body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}
+<script>
+document.addEventListener('click', function(e){
+  document.querySelectorAll('details.pf-strumenti[open]').forEach(function(d){
+    if (!d.contains(e.target)) setTimeout(function(){ d.removeAttribute('open'); }, 0);
+  });
+});
+</script></footer></body></html>'''
 
 
-def _sezione(titolo, corpo, aperto=True):
+def _sezione(titolo, corpo, aperto=True, classe=''):
     """Riquadro a tutta larghezza; sul cellulare sezione espandibile (aperto=False:
     chiusa all'avvio sul cellulare; sul computer è sempre aperta)."""
-    return html.Div(className='nb-espandi cal-box' + (' nb-aperto' if aperto else ''), children=[
+    return html.Div(className='nb-espandi cal-box' + classe + (' nb-aperto' if aperto else ''), children=[
         html.Div([titolo, html.I(className='fa-solid fa-chevron-down nb-espandi-ico')],
                  className='nb-espandi-btn'),
         html.Div(corpo, className='nb-espandi-corpo'),
@@ -749,28 +781,50 @@ def _sezione_trimestrali():
                'borderRadius': '6px', 'padding': '3px 10px', 'fontSize': '12px',
                'cursor': 'pointer', 'marginRight': '4px'}
     return html.Div([
-        html.H2('Trimestrali in arrivo', style={'color': '#1a3a6b', 'fontSize': '20px',
-                                                'margin': '0 0 4px'}),
-        html.Div('Le date di pubblicazione dei conti trimestrali, per finestra di una '
-                 'settimana, due settimane o un mese. Le società principali di USA, Italia '
-                 'ed Europa hanno sempre la prossima data (annunciata o stimata); con '
-                 '«Tutte le società USA» si aggiungono le date già annunciate da tutto il '
-                 'mercato americano.',
-                 style={'color': '#666', 'fontSize': '12px', 'marginBottom': '14px'}),
+        # Riga in alto: ricerca di un ticker (anche fuori dalla finestra e dall'elenco)
+        # e ⚙ con le spiegazioni della sezione.
         html.Div([
-            html.Label('Finestra:', style=lbl),
-            dcc.RadioItems(id='tr-finestra', value='sett',
-                           options=[{'label': f' {t}', 'value': v} for v, t in _FINESTRE],
-                           **radio),
-            html.Button('◀', id='tr-prec', n_clicks=0, style=bottone),
-            html.Button('Oggi', id='tr-oggi', n_clicks=0, style=bottone),
-            html.Button('▶', id='tr-succ', n_clicks=0, style=bottone),
-            html.B(id='tr-etichetta', style={'fontSize': '13px', 'color': '#1a3a6b',
-                                             'marginLeft': '10px'}),
-        ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap',
-                  'gap': '4px', 'marginBottom': '8px'}),
-        html.Div([
-            html.Label('Società:', style=lbl),
+            html.Details(className='pf-strumenti pf-info tr-info', children=[
+                html.Summary([html.I(className='fa-solid fa-gear nb-nascondi-cell'),
+                              html.Span('⚙', className='nb-solo-cell')],
+                             className='tr-btn', title='Descrizione'),
+                html.Div(className='pf-strumenti-menu tr-info-menu', children=[
+                    html.P('Le date di pubblicazione dei conti trimestrali, per finestra di '
+                           'una settimana, due settimane o un mese. Le società principali di '
+                           'USA, Italia ed Europa hanno sempre la prossima data (annunciata o '
+                           'stimata); con «Tutte le società USA» si aggiungono le date già '
+                           'annunciate da tutto il mercato americano.', className='tr-info-testo'),
+                    html.P(['🔎 ', html.B('Ricerca Ticker'), ': scrivi un ticker (AAPL, ENI.MI) o '
+                            'un nome e premi il pulsante o Invio. I '
+                            'risultati compaiono nella sezione gialla «Ricerca singolo titolo», '
+                            'da 45 giorni fa a 200 giorni avanti, fra tutte le società note; se '
+                            'non è nell\'elenco la data si chiede a Yahoo. Grafico ed Elenco '
+                            '(sotto Tipo di società e Parametri) restano le trimestrali programmate nella finestra: se la società '
+                            'cercata è anche lì, la sua riga è gialla con 🔎. Svuota il campo e '
+                            'premi il pulsante per togliere la ricerca.'],
+                           className='tr-info-testo'),
+                    html.Div(id='tr-nota', className='tr-info-testo'),
+                ]),
+            ]),
+        ], className='tr-riga'),
+        # Due controlli separati: la ricerca di un singolo titolo (risultati qui, senza
+        # limiti di finestra) e, sotto, le trimestrali programmate (Tipo di società,
+        # Parametri, Grafico, Elenco).
+        _sezione('🔎 Ricerca singolo titolo', [
+            html.Div([
+                dcc.Input(id='tr-cerca', type='text', debounce=True, value='',
+                          placeholder='Ticker o nome della società…',
+                          className='tr-cerca-campo'),
+                html.Button('🔎 Ricerca Ticker', id='tr-cerca-btn', n_clicks=0,
+                            className='tr-btn'),
+            ], className='tr-riga', style={'margin': '0'}),
+            html.Div(id='tr-avviso', className='tr-avviso'),
+            html.Div(id='tr-ricerca-box', style={'display': 'none'}, children=[
+                html.Div(id='tr-ricerca-tit', className='tr-ricerca-tit'),
+                html.Div(id='tr-ricerca-tab', className='tr-tab-box'),
+            ]),
+        ], classe=' tr-ricerca'),
+        _sezione('Tipo di società', html.Div([
             dcc.RadioItems(id='tr-universo', value='principali', options=[
                 {'label': f' Principali USA, Italia, Europa ({len(tr._UNIVERSO)})',
                  'value': 'principali'},
@@ -779,24 +833,34 @@ def _sezione_trimestrali():
             dcc.Checklist(id='tr-stimate', value=['si'],
                           options=[{'label': ' mostra le date stimate', 'value': 'si'}],
                           **radio),
-            dcc.Input(id='tr-cerca', type='text', debounce=True, value='',
-                      placeholder='Cerca ticker o società…',
-                      style={'fontSize': '12px', 'padding': '4px 8px', 'width': '200px',
-                             'border': '1px solid #ccd', 'borderRadius': '6px'}),
-        ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap',
-                  'gap': '6px', 'marginBottom': '12px', 'paddingTop': '6px',
-                  'borderTop': '1px solid #eee'}),
+        ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap', 'gap': '6px'}),
+            aperto=False),
+        _sezione('Parametri', html.Div([
+            html.Label('Finestra:', style=lbl),
+            dcc.RadioItems(id='tr-finestra', value='sett',
+                           options=[{'label': f' {t}', 'value': v} for v, t in _FINESTRE],
+                           **radio),
+            html.Div([
+                html.Button('◀', id='tr-prec', n_clicks=0, style=bottone),
+                html.Button('Oggi', id='tr-oggi', n_clicks=0, style=bottone),
+                html.Button('▶', id='tr-succ', n_clicks=0, style=bottone),
+                html.B(id='tr-etichetta', style={'fontSize': '13px', 'color': '#1a3a6b',
+                                                 'marginLeft': '6px'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap', 'gap': '4px'}),
+        ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap', 'gap': '6px'}),
+            aperto=False),
         dcc.Store(id='tr-scarto', data=0),
         dcc.Interval(id='tr-attesa', interval=15000, disabled=True),
         # responsive=True: la sezione nasce nascosta e senza questo Plotly
         # fissa la larghezza misurata in quel momento.
-        dcc.Graph(id='tr-grafico', config={'displayModeBar': False}, responsive=True,
-                  style={'height': '230px'}),
-        html.Div(id='tr-tabella', style={'maxHeight': '620px', 'overflowY': 'auto',
-                                         'border': '1px solid #e8edf5',
-                                         'borderRadius': '10px', 'marginTop': '8px'}),
-        html.Div(id='tr-nota', style={'color': '#999', 'fontSize': '10.5px',
-                                      'marginTop': '10px'}),
+        _sezione('Grafico', html.Div(
+            dcc.Graph(id='tr-grafico', config={'displayModeBar': False}, responsive=True,
+                      style={'height': '230px'}), className='cal-graf')),
+        _sezione('Elenco Trimestrali', [
+            html.Div(id='tr-tabella', style={'maxHeight': '620px', 'overflowY': 'auto',
+                                             'background': '#fff', 'border': '1px solid #e8edf5',
+                                             'borderRadius': '10px'}),
+        ]),
     ])
 
 
@@ -861,7 +925,8 @@ def _grafico_trim(ev, w0, w1):
     return fig
 
 
-def _tabella_trim(ev):
+def _tabella_trim(ev, evidenzia=()):
+    """`evidenzia`: ticker cercati, le loro righe hanno sfondo giallo e 🔎."""
     th = {'textAlign': 'left', 'padding': '7px 10px'}
     testa = html.Tr([html.Th(t, style=th) for t in
                      ('Momento', 'Ticker', 'Società', 'Mercato', 'Trimestre', 'EPS stimato',
@@ -884,9 +949,10 @@ def _tabella_trim(ev):
                    'post-market': 'dopo la chiusura'}.get(e['momento'], '')
         eps = '' if e['eps'] is None else f"{e['eps']:.2f} {e['valuta']}".strip()
         stimata = e['fonte'] == 'stimata'
+        cercata = e['ticker'] in evidenzia
         righe.append(html.Tr([
             html.Td(momento, style={**td, 'color': '#777', 'fontSize': '11px'}),
-            html.Td(e['ticker'], style={**td, 'fontWeight': '700'}),
+            html.Td(('🔎 ' if cercata else '') + e['ticker'], style={**td, 'fontWeight': '700'}),
             html.Td(e['nome'], style=td),
             html.Td(html.Span(e['mercato'], style={
                 'background': _MERCATO_COL[e['mercato']], 'color': 'white',
@@ -898,9 +964,10 @@ def _tabella_trim(ev):
             html.Td(html.Span(nome_f, style={'color': col_f, 'fontWeight': '600',
                                              'fontSize': '11px'}), style=td),
         ], style={'borderBottom': '1px solid #eef1f5',
+                  'background': '#fff6cc' if cercata else 'transparent',
                   'fontStyle': 'italic' if stimata else 'normal'}))
     if not righe:
-        righe = [html.Tr(html.Td('Nessuna trimestrale in questa finestra', colSpan=7,
+        righe = [html.Tr(html.Td('Nessuna trimestrale trovata', colSpan=7,
                                  style={'padding': '18px', 'textAlign': 'center',
                                         'color': '#888', 'fontSize': '13px'}))]
     return html.Table([html.Thead(testa), html.Tbody(righe)], style={
@@ -912,42 +979,67 @@ def _tabella_trim(ev):
     Output('tr-tabella', 'children'),
     Output('tr-etichetta', 'children'),
     Output('tr-nota', 'children'),
+    Output('tr-avviso', 'children'),
+    Output('tr-ricerca-box', 'style'),
+    Output('tr-ricerca-tab', 'children'),
+    Output('tr-ricerca-tit', 'children'),
     Output('tr-attesa', 'disabled'),
     Input('tr-finestra', 'value'),
     Input('tr-scarto', 'data'),
     Input('tr-universo', 'value'),
     Input('tr-stimate', 'value'),
     Input('tr-cerca', 'value'),
+    Input('tr-cerca-btn', 'n_clicks'),
     Input('tr-attesa', 'n_intervals'),
 )
-def _aggiorna_trimestrali(finestra, scarto, universo, stimate, cerca, _n):
+def _aggiorna_trimestrali(finestra, scarto, universo, stimate, cerca, _b, _n):
+    # Grafico ed Elenco: sempre le trimestrali programmate nella finestra scelta.
     w0, w1, etichetta = _finestra_trim(finestra or 'sett', scarto or 0)
-    ev = tr.eventi(w0, w1, universo or 'principali', cerca)
+    ev = tr.eventi(w0, w1, universo or 'principali')
+    # Ricerca: a parte, senza limiti di finestra (da 45 giorni fa a 200 avanti) e su
+    # tutte le società note; se nessuna corrisponde, la si chiede a Yahoo.
+    testo = (cerca or '').strip()
+    ev_c, r0, r1 = [], None, None
+    if testo:
+        oggi = date.today()
+        r0, r1 = oggi - timedelta(days=45), oggi + tr._ORIZZONTE
+        ev_c = tr.eventi(r0, r1, 'tutte', testo, yahoo_al_volo=True)
     if 'si' not in (stimate or []):
         ev = [e for e in ev if e['fonte'] != 'stimata']
+        ev_c = [e for e in ev_c if e['fonte'] != 'stimata']
+    cercati = {e['ticker'] for e in ev_c}
     dati_ = tr.dati()
     attesa = tr.in_corso()
 
+    # Avvisi visibili sotto la ricerca; le spiegazioni stanno nel ⚙
+    avviso = []
+    if testo and not ev_c:
+        avviso.append(f'Nessuna trimestrale trovata per «{testo}», nemmeno su Yahoo: prova '
+                      'col ticker esatto (es. AAPL, ENI.MI).')
+    if attesa:
+        avviso.append('⏳ Aggiornamento del calendario in corso (circa un minuto): '
+                      'la pagina si completa da sola.')
+    if len(ev) > tr._MAX_RIGHE:
+        avviso.append(f"Mostrate le prime {tr._MAX_RIGHE} righe su {len(ev)}: restringi "
+                      "la finestra o usa la ricerca.")
     nota = []
     if dati_:
         agg = datetime.fromisoformat(dati_['aggiornato'])
-        nota.append(f"Dati aggiornati il {agg.strftime('%d/%m/%Y')}; prossimo "
-                    f"aggiornamento automatico il "
-                    f"{tr.prossimo_aggiornamento(dati_).strftime('%d/%m/%Y')}. ")
+        nota.append(html.P(f"Dati aggiornati il {agg.strftime('%d/%m/%Y')}; prossimo "
+                           f"aggiornamento automatico il "
+                           f"{tr.prossimo_aggiornamento(dati_).strftime('%d/%m/%Y')}."))
         if dati_.get('av_errore'):
-            nota.append(f"⚠ Alpha Vantage non ha risposto all'ultimo aggiornamento "
-                        f"({dati_['av_errore'][:90]}): restano le date precedenti. ")
-    if attesa:
-        nota.append('⏳ Aggiornamento del calendario in corso (circa un minuto): '
-                    'la pagina si completa da sola. ')
-    if len(ev) > tr._MAX_RIGHE:
-        nota.append(f"Mostrate le prime {tr._MAX_RIGHE} righe su {len(ev)}: restringi "
-                    "la finestra o usa la ricerca. ")
-    nota.append('«Confermata» = data annunciata dalla società (Alpha Vantage); «Prevista» = '
-                'prossima data secondo Yahoo; «Stimata» = ultima data nota + 13 settimane, '
-                'in corsivo. Le date possono cambiare fino all’annuncio.')
-    return (_grafico_trim(ev, w0, w1), _tabella_trim(ev), etichetta, ''.join(nota),
-            not attesa)
+            nota.append(html.P(f"⚠ Alpha Vantage non ha risposto all'ultimo aggiornamento "
+                               f"({dati_['av_errore'][:90]}): restano le date precedenti."))
+    nota.append(html.P('«Confermata» = data annunciata dalla società (Alpha Vantage); '
+                       '«Prevista» = prossima data secondo Yahoo; «Stimata» = ultima data nota '
+                       '+ 13 settimane, in corsivo. Le date possono cambiare fino all’annuncio.'))
+    ricerca_vis = {'display': 'block' if ev_c else 'none'}
+    titolo = (f'«{testo}» · {", ".join(sorted(cercati))} · {_fmt(r0)} → {_fmt(r1)}'
+              if ev_c else '')
+    return (_grafico_trim(ev, w0, w1), _tabella_trim(ev, cercati), etichetta, nota,
+            [html.Div(a) for a in avviso], ricerca_vis, _tabella_trim(ev_c, cercati) if ev_c else None,
+            titolo, not attesa)
 
 
 # Job trimestrale: parte all'import, come lo scheduler di portafoglio

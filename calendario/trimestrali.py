@@ -258,8 +258,43 @@ def _d(iso):
     except ValueError:
         return None
 
+_VOLO_CACHE = {}                     # testo → (istante, risultati) della ricerca al volo
+_VOLO_TTL = 6 * 3600
 
-def eventi(w0, w1, universo='principali', cerca=''):
+
+def _yahoo_al_volo(testo):
+    """[(ticker, nome, {data, eps})] delle azioni che Yahoo trova per `testo` (nome
+    o ticker), al massimo 3, con la prossima trimestrale da `Ticker.calendar`.
+    Cache di 6 ore, anche dei risultati vuoti: il campo si ridisegna spesso."""
+    chiave = testo.strip().lower()
+    c = _VOLO_CACHE.get(chiave)
+    if c and time.time() - c[0] < _VOLO_TTL:
+        return c[1]
+    out = []
+    try:
+        import yfinance as yf
+        quotes = yf.Search(testo, max_results=8, news_count=0).quotes or []
+        simboli = [(q['symbol'], q.get('shortname') or q.get('longname') or q['symbol'])
+                   for q in quotes if q.get('symbol') and q.get('quoteType') == 'EQUITY'][:3]
+        for tk, nome in simboli:
+            try:
+                cal = yf.Ticker(tk).calendar or {}
+            except Exception:                        # noqa: BLE001
+                continue
+            date_ = [d for d in (cal.get('Earnings Date') or []) if d]
+            if date_:
+                out.append((tk, nome, {'data': min(date_).isoformat(),
+                                       'eps': _num(cal.get('Earnings Average'))}))
+    except Exception as e:                           # noqa: BLE001
+        print(f'[trimestrali] ricerca Yahoo «{testo}» non riuscita: {e}')
+        return []
+    if len(_VOLO_CACHE) > 300:
+        _VOLO_CACHE.clear()
+    _VOLO_CACHE[chiave] = (time.time(), out)
+    return out
+
+
+def eventi(w0, w1, universo='principali', cerca='', yahoo_al_volo=False):
     """Trimestrali fra w0 e w1 (incluse). Ogni evento: dict con d, ticker, nome,
     mercato, momento, trimestre, eps, valuta, fonte ('confermata' | 'yahoo' |
     'stimata')."""
@@ -284,15 +319,14 @@ def eventi(w0, w1, universo='principali', cerca=''):
                             momento=momento, trimestre=trimestre, eps=eps,
                             valuta=valuta, fonte=fonte))
 
-    # Società principali: data nota (AV prima, poi Yahoo) + proiezioni a +13 settimane
-    for tk, nome in _UNIVERSO.items():
+    def _societa(tk, nome, y):
+        """Data nota (AV prima, poi Yahoo) + proiezioni a +13 settimane."""
         noti = sorted(av_per_tk.get(tk, []), key=lambda x: x[0])
         base = None
         for d, r in noti:
             _add(d, tk, nome, 'confermata', r[6], r[3], _num(r[4]), r[5])
             base = d
-        y = yahoo.get(tk) or {}
-        dy = _d(y.get('data'))
+        dy = _d((y or {}).get('data'))
         if dy and not any(abs((dy - d).days) <= 10 for d, _ in noti):
             # data già passata = trimestrale appena pubblicata: vale solo come base
             _add(dy, tk, nome, 'yahoo' if dy >= oggi else 'pubblicata',
@@ -305,6 +339,9 @@ def eventi(w0, w1, universo='principali', cerca=''):
                     _add(d, tk, nome, 'stimata')
                 d += _PASSO
 
+    for tk, nome in _UNIVERSO.items():
+        _societa(tk, nome, yahoo.get(tk))
+
     if universo == 'tutte':
         for tk, righe in av_per_tk.items():
             if tk in _UNIVERSO:
@@ -312,8 +349,22 @@ def eventi(w0, w1, universo='principali', cerca=''):
             for d, r in righe:
                 _add(d, tk, r[1].title(), 'confermata', r[6], r[3], _num(r[4]), r[5])
 
-    cerca = (cerca or '').strip().lower()
+    testo = (cerca or '').strip()
+    cerca = testo.lower()
     if cerca:
-        out = [e for e in out if cerca in e['ticker'].lower() or cerca in e['nome'].lower()]
+        # Prima il ticker esatto (ENI → ENI.MI), poi i nomi con una parola che
+        # comincia col testo, solo in mancanza la sottostringa («eni» è anche
+        # dentro «Fresenius»).
+        esatti = [e for e in out if cerca in (e['ticker'].lower(),
+                                               e['ticker'].lower().split('.')[0])]
+        parola = [e for e in out if any(p.startswith(cerca)
+                                        for p in e['nome'].lower().split())]
+        out = esatti or parola or [e for e in out if cerca in e['ticker'].lower()
+                                   or cerca in e['nome'].lower()]
+        # Nessuna società nota con quel nome: la si chiede a Yahoo al volo
+        # (ricerca per nome o ticker, poi `Ticker.calendar`).
+        if not out and yahoo_al_volo:
+            for tk, nome, y in _yahoo_al_volo(testo):
+                _societa(tk, nome, y)
     out.sort(key=lambda e: (e['d'], e['mercato'] != 'Italia', e['ticker']))
     return out
