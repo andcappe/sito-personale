@@ -611,12 +611,23 @@ def _cot_finestre_stoc(base, molt):
     return out
 
 
-def _cot_media_stoc(n):
-    """Media mobile del %K: come prima 30→5, 60→10, 120→20, 240→30."""
-    return int(min(30, max(3, round(n / 6))))
+def _cot_media_scelta(media):
+    """Valore del parametro «Filtro», la media dello stocastico (intero ≥ 1), None se vuoto o non valido."""
+    try:
+        m = int(round(float(media)))
+    except (TypeError, ValueError):
+        return None
+    return min(m, 500) if m >= 1 else None
 
 
-def _cot_figure(key, year_range, finestre=None, cell=False):
+def _cot_media_stoc(n, media=None):
+    """Media mobile del %K. Se l'utente la imposta vale per tutti e quattro gli
+    stocastici; vuota = automatica, n/6 fra 3 e 30 (30→5, 60→10, 120→20, 240→30)."""
+    m = _cot_media_scelta(media)
+    return m if m else int(min(30, max(3, round(n / 6))))
+
+
+def _cot_figure(key, year_range, finestre=None, cell=False, media=None):
     """Grafici separati del tab COT (uno sotto l'altro, titoli fuori da Plotly in
     layout.meta.titolo) + riepilogo. Il primo è il prezzo del sottostante (asse y1)
     con i quattro stocastici (asse y2); poi posizionamento, variazione settimanale,
@@ -751,7 +762,9 @@ def _cot_figure(key, year_range, finestre=None, cell=False):
     # ── 1) Prezzo (y1) e stocastici (y2) ──────────────────────────────────────
     if has_price:
         fin_txt = ' · '.join(f'{n} gg' for n in finestre)
-        nuovo(f'{price_label}: prezzo e stocastico  ·  {fin_txt} (%K con media mobile)',
+        m = _cot_media_scelta(media)
+        med_txt = f'filtro {m}' if m else 'filtro automatico'
+        nuovo(f'{price_label}: prezzo e stocastico  ·  {fin_txt} (%K, {med_txt})',
               560, 440, sec=True)
         fig.add_trace(go.Scatter(
             x=price.index, y=price.values, name=f'Prezzo {price_label}',
@@ -761,7 +774,7 @@ def _cot_figure(key, year_range, finestre=None, cell=False):
         _soglie([(80, '#bbb', 'dot'), (20, '#bbb', 'dot')], secondary_y=True)
         for i, n in enumerate(finestre):
             colore, larg = _COT_ST_COLORI[i % len(_COT_ST_COLORI)]
-            sm = _cot_media_stoc(n)
+            sm = _cot_media_stoc(n, media)
             st = _stoch_series(price_full, n, smooth=sm).reindex(price.index)
             fig.add_trace(go.Scatter(
                 x=st.index, y=st.values, name=f'Stocastico {n} gg', opacity=0.85,
@@ -879,9 +892,10 @@ def get_cot_tab():
     _et = {'font-size': '11px', 'color': '#1a3a5c', 'font-weight': '600', 'display': 'block',
            'margin-bottom': '2px'}
 
-    def campo(etichetta, cid, valore):
+    def campo(etichetta, cid, valore, segnaposto=None):
         return html.Div([html.Label(etichetta, style=_et),
                          dcc.Input(id=cid, type='number', value=valore, min=0, step='any',
+                                   placeholder=segnaposto,
                                    debounce=True, persistence=True, persistence_type='local',
                                    style=_num)])
 
@@ -896,13 +910,18 @@ def get_cot_tab():
         ], aperto=False),
         _ar_sezione('Parametri', [
             html.Div('Stocastici del grafico prezzo: finestra base in giorni e tre '
-                     'moltiplicatori (10 · 2 · 3 · 4 = 10, 20, 30, 40 giorni; vuoto = non usato).',
+                     'moltiplicatori (10 · 2 · 3 · 4 = 10, 20, 30, 40 giorni; vuoto = non usato). '
+                     'Filtro: periodi della media del %K, uguale per i quattro '
+                     '(vuoto = automatica, un sesto della finestra fra 3 e 30).',
                      className='cot-nota'),
             html.Div([
-                campo('Stocastico (gg)', 'cot-st-base', _COT_ST_BASE),
-                campo('× 2º', 'cot-st-m1', _COT_ST_MOLT[0]),
-                campo('× 3º', 'cot-st-m2', _COT_ST_MOLT[1]),
-                campo('× 4º', 'cot-st-m3', _COT_ST_MOLT[2]),
+                html.Div([
+                    campo('Stocastico (gg)', 'cot-st-base', _COT_ST_BASE),
+                    campo('× 2º', 'cot-st-m1', _COT_ST_MOLT[0]),
+                    campo('× 3º', 'cot-st-m2', _COT_ST_MOLT[1]),
+                    campo('× 4º', 'cot-st-m3', _COT_ST_MOLT[2]),
+                    campo('Filtro', 'cot-st-media', None, 'auto'),
+                ], style={'display': 'flex', 'gap': '8px', 'align-items': 'flex-end'}),
                 html.Div(id='cot-st-finestre', className='cot-nota',
                          style={'align-self': 'flex-end', 'padding-bottom': '6px'}),
             ], style={'display': 'flex', 'gap': '10px', 'flex-wrap': 'wrap'}),
@@ -1004,7 +1023,8 @@ _INFO = {
                                'si calcolano su tutta la storia e poi si ritagliano.'),
         ('Parametri', 'Quattro stocastici sul grafico del prezzo: finestra base in giorni e tre '
                       'moltiplicatori del primo valore (10 · 2 · 3 · 4 = 10, 20, 30, 40 giorni). '
-                      'Il %K è smussato con una media di circa 1/6 della finestra (min 3, max 30). '
+                      'Il %K è smussato con il «Filtro» (periodi, uguale per i quattro); '
+                      'lasciata vuota è automatica, circa 1/6 della finestra (min 3, max 30). '
                       'Un moltiplicatore vuoto toglie quello stocastico.'),
         ('Grafici', 'Primo: prezzo (asse sinistro) e stocastici (asse destro, 0–100, linee 80/20); '
                     'sotto il drawdown del prezzo. Poi posizionamento netto, variazione settimanale, '
@@ -1846,17 +1866,21 @@ def _at_switch_tab(tab):
     Input('cot-st-m1', 'value'),
     Input('cot-st-m2', 'value'),
     Input('cot-st-m3', 'value'),
+    Input('cot-st-media', 'value'),
     Input('val-cell', 'data'),
 )
-def _update_cot(key, year_range, n, base, m1, m2, m3, cell):
+def _update_cot(key, year_range, n, base, m1, m2, m3, media, cell):
     if not key:
         raise PreventUpdate
     # il pulsante 🔄 forza il refetch invalidando la cache dello strumento
     if callback_context.triggered_id == 'cot-refresh':
         _COT_CACHE.pop(key, None)
     finestre = _cot_finestre_stoc(base, (m1, m2, m3))
-    figure, summary, label = _cot_figure(key, year_range, finestre, bool(cell))
+    figure, summary, label = _cot_figure(key, year_range, finestre, bool(cell), media)
     fin = '= ' + ' · '.join(f'{x} gg' for x in finestre)
+    m = _cot_media_scelta(media)
+    fin += f' · filtro {m}' if m else (
+        ' · filtro ' + ' / '.join(str(_cot_media_stoc(x)) for x in finestre) + ' (auto)')
     return _ar_grafici(f'Posizionamento COT — {label}', figure), summary, fin
 
 

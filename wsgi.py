@@ -563,6 +563,14 @@ def _send_verify_email(to_email: str, token: str) -> bool:
 
 
 def _register_auth(flask_server, add_login_routes: bool = False):
+    # Contatore visite (visite.py): registrato per primo, così conta anche le
+    # pagine di chi verrà mandato al login. Non blocca mai la richiesta.
+    import visite
+
+    @flask_server.before_request
+    def _conta_visita():
+        visite.registra(request, session)
+
     """Aggiunge controllo autenticazione a un Flask server Dash."""
     from flask import request, session, redirect, send_from_directory
 
@@ -606,6 +614,7 @@ def _register_auth(flask_server, add_login_routes: bool = False):
                         msg = '<div class="error">Devi confermare la tua email prima di accedere. Ti abbiamo inviato un nuovo link di conferma.</div>'
                     else:
                         session['username'] = u
+                        visite.login(request, u, 'password')
                         next_url = request.args.get('next', '/portafoglio/')
                         return redirect(next_url)
                 else:
@@ -657,6 +666,7 @@ def _register_auth(flask_server, add_login_routes: bool = False):
                 else:
                     ok, message = register_user(email_val, password)
                     if ok:
+                        visite.registrazione(request, email_val.strip().lower())
                         token = create_verify_token(email_val.strip().lower())
                         _send_verify_email(email_val.strip().lower(), token)
                         return (_REGISTER_HTML
@@ -673,6 +683,7 @@ def _register_auth(flask_server, add_login_routes: bool = False):
             email = consume_verify_token(token)
             if email:
                 session['username'] = email
+                visite.login(request, email, 'conferma email')
                 return redirect('/portafoglio/?verified=1')
             return (_FORGOT_HTML
                     .replace('__MSG__', '<div class="error">Link non valido o scaduto. <a href="/register">Registrati di nuovo</a>.</div>')
@@ -797,11 +808,15 @@ def _register_auth(flask_server, add_login_routes: bool = False):
             email = info_r.json().get('email', '').lower()
             if not email:
                 return redirect('/login')
+            _nuovo = get_user(email) is None
             register_oauth_user(email, 'google')
+            if _nuovo:
+                visite.registrazione(request, email, 'google')
             user = get_user(email)
             if user and user.get('status') == 'suspended':
                 return redirect('/suspended')
             session['username'] = email
+            visite.login(request, email, 'google')
             return redirect(session.pop('oauth_next', '/portafoglio/'))
 
         # ─── Facebook OAuth ────────────────────────────────────────────────────
@@ -838,11 +853,15 @@ def _register_auth(flask_server, add_login_routes: bool = False):
             email = info_r.json().get('email', '').lower()
             if not email:
                 return redirect('/login?error=fb_no_email')
+            _nuovo = get_user(email) is None
             register_oauth_user(email, 'facebook')
+            if _nuovo:
+                visite.registrazione(request, email, 'facebook')
             user = get_user(email)
             if user and user.get('status') == 'suspended':
                 return redirect('/suspended')
             session['username'] = email
+            visite.login(request, email, 'facebook')
             return redirect(session.pop('oauth_next', '/portafoglio/'))
 
         @flask_server.route('/admin', methods=['GET', 'POST'])
@@ -940,6 +959,8 @@ def _register_auth(flask_server, add_login_routes: bool = False):
   <div class="topbar">
     <h1>A·C Dashboard — Admin Panel</h1>
     <div>
+      <a href="/admin/visite">Visite</a>
+      &nbsp;&nbsp;
       <a href="/admin/dati">Dati utenti</a>
       &nbsp;&nbsp;
       <a href="/">← Dashboard</a>
@@ -978,6 +999,11 @@ def _register_auth(flask_server, add_login_routes: bool = False):
             admin_dati.registra_rotte(flask_server, _ADMIN_HTML_HEAD)
         except Exception as _e_ad:
             print(f"\u26a0 [admin] pagine dati utenti non montate: {_e_ad}", flush=True)
+        try:
+            visite.registra_rotte(flask_server, _ADMIN_HTML_HEAD)
+            visite.avvia()
+        except Exception as _e_vi:
+            print(f"\u26a0 [admin] pagina visite non montata: {_e_vi}", flush=True)
 
     @flask_server.before_request
     def _require_login():

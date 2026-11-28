@@ -79,7 +79,7 @@ app.index_string = '''
 <html>
 <head>
 {%metas%}
-<title>Analisi di Portafoglio</title>
+<title>Analisi Strategica di Portafoglio</title>
 {%favicon%}
 {%css%}
 <style>
