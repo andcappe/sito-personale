@@ -19,6 +19,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in _sys.path:
     _sys.path.insert(0, _ROOT)
 from settings.browser_css import BROWSER_RESET_CSS  # noqa: E402  (reset CSS unico del sito)
+from navbar import make_navbar, tendina_cell  # noqa: E402
 
 
 # `statsmodels.api` costa da solo ~73 MB di memoria, piu' di tutti e sette i
@@ -2113,6 +2114,47 @@ app.index_string = ("""
   /* anni degli slider: sul cellulare uno ogni quattro (più l'ultimo), sennò si accavallano */
   #main-tabs-parent .rc-slider-mark-text:not(:nth-child(4n+1)):not(:last-child) { display: none; }
 }
+/* Cellulare: barra dei tab nascosta, al suo posto la tendina «Tabs Strumenti» */
+@media (max-width: 900px) {
+  #main-tabs { display: none !important; }
+  .nb-tendina { margin: 8px 8px 0; }
+}
+html.fred-embed .nb-tendina { display: none !important; }
+/* Analisi Monetaria a sezioni */
+.mc-pagina { padding: 10px 16px 24px; }
+.mc-box { border:1px solid #e2e8f0; border-radius:6px; background:#f8fafc;
+          padding:8px 10px; margin:0 0 10px; box-sizing:border-box; min-width:0; }
+.mc-box > .nb-espandi-btn { font-size:13px; font-weight:700; color:#1a3a6b; margin-bottom:6px; }
+.mc-riga { display:flex; gap:10px; align-items:stretch; }
+.mc-fonte { flex: 0 1 auto; }
+/* riquadro dei comandi di un grafico (vista/periodo, MV=PQ): tutto centrato, slider al massimo 900 px */
+.mc-comandi { background:#fff; border:1px solid #cbd5e1; border-radius:6px; padding:8px 12px 6px;
+              margin:0 0 8px; display:flex; flex-direction:column; align-items:center; gap:6px;
+              text-align:center; box-sizing:border-box; }
+.mc-comandi > * { width: 100%; max-width: 100%; }
+.mc-comandi .mc-slider { width: 100%; max-width: 900px; margin: 0 auto; box-sizing: border-box; }
+/* anni degli slider uno sì e uno no (sul cellulare uno ogni quattro) */
+.mc-comandi .rc-slider-mark-text:not(:nth-child(2n+1)):not(:last-child) { display: none; }
+.mc-serie { display:flex; gap:10px; align-items:flex-start; }
+.mc-serie-lista { flex: 0 0 200px; background:#fff; border:1px solid #e2e8f0; border-radius:4px; }
+.mc-serie-graf { flex: 1 1 auto; min-width: 0; background:#fff; }
+/* Curva dei Tassi: tassi attivi, una colonna per fonte */
+.mc-tassi { display: grid; grid-template-columns: repeat(2, minmax(0, 220px)); gap: 4px 24px; }
+.mc-tassi-col { background: #fff; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 10px; }
+.mc-tassi-btn { display: flex; gap: 4px; margin-top: 6px; padding-top: 6px; border-top: 1px solid #e2e8f0; }
+.mc-tassi-tit { font-size: 11px; color: #1a3a6b; padding-bottom: 4px; margin-bottom: 6px;
+                border-bottom: 1px solid #e2e8f0; }
+@media (max-width: 900px) {
+  .mc-pagina { padding: 8px 8px 16px; }
+  .mc-tassi { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 8px; }
+  .mc-riga, .mc-serie { flex-direction: column; gap: 0; }
+  .mc-riga > .mc-box { width: 100%; }
+  .mc-serie-lista { flex: 1 1 auto; width: 100%; margin-bottom: 8px; box-sizing: border-box; }
+  .mc-serie-graf { width: 100%; }
+  .mc-box { padding: 8px; }
+  .mc-comandi { padding: 6px 4px 4px; }
+  .mc-comandi .mc-slider { padding: 8px 16px 2px !important; }
+}
 /* embed: nasconde la barra delle tab → mostra solo la tab attiva */
 html.fred-embed #main-tabs > div:first-child { display: none !important; }
 </style>
@@ -2158,61 +2200,10 @@ def _sidebar_default():
     ], style={"padding": "12px", "overflow-y": "auto"})
 
 
-def _controls_bar():
+def _mvpq_controlli():
+    """Comandi del grafico MV=PQ (Livelli/YoY/CumProd e, in Confronto, le serie):
+    stanno nella fascia sopra quel grafico, non nella barra in alto."""
     return html.Div([
-        # Fonte dati
-        html.Div([
-            html.Label("Fonte:", style={"font-size": "11px", "font-weight": "bold",
-                                        "margin-right": "8px", "white-space": "nowrap"}),
-            dcc.RadioItems(
-                id="mon-source-type",
-                options=[
-                    {"label": " 🇺🇸 USA (FRED)", "value": "usa"},
-                    {"label": " 🇪🇺 Eurostat",   "value": "eur"},
-                    {"label": " 🆚 Confronto",    "value": "both"},
-                ],
-                value="usa", inline=True,
-                style={"font-size": "11px"},
-                inputStyle={"margin-right": "3px"},
-                labelStyle={"margin-right": "12px"},
-            ),
-            html.Div(
-                dcc.Dropdown(
-                    id="mon-eur-geo",
-                    options=[{"label": v, "value": k}
-                             for k, v in EUROSTAT_GEO.items()],
-                    value="EA20", clearable=False,
-                    style={"font-size": "10px", "min-width": "160px"},
-                ),
-                id="mon-geo-wrapper",
-                style={"display": "none", "margin-left": "6px"},
-            ),
-        ], style={"display": "flex", "align-items": "center",
-                  "background": "#f3e5f5", "border": "1px solid #ce93d8",
-                  "border-radius": "4px", "padding": "5px 12px",
-                  "margin-right": "14px"}),
-
-        html.Div([
-            html.Label("Vista:", style={"font-size": "11px", "font-weight": "bold",
-                                        "margin-right": "8px",
-                                        "white-space": "nowrap"}),
-            dcc.RadioItems(
-                id="view-mode",
-                options=[
-                    {"label": " Assoluta",            "value": "abs"},
-                    {"label": " Δ% YoY",              "value": "yoy"},
-                    {"label": " Cumulata % (da slider)", "value": "cumsum"},
-                ],
-                value="yoy", inline=True,
-                style={"font-size": "11px"},
-                inputStyle={"margin-right": "3px"},
-                labelStyle={"margin-right": "14px"},
-            ),
-        ], style={"display": "flex", "align-items": "center",
-                  "background": "#fff8e1", "border": "1px solid #ffe082",
-                  "border-radius": "4px", "padding": "5px 12px",
-                  "margin-right": "14px"}),
-
         html.Div([
             html.Label("MV=PQ:", style={"font-size": "11px", "font-weight": "bold",
                                          "margin-right": "8px", "white-space": "nowrap"}),
@@ -2229,10 +2220,7 @@ def _controls_bar():
                 inputStyle={"margin-right": "3px"},
                 labelStyle={"margin-right": "10px"},
             ),
-        ], style={"display": "flex", "align-items": "center",
-                  "background": "#e8f5e9", "border": "1px solid #a5d6a7",
-                  "border-radius": "4px", "padding": "5px 12px",
-                  "margin-right": "14px"}),
+        ], style={"display": "flex", "align-items": "center"}),
 
         html.Div(
             html.Div([
@@ -2252,190 +2240,183 @@ def _controls_bar():
                     inputStyle={"margin-right": "3px"},
                     labelStyle={"margin-right": "10px"},
                 ),
-            ], style={"display": "flex", "align-items": "center",
-                      "background": "#fce4ec", "border": "1px solid #f48fb1",
-                      "border-radius": "4px", "padding": "5px 12px"}),
+            ], style={"display": "flex", "align-items": "center"}),
             id="mvpq-series-wrapper",
-            style={"display": "none", "margin-right": "14px"},
+            style={"display": "none"},
         ),
+    ], style={"display": "flex", "flex-wrap": "wrap", "align-items": "center",
+              "justify-content": "center", "gap": "6px 18px"})
 
+
+_RADIO = dict(style={"font-size": "11px"}, inputStyle={"margin-right": "3px"},
+              labelStyle={"margin-right": "12px", "white-space": "nowrap"})
+
+
+def _sezione(titolo, corpo, aperto=True, classe=""):
+    """Riquadro con intestazione: sul computer sempre aperto, sul cellulare una
+    scheda che si apre e chiude (nb-espandi, NAVBAR_JS)."""
+    return html.Div([
+        html.Div([html.Span(titolo),
+                  html.I(className="fa-solid fa-chevron-down nb-espandi-ico")],
+                 className="nb-espandi-btn"),
+        html.Div(corpo, className="nb-espandi-corpo"),
+    ], className=("nb-espandi mc-box" + (" nb-aperto" if aperto else "")
+                  + (" " + classe if classe else "")))
+
+
+def _fonte_corpo():
+    """Sezione «Fonte»: USA / Eurostat / Confronto, area euro e «Carica dati»."""
+    return html.Div([
+        dcc.RadioItems(
+            id="mon-source-type",
+            options=[
+                {"label": " 🇺🇸 USA (FRED)", "value": "usa"},
+                {"label": " 🇪🇺 Eurostat",   "value": "eur"},
+                {"label": " 🆚 Confronto",    "value": "both"},
+            ],
+            value="usa", inline=True, **_RADIO,
+        ),
+        html.Div(
+            dcc.Dropdown(
+                id="mon-eur-geo",
+                options=[{"label": v, "value": k}
+                         for k, v in EUROSTAT_GEO.items()],
+                value="EA20", clearable=False,
+                style={"font-size": "10px", "min-width": "160px"},
+            ),
+            id="mon-geo-wrapper",
+            style={"display": "none", "margin-left": "6px"},
+        ),
         html.Button(
             "🔄  Carica dati",
             id="btn-aggiorna", n_clicks=0,
             style={
                 "background": "#1a5276", "color": "white",
-                "border": "none", "padding": "8px 22px",
+                "border": "none", "padding": "7px 18px",
                 "border-radius": "5px", "cursor": "pointer",
-                "font-size": "13px", "font-weight": "bold",
-                "letter-spacing": "0.5px",
+                "font-size": "12px", "font-weight": "bold",
                 "box-shadow": "0 2px 4px rgba(0,0,0,0.3)",
             }
         ),
-
         html.Div(id="status-msg",
                  style={"font-size": "11px", "color": "#444",
-                        "margin-left": "14px", "font-style": "italic"}),
+                        "font-style": "italic", "flex-basis": "100%"}),
     ], style={"display": "flex", "align-items": "center",
-              "padding": "8px 16px", "background": "#f0f4fa",
-              "border-bottom": "1px solid #dee2e6",
               "flex-wrap": "wrap", "gap": "8px"})
 
 
-def _slider_area():
+def _vista_corpo():
+    """Comandi di vista in testa a «Grafico Serie»: trasformazione delle serie e periodo."""
+    return html.Div([
+        dcc.RadioItems(
+            id="view-mode",
+            options=[
+                {"label": " Assoluta",            "value": "abs"},
+                {"label": " Δ% YoY",              "value": "yoy"},
+                {"label": " Cumulata % (da slider)", "value": "cumsum"},
+            ],
+            value="yoy", inline=True, **_RADIO,
+        ),
+        _slider_area(),
+    ])
+
+
+def _slider_area(id_slider="date-slider", id_etichetta="slider-label"):
     return html.Div([
         dcc.RangeSlider(
-            id="date-slider",
+            id=id_slider,
             min=0, max=1, value=[0, 1],
             marks={}, step=86400 * 30,
-            tooltip={"placement": "bottom", "always_visible": False},
         ),
-        html.Div(id="slider-label",
+        html.Div(id=id_etichetta,
                  style={"font-size": "10px", "color": "#666",
                         "text-align": "center", "margin-top": "2px"}),
-    ], style={"padding": "8px 28px 2px"})
+    ], className="mc-slider", style={"padding": "8px 28px 2px"})
 
 
 def _yields_tab_layout():
+    """Curva dei Tassi a sezioni: Fonte, Tassi attivi (una colonna per USA o Europa, due in
+    Confronto, ognuna con «Tutto» / «Niente») e Grafici, con in testa il riquadro della vista
+    (Storico / Curva / Entrambi) e dello slider del periodo. Stessi id di prima, salvo «yields-hist-mode»
+    (Assoluti / Δ% YoY) che non c'è più: lo storico è sempre in valori assoluti."""
+    fonte = html.Div([
+        dcc.RadioItems(
+            id="yields-source",
+            options=[
+                {"label": " 🇺🇸 USA",      "value": "usa"},
+                {"label": " 🇪🇺 Europa",   "value": "eur"},
+                {"label": " 🆚 Confronto", "value": "both"},
+            ],
+            value="usa", inline=True, **_RADIO,
+        ),
+        html.Button("🔄  Ricarica tassi", id="btn-reload-yields", n_clicks=0,
+                    style={"background": "#1a5276", "color": "white",
+                           "border": "none", "padding": "7px 16px",
+                           "border-radius": "5px", "cursor": "pointer",
+                           "font-size": "12px", "font-weight": "bold"}),
+        html.Div(id="yields-status",
+                 style={"font-size": "11px", "color": "#444", "font-style": "italic",
+                        "flex-basis": "100%"}),
+    ], style={"display": "flex", "flex-wrap": "wrap", "align-items": "center", "gap": "8px 14px"})
+
+    vista = html.Div([
+        dcc.RadioItems(
+            id="yields-view",
+            options=[
+                {"label": " Storico",      "value": "history"},
+                {"label": " Curva tassi",  "value": "curve"},
+                {"label": " Entrambi",     "value": "both"},
+            ],
+            value="both", inline=True, **_RADIO,
+        ),
+        html.Div([
+            dcc.RangeSlider(
+                id="yields-slider",
+                min=0, max=1, value=[0, 1],
+                marks={}, step=86400,
+            ),
+            html.Div(id="yields-slider-label",
+                     style={"font-size": "10px", "color": "#666",
+                            "text-align": "center", "margin-top": "2px"}),
+        ], className="mc-slider", style={"padding": "8px 28px 2px"}),
+    ], className="mc-comandi")
+
+    # «Tutto» / «Niente» sono dentro ogni colonna (yields_populate_checklist)
+    tassi = html.Div(id="yields-checklist-container", children="— carica i dati —",
+                     style={"font-size": "10px", "color": "#888"})
+
+    grafici = [
+        html.Div(id="wrap-yields-history", children=[
+            dcc.Loading(type="circle", children=[
+                dcc.Graph(id="chart-yields-history",
+                          figure=empty_fig("Caricamento..."),
+                          style={"height": "560px", "width": "100%"},
+                          config={"responsive": True, "scrollZoom": True}),
+            ]),
+        ], style={"display": "block"}),
+        html.Div(id="wrap-yields-curve", children=[
+            html.Div([
+                html.B("Snapshot curva dei tassi", style={"font-size": "11px", "color": "#1a5276"}),
+                html.Span("  Confronto fra ultimi snapshot nel periodo selezionato",
+                          style={"font-size": "10px", "color": "#666", "margin-left": "8px"}),
+            ], id="wrap-yields-curve-header",
+               style={"padding": "5px 10px", "background": "#eaf4fb",
+                      "border": "1px solid #aed6f1", "margin-top": "8px"}),
+            dcc.Loading(type="circle", children=[
+                dcc.Graph(id="chart-yields-curve",
+                          figure=empty_fig("Caricamento..."),
+                          style={"height": "560px", "width": "100%"},
+                          config={"responsive": True, "scrollZoom": True}),
+            ]),
+        ], style={"display": "block"}),
+    ]
+
     return html.Div([
-        html.Div([
-            html.Div([
-                html.Label("Fonte:", style={"font-size": "11px", "font-weight": "bold",
-                                             "margin-right": "8px", "white-space": "nowrap"}),
-                dcc.RadioItems(
-                    id="yields-source",
-                    options=[
-                        {"label": " 🇺🇸 USA",      "value": "usa"},
-                        {"label": " 🇪🇺 Europa",   "value": "eur"},
-                        {"label": " 🆚 Entrambi",  "value": "both"},
-                    ],
-                    value="usa", inline=True,
-                    style={"font-size": "11px"},
-                    inputStyle={"margin-right": "3px"},
-                    labelStyle={"margin-right": "12px"},
-                ),
-            ], style={"display": "flex", "align-items": "center",
-                      "background": "#f3e5f5", "border": "1px solid #ce93d8",
-                      "border-radius": "4px", "padding": "5px 12px",
-                      "margin-right": "14px"}),
-
-            html.Div([
-                html.Label("Vista:", style={"font-size": "11px", "font-weight": "bold",
-                                             "margin-right": "8px", "white-space": "nowrap"}),
-                dcc.RadioItems(
-                    id="yields-view",
-                    options=[
-                        {"label": " Storico",      "value": "history"},
-                        {"label": " Curva tassi",  "value": "curve"},
-                        {"label": " Entrambi",     "value": "both"},
-                    ],
-                    value="both", inline=True,
-                    style={"font-size": "11px"},
-                    inputStyle={"margin-right": "3px"},
-                    labelStyle={"margin-right": "12px"},
-                ),
-            ], style={"display": "flex", "align-items": "center",
-                      "background": "#fff8e1", "border": "1px solid #ffe082",
-                      "border-radius": "4px", "padding": "5px 12px",
-                      "margin-right": "14px"}),
-
-            html.Div([
-                html.Label("Vista storico:", style={"font-size": "11px", "font-weight": "bold",
-                                                     "margin-right": "8px", "white-space": "nowrap"}),
-                dcc.RadioItems(
-                    id="yields-hist-mode",
-                    options=[
-                        {"label": " Assoluti", "value": "abs"},
-                        {"label": " Δ% YoY",   "value": "yoy"},
-                    ],
-                    value="abs", inline=True,
-                    style={"font-size": "11px"},
-                    inputStyle={"margin-right": "3px"},
-                    labelStyle={"margin-right": "12px"},
-                ),
-            ], style={"display": "flex", "align-items": "center",
-                      "background": "#e8f5e9", "border": "1px solid #a5d6a7",
-                      "border-radius": "4px", "padding": "5px 12px",
-                      "margin-right": "14px"}),
-
-            html.Button("🔄  Ricarica tassi", id="btn-reload-yields", n_clicks=0,
-                        style={"background": "#1a5276", "color": "white",
-                               "border": "none", "padding": "7px 16px",
-                               "border-radius": "5px", "cursor": "pointer",
-                               "font-size": "12px", "font-weight": "bold"}),
-
-            html.Div(id="yields-status",
-                     style={"font-size": "11px", "color": "#444",
-                            "margin-left": "14px", "font-style": "italic"}),
-        ], style={"display": "flex", "align-items": "center",
-                  "padding": "8px 16px", "background": "#f0f4fa",
-                  "border-bottom": "1px solid #dee2e6",
-                  "flex-wrap": "wrap", "gap": "8px"}),
-
-        html.Div([
-            html.Div([
-                html.Div(html.B("Tassi attivi", style={"font-size": "11px"}),
-                         style={"padding-bottom": "6px", "margin-bottom": "8px",
-                                "border-bottom": "2px solid #ccc"}),
-                html.Div(id="yields-checklist-container",
-                         children="— carica i dati —",
-                         style={"font-size": "10px", "color": "#888"}),
-                html.Hr(style={"margin": "10px 0"}),
-                html.Div([
-                    html.Button("✔ Tutto", id="yield-sel-all", n_clicks=0,
-                                style={"font-size": "9px", "padding": "2px 7px",
-                                       "margin-right": "4px", "cursor": "pointer"}),
-                    html.Button("✘ Niente", id="yield-sel-none", n_clicks=0,
-                                style={"font-size": "9px", "padding": "2px 7px",
-                                       "cursor": "pointer"}),
-                ], style={"display": "flex"}),
-            ], style={"width": "210px", "min-width": "200px", "padding": "12px",
-                      "border-right": "1px solid #ddd",
-                      "height": "calc(100vh - 130px)",
-                      "overflow-y": "auto", "background": "#fafafa"}),
-
-            html.Div([
-                html.Div([
-                    dcc.RangeSlider(
-                        id="yields-slider",
-                        min=0, max=1, value=[0, 1],
-                        marks={}, step=86400,
-                        tooltip={"placement": "bottom", "always_visible": False},
-                    ),
-                    html.Div(id="yields-slider-label",
-                             style={"font-size": "10px", "color": "#666",
-                                    "text-align": "center", "margin-top": "2px"}),
-                ], style={"padding": "8px 28px 2px"}),
-
-                html.Div(id="wrap-yields-history", children=[
-                    dcc.Loading(type="circle", children=[
-                        dcc.Graph(id="chart-yields-history",
-                                  figure=empty_fig("Caricamento..."),
-                                  style={"height": "82vh"},
-                                  config={"responsive": True, "scrollZoom": True}),
-                    ]),
-                ], style={"display": "block"}),
-
-                html.Div(id="wrap-yields-curve", children=[
-                    html.Div([
-                        html.B("Snapshot curva dei tassi", style={"font-size": "11px", "color": "#1a5276"}),
-                        html.Span("  Confronto fra ultimi 5 snapshot nel periodo selezionato",
-                                  style={"font-size": "10px", "color": "#666", "margin-left": "8px"}),
-                    ], id="wrap-yields-curve-header",
-                       style={"padding": "5px 16px", "background": "#eaf4fb",
-                              "border-top": "1px solid #aed6f1",
-                              "border-bottom": "1px solid #aed6f1"}),
-                    dcc.Loading(type="circle", children=[
-                        dcc.Graph(id="chart-yields-curve",
-                                  figure=empty_fig("Caricamento..."),
-                                  style={"height": "82vh"},
-                                  config={"responsive": True, "scrollZoom": True}),
-                    ]),
-                ], style={"display": "block"}),
-            ], style={"flex": "1", "min-width": "0",
-                      "overflow-y": "auto",
-                      "height": "calc(100vh - 130px)"}),
-        ], style={"display": "flex"}),
-    ])
+        _sezione("Fonte", fonte, aperto=False),
+        _sezione("Tassi attivi", tassi),
+        # vista (Storico / Curva / Entrambi) e periodo in testa ai grafici che comandano
+        _sezione("Grafici", html.Div([vista] + grafici, className="mc-serie-graf")),
+    ], className="mc-pagina")
 
 
 def _pil_unified_tab_layout():
@@ -4548,8 +4529,24 @@ def _compare_tab_layout():
 # APP LAYOUT
 # =============================================================================
 
+# Sotto-tab nell'ordine dei dcc.Tab qui sotto (dati, poi modelli, Guida in fondo):
+# servono alla tendina «Tabs Strumenti» del cellulare. [(etichetta, valore)]
+_MACRO_SOTTOTAB = [
+    ('📊 Analisi Monetaria', 'tab1'),
+    ('📈 Curva dei Tassi', 'tab2'),
+    ('🏭 PIL', 'tab3'),
+    ('📊 Confronto Serie', 'tab-compare'),
+    ('🛢 Shock & Banche Centrali', 'tab-shock'),
+    ('📐 Regressione', 'tab5'),
+    ('〜 ARIMA / SARIMA', 'tab-arima'),
+    ('📐 Modello ADL', 'tab-adl'),
+    ('📐 Phillips', 'tab-phillips'),
+    ('⚙ DSGE', 'tab-dsge'),
+    ('ℹ Guida', 'tab4'),
+]
+
+
 def _fred_navbar():
-    from navbar import make_navbar
     return make_navbar(current='macro', margine='16px')   # = intestazione della dashboard
 
 
@@ -4826,45 +4823,42 @@ app.layout = html.Div([
               "align-items": "center", "justify-content": "center"}),
 
     # ── TABS ─────────────────────────────────────────────────────────────────
+    # Sul cellulare la barra dei tab è nascosta (CSS) e i sotto-tab sono la tendina
+    # «Tabs Strumenti», come in Clienti e Calendario.
+    tendina_cell('macro-tendina', _MACRO_SOTTOTAB),
     dcc.Tabs(id="main-tabs", value="tab1", children=[
 
         dcc.Tab(label="📊  Analisi Monetaria", value="tab1", children=[
-            _controls_bar(),
             html.Div([
-                html.Div(_sidebar_default(),
-                         style={"width": "210px", "min-width": "200px",
-                                "border-right": "1px solid #ddd",
-                                "height": "calc(100vh - 120px)",
-                                "overflow-y": "auto",
-                                "background": "#fafafa"}),
-                html.Div([
-                    _slider_area(),
-                    dcc.Loading(type="circle", children=[
+                _sezione("Fonte", _fonte_corpo(), aperto=False),
+                _sezione("Grafico Serie", [
+                    html.Div([
+                    html.Div(_sidebar_default(), className="mc-serie-lista"),
+                    html.Div([html.Div(_vista_corpo(), className="mc-comandi"),
+                              dcc.Loading(type="circle", children=[
                         dcc.Graph(id="chart-main",
                                   figure=empty_fig("Clicca ▶ AGGIORNA per caricare i dati"),
-                                  style={"height": "42vh", "width": "100%"},
+                                  style={"height": "480px", "width": "100%"},
                                   config={"responsive": True, "scrollZoom": True}),
-                    ]),
+                    ]), ], className="mc-serie-graf"),
+                ], className="mc-serie")]),
+                _sezione("Equazione Monetaria", [
                     html.Div([
-                        html.B("MV = PQ — Teoria Quantitativa della Moneta",
-                               style={"font-size": "11px", "color": "#1a5276"}),
-                        html.Span("  M·V = Moneta × Velocità  |  P·Q = CPI × PIL Reale",
-                                  style={"font-size": "10px", "color": "#666",
-                                         "margin-left": "10px"}),
-                    ], style={"padding": "5px 16px",
-                              "background": "#eaf4fb",
-                              "border-top": "1px solid #aed6f1",
-                              "border-bottom": "1px solid #aed6f1"}),
+                        html.Div("MV = PQ — Teoria Quantitativa della Moneta · "
+                                 "M·V = Moneta × Velocità  |  P·Q = CPI × PIL Reale",
+                                 style={"font-size": "11px", "color": "#555"}),
+                        _mvpq_controlli(),
+                        # periodo solo di questo grafico: segue quello del Grafico Serie finché non lo si muove
+                        _slider_area("mvpq-slider", "mvpq-slider-label"),
+                    ], className="mc-comandi"),
                     dcc.Loading(type="circle", children=[
                         dcc.Graph(id="chart-mvpq",
                                   figure=empty_fig("Clicca ▶ AGGIORNA per caricare i dati"),
-                                  style={"height": "43vh", "minHeight": "420px", "width": "100%"},
+                                  style={"height": "620px", "width": "100%"},
                                   config={"responsive": True, "scrollZoom": True}),
                     ]),
-                ], style={"flex": "1", "min-width": "0",
-                          "overflow-y": "auto",
-                          "height": "calc(100vh - 120px)"}),
-            ], style={"display": "flex"}),
+                ]),
+            ], className="mc-pagina"),
         ]),
 
         dcc.Tab(label="📈  Curva dei Tassi", value="tab2", children=[
@@ -4875,12 +4869,16 @@ app.layout = html.Div([
             _pil_unified_tab_layout(),
         ]),
 
-        dcc.Tab(label="📐  Regressione", value="tab5", children=[
-            _regression_tab_layout(),
+        dcc.Tab(label="📊  Confronto Serie", value="tab-compare", children=[
+            _compare_tab_layout(),
         ]),
 
         dcc.Tab(label="🛢  Shock & Banche Centrali", value="tab-shock", children=[
             _shock_tab_layout(),
+        ]),
+
+        dcc.Tab(label="📐  Regressione", value="tab5", children=[
+            _regression_tab_layout(),
         ]),
 
         dcc.Tab(label="〜  ARIMA / SARIMA", value="tab-arima", children=[
@@ -4897,10 +4895,6 @@ app.layout = html.Div([
 
         dcc.Tab(label="⚙  DSGE", value="tab-dsge", children=[
             _dsge_tab_layout(),
-        ]),
-
-        dcc.Tab(label="📊  Confronto Serie", value="tab-compare", children=[
-            _compare_tab_layout(),
         ]),
 
         dcc.Tab(label="ℹ  Guida", value="tab4", children=[
@@ -5080,7 +5074,7 @@ def mon_toggle_geo(source_type):
     Input("mon-source-type", "value"),
 )
 def mon_toggle_series_check(source_type):
-    base = {"margin-right": "14px"}
+    base = {}
     return base if source_type == "both" else {**base, "display": "none"}
 
 
@@ -5301,7 +5295,8 @@ def mon_populate_checklist(data, source_type):
             dcc.Checklist(
                 id={"type": "series-check", "index": col},
                 options=[{"label": f" {short}", "value": col}],
-                value=[col],
+                # all'apertura attive solo CPI e CPI Core (anche 🇺🇸/🇪🇺 in Confronto)
+                value=[col] if col.startswith("CPI") else [],
                 style={"font-size": "10px", "display": "inline"},
                 inputStyle={"margin-right": "3px"},
             ),
@@ -5325,22 +5320,7 @@ def sel_desel(a, b, ids):
     return [[i["index"]] for i in ids]
 
 
-@app.callback(
-    Output("chart-main", "figure"),
-    Output("chart-mvpq", "figure"),
-    Input("store-data",  "data"),
-    Input("date-slider", "value"),
-    Input({"type": "series-check", "index": ALL}, "value"),
-    Input("view-mode",   "value"),
-    Input("mvpq-show", "value"),
-    Input("mvpq-series-show", "value"),
-    State("store-mon-source-type", "data"),
-    prevent_initial_call=False,
-)
-def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_show, source_type):
-    if not data:
-        f = empty_fig("Clicca  ▶ AGGIORNA  per scaricare i dati")
-        return f, f
+def _mon_df_periodo(data, slider_val):
     df = pd.read_json(io.StringIO(data), orient="split")
     df.index = pd.to_datetime(df.index)
     if slider_val and (slider_val[1] - slider_val[0]) > 86400:
@@ -5349,6 +5329,63 @@ def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_sh
     else:
         start = df.index.min()
         end   = df.index.max()
+    return df, start, end
+
+
+# Lo slider dell'Equazione Monetaria riprende limiti, tacche e periodo da quello di Vista
+@app.callback(
+    Output("mvpq-slider", "min"),
+    Output("mvpq-slider", "max"),
+    Output("mvpq-slider", "marks"),
+    Output("mvpq-slider", "value"),
+    Input("date-slider", "min"),
+    Input("date-slider", "max"),
+    Input("date-slider", "marks"),
+    Input("date-slider", "value"),
+)
+def mvpq_segui_slider(mn, mx, marks, val):
+    return mn, mx, marks, val
+
+
+@app.callback(
+    Output("mvpq-slider-label", "children"),
+    Input("mvpq-slider", "value"),
+)
+def mvpq_slider_label(val):
+    return slider_label(val)
+
+
+@app.callback(
+    Output("chart-mvpq", "figure"),
+    Input("store-data",  "data"),
+    Input("mvpq-slider", "value"),
+    Input("mvpq-show", "value"),
+    Input("mvpq-series-show", "value"),
+    State("store-mon-source-type", "data"),
+    prevent_initial_call=False,
+)
+def update_mvpq(data, slider_val, mvpq_show, mvpq_series_show, source_type):
+    if not data:
+        return empty_fig("Clicca  ▶ AGGIORNA  per scaricare i dati")
+    df, start, end = _mon_df_periodo(data, slider_val)
+    if source_type == "both":
+        return make_mvpq_both_chart(df, start, end, mvpq_show, mvpq_series_show)
+    return make_mvpq_chart(df, "both", start, end, mvpq_show)
+
+
+@app.callback(
+    Output("chart-main", "figure"),
+    Input("store-data",  "data"),
+    Input("date-slider", "value"),
+    Input({"type": "series-check", "index": ALL}, "value"),
+    Input("view-mode",   "value"),
+    State("store-mon-source-type", "data"),
+    prevent_initial_call=False,
+)
+def update_charts(data, slider_val, checks, view_mode, source_type):
+    if not data:
+        return empty_fig("Clicca  ▶ AGGIORNA  per scaricare i dati")
+    df, start, end = _mon_df_periodo(data, slider_val)
     selected = [v[0] for v in (checks or []) if v]
     avail    = [c for c in selected if c in df.columns]
     if source_type == "eur":
@@ -5374,11 +5411,7 @@ def update_charts(data, slider_val, checks, view_mode, mvpq_show, mvpq_series_sh
                 title = "Serie Monetarie — Crescita % Cumulata" + title_suffix
                 ylabel, zero = "Crescita % cumulata", True
             fig1 = make_line_chart(df_plot, title, ylabel, zero)
-    if source_type == "both":
-        fig2 = make_mvpq_both_chart(df, start, end, mvpq_show, mvpq_series_show)
-    else:
-        fig2 = make_mvpq_chart(df, "both", start, end, mvpq_show)
-    return fig1, fig2
+    return fig1
 
 
 # =============================================================================
@@ -5445,15 +5478,31 @@ def yields_slider_label(val):
     Input("yields-source",    "value"),
 )
 def yields_populate_checklist(usa_data, eur_data, source):
-    labels = []
+    gruppi = []
     if source in ("usa", "both") and usa_data:
         df = pd.read_json(io.StringIO(usa_data), orient="split")
-        labels += df.columns.tolist()
+        gruppi.append(("usa", "🇺🇸 USA", df.columns.tolist()))
     if source in ("eur", "both") and eur_data:
         df = pd.read_json(io.StringIO(eur_data), orient="split")
-        labels += df.columns.tolist()
-    if not labels:
+        gruppi.append(("eur", "🇪🇺 Europa", df.columns.tolist()))
+    if not gruppi:
         return "— carica i dati —"
+    # USA o Europa: una colonna; Confronto: USA nella prima, Europa nella seconda
+    btn = {"font-size": "9px", "padding": "2px 7px", "cursor": "pointer"}
+    return html.Div([
+        html.Div([html.Div(html.B(tit), className="mc-tassi-tit")] + _yield_righe(lab) + [
+            html.Div([
+                html.Button("✔ Tutto", id={"type": "yield-col-tutto", "index": col},
+                            n_clicks=0, style=btn),
+                html.Button("✘ Niente", id={"type": "yield-col-niente", "index": col},
+                            n_clicks=0, style=btn),
+            ], className="mc-tassi-btn"),
+        ], className="mc-tassi-col")
+        for col, tit, lab in gruppi
+    ], className="mc-tassi")
+
+
+def _yield_righe(labels):
     rows = []
     for lbl in labels:
         color = "#1565c0" if "🇪🇺" in lbl else "#b71c1c"
@@ -5473,18 +5522,23 @@ def yields_populate_checklist(usa_data, eur_data, source):
 
 @app.callback(
     Output({"type": "yield-check", "index": ALL}, "value"),
-    Input("yield-sel-all",  "n_clicks"),
-    Input("yield-sel-none", "n_clicks"),
+    Input({"type": "yield-col-tutto",  "index": ALL}, "n_clicks"),
+    Input({"type": "yield-col-niente", "index": ALL}, "n_clicks"),
     State({"type": "yield-check", "index": ALL}, "id"),
+    State({"type": "yield-check", "index": ALL}, "value"),
     prevent_initial_call=True,
 )
-def yield_sel_desel(a, b, ids):
-    ctx = callback_context
-    if not ctx.triggered:
+def yield_sel_desel(_t, _n, ids, valori):
+    """«Tutto» / «Niente» di una colonna: toccano solo i tassi di quella colonna
+    (Europa = etichette con 🇪🇺, USA = le altre)."""
+    trig = callback_context.triggered_id
+    # i pulsanti nascono con la lista: il callback parte anche allora, senza clic
+    if not trig or not any(t.get("value") for t in callback_context.triggered):
         raise PreventUpdate
-    if ctx.triggered_id == "yield-sel-none":
-        return [[] for _ in ids]
-    return [[i["index"]] for i in ids]
+    eur = trig["index"] == "eur"
+    tutto = trig["type"] == "yield-col-tutto"
+    return [([i["index"]] if tutto else []) if ("🇪🇺" in i["index"]) == eur else (v or [])
+            for i, v in zip(ids, valori)]
 
 
 @app.callback(
@@ -5492,16 +5546,16 @@ def yield_sel_desel(a, b, ids):
     Output("chart-yields-curve",       "figure"),
     Output("wrap-yields-history",      "style"),
     Output("wrap-yields-curve",        "style"),
+    Output("chart-yields-curve",       "style"),
     Input("store-yields",                          "data"),
     Input("store-yields-eur",                      "data"),
     Input("yields-slider",                         "value"),
     Input({"type": "yield-check", "index": ALL},   "value"),
     Input("yields-view",                           "value"),
-    Input("yields-hist-mode",                      "value"),
     Input("yields-source",                         "value"),
     prevent_initial_call=False,
 )
-def update_yields(usa_data, eur_data, slider_val, checks, view, hist_mode, source):
+def update_yields(usa_data, eur_data, slider_val, checks, view, source):
     # ── costruisce df combinato in base alla fonte selezionata ────────────────
     frames = {}
     if source in ("usa", "both") and usa_data:
@@ -5517,7 +5571,7 @@ def update_yields(usa_data, eur_data, slider_val, checks, view, hist_mode, sourc
 
     if not frames:
         f = empty_fig("Carica i tassi con 🔄 Ricarica tassi")
-        return f, f, {"display": "block"}, {"display": "block"}
+        return f, f, {"display": "block"}, {"display": "block"}, _YC_STILE(560)
 
     df = pd.DataFrame(frames).sort_index()
 
@@ -5540,17 +5594,11 @@ def update_yields(usa_data, eur_data, slider_val, checks, view, hist_mode, sourc
     elif not avail:
         fig_hist = empty_fig("Seleziona almeno un tasso")
     else:
-        df_slice = df[avail].loc[start:end]
-        if hist_mode == "yoy":
-            plot_df = pd.DataFrame({
-                col: ((df[col] - df[col].shift(252)) / df[col].shift(252).abs() * 100).loc[start:end]
-                for col in avail
-            })
-            fig_hist = make_line_chart(plot_df, "Tassi — Δ% YoY", "Δ% YoY", True)
-        else:
-            fig_hist = make_line_chart(df_slice, "Tassi — Valori Assoluti (%)", "Tasso (%)", False)
+        fig_hist = make_line_chart(df[avail].loc[start:end], "Tassi — Valori Assoluti (%)",
+                                   "Tasso (%)", False)
 
     # ── Snapshot curva dei rendimenti ─────────────────────────────────────────
+    altezza_curva = 560
     if not show_curve:
         fig_curve = empty_fig("Vista curva disattivata")
     else:
@@ -5565,7 +5613,7 @@ def update_yields(usa_data, eur_data, slider_val, checks, view, hist_mode, sourc
             d, l = _rgb(dark), _rgb(light)
             return "rgb(%d,%d,%d)" % tuple(int(d[i] + (l[i] - d[i]) * t) for i in range(3))
 
-        def _add_curve_snapshots(df_sub, mat_x, dark, light, region_label):
+        def _add_curve_snapshots(df_sub, mat_x, dark, light, region_label, rango0):
             # Snapshot a lag MENSILE fisso: oggi + ogni mese indietro fino a 12 mesi.
             # Ogni curva è una trace: si mostra/nasconde dalla legenda (click/doppio-click).
             df_c = df_sub.loc[start:end].ffill().dropna(how="all")
@@ -5578,7 +5626,7 @@ def update_yields(usa_data, eur_data, slider_val, checks, view, hist_mode, sourc
             cols = df_sub.columns.tolist()
             # 1° anno: mensile (0…-12M). 2° anno: bimestrale (-14M…-24M).
             months = list(range(0, 13)) + [14, 16, 18, 20, 22, 24]
-            for k in months:
+            for n, k in enumerate(months):
                 target = last - pd.DateOffset(months=k)
                 avail  = idx[idx <= target]
                 if len(avail) == 0:
@@ -5594,6 +5642,9 @@ def update_yields(usa_data, eur_data, slider_val, checks, view, hist_mode, sourc
                 fig_curve.add_trace(go.Scatter(
                     x=x_use, y=y_use, mode="lines+markers",
                     name=nm,
+                    # legenda su due colonne riempita per righe: in Confronto USA a
+                    # sinistra (rango pari) ed Europa a destra (dispari), stessa istantanea
+                    legendrank=1000 + 2 * n + rango0,
                     line=dict(color=_shade(dark, light, k / 24.0),
                               width=2.6 if k == 0 else 1.3),
                     hovertemplate=f"<b>{nm}</b><br>Scadenza %{{x}}Y · %{{y:.2f}}%<extra></extra>",
@@ -5604,38 +5655,43 @@ def update_yields(usa_data, eur_data, slider_val, checks, view, hist_mode, sourc
             df_usa_c.index = pd.to_datetime(df_usa_c.index)
             tsy_cols = [c for c in YIELD_LABELS if c in df_usa_c.columns]   # incl. Fed Funds, 3M, 6M
             tsy_mats = [YIELD_MATURITIES[YIELD_LABELS.index(c)] for c in tsy_cols]
-            _add_curve_snapshots(df_usa_c[tsy_cols], tsy_mats, "#08306b", "#9ecae1", "🇺🇸")
+            _add_curve_snapshots(df_usa_c[tsy_cols], tsy_mats, "#08306b", "#9ecae1", "🇺🇸", 0)
 
         if source in ("eur", "both") and eur_data:
             df_eur_c = pd.read_json(io.StringIO(eur_data), orient="split")
             df_eur_c.index = pd.to_datetime(df_eur_c.index)
             eur_cols = [c for c in BCE_YIELD_LABELS if c in df_eur_c.columns]
             eur_mats = [BCE_YIELD_SERIES[k][1] for k in BCE_YIELD_SERIES if BCE_YIELD_SERIES[k][0] in eur_cols]
-            _add_curve_snapshots(df_eur_c[eur_cols], eur_mats, "#00441b", "#a1d99b", "🇪🇺")
+            _add_curve_snapshots(df_eur_c[eur_cols], eur_mats, "#00441b", "#a1d99b", "🇪🇺", 1)
 
         if not fig_curve.data:
             fig_curve = empty_fig("Nessun dato nel range per la curva")
         else:
-            source_lbl = {"usa": "USA 🇺🇸", "eur": "Europa 🇪🇺", "both": "USA 🇺🇸 vs Europa 🇪🇺"}.get(source, "")
+            # legenda in cima su due colonne, sotto i pulsanti «Tutto / Niente», poi il grafico:
+            # l'altezza cresce con le righe della legenda (19 px ciascuna)
+            righe = (len(fig_curve.data) + 1) // 2
+            alto_legenda = righe * 19 + 12
+            margine_t = alto_legenda + 40
+            altezza_curva = margine_t + 460
             fig_curve.update_layout(
-                title=dict(text=f"Yield Curve — {source_lbl}  |  snapshot nel periodo selezionato",
-                           font=dict(size=12, color="#1a3a5c"), x=0.01),
                 xaxis_title="Scadenza (anni)", yaxis_title="Tasso (%)",
                 hovermode="closest",
-                legend=dict(orientation="v", yanchor="middle", y=0.5,
-                            xanchor="left", x=1.02, font=dict(size=11),
-                            bgcolor="rgba(255,255,255,0.92)", bordercolor="#ccc", borderwidth=1),
+                legend=dict(orientation="h", traceorder="normal",
+                            yref="container", y=1, yanchor="top",
+                            xanchor="left", x=0,
+                            entrywidthmode="fraction", entrywidth=0.5,
+                            font=dict(size=11), bgcolor="rgba(0,0,0,0)"),
                 updatemenus=[dict(
                     type="buttons", direction="right", showactive=False,
-                    x=1.0, xanchor="right", y=1.16, yanchor="top",
-                    pad=dict(r=0, t=0), font=dict(size=10),
+                    x=0, xanchor="left", y=1, yanchor="bottom",
+                    pad=dict(l=0, r=0, t=0, b=8), font=dict(size=11),
                     bgcolor="#ffffff", bordercolor="#ccc",
                     buttons=[
-                        dict(label="✓ Tutte",   method="restyle", args=[{"visible": True}]),
-                        dict(label="✕ Nessuna", method="restyle", args=[{"visible": "legendonly"}]),
+                        dict(label="✓ Tutto",  method="restyle", args=[{"visible": True}]),
+                        dict(label="✕ Niente", method="restyle", args=[{"visible": "legendonly"}]),
                     ],
                 )],
-                margin=dict(t=72, b=40, l=60, r=220),
+                margin=dict(t=margine_t, b=40, l=56, r=16),
                 paper_bgcolor="white", plot_bgcolor="#f8f8f8",
             )
             fig_curve.update_xaxes(showgrid=True, gridcolor="#e8e8e8",
@@ -5648,7 +5704,13 @@ def update_yields(usa_data, eur_data, slider_val, checks, view, hist_mode, sourc
     if view == "history":  w_hist, w_curve = show, hide
     elif view == "curve":  w_hist, w_curve = hide, show
     else:                  w_hist, w_curve = show, show
-    return fig_hist, fig_curve, w_hist, w_curve
+    return fig_hist, fig_curve, w_hist, w_curve, _YC_STILE(altezza_curva)
+
+
+def _YC_STILE(alto):
+    """Stile del grafico della curva: con responsive Dash ignora layout.height, quindi
+    l'altezza (che dipende dalle righe della legenda) va nello style."""
+    return {"height": f"{alto}px", "width": "100%"}
 
 
 # =============================================================================
@@ -12908,6 +12970,32 @@ def _fred_preselect_tab(_n, search):
     if wanted in _FRED_TABS_VALID:
         return wanted
     raise PreventUpdate
+
+
+# Sul cellulare i sotto-tab sono la tendina «Tabs Strumenti» (come Clienti e Calendario)
+@app.callback(
+    Output('main-tabs', 'value', allow_duplicate=True),
+    Input({'type': 'macro-tendina-voce', 'index': ALL}, 'n_clicks'),
+    prevent_initial_call=True,
+)
+def _macro_tendina_scegli(clicks):
+    tid = callback_context.triggered_id
+    if not tid or not any(clicks):
+        raise PreventUpdate
+    return tid['index']
+
+
+app.clientside_callback(
+    """function (val) {
+        var voci = %s, lab = voci[0][0];
+        voci.forEach(function (v) { if (v[1] === val) lab = v[0]; });
+        return [lab, voci.map(function (v) {
+            return v[1] === val ? 'nb-tendina-voce nb-attiva' : 'nb-tendina-voce'; })];
+    }""" % __import__('json').dumps(_MACRO_SOTTOTAB),
+    Output('macro-tendina-att', 'children'),
+    Output({'type': 'macro-tendina-voce', 'index': ALL}, 'className'),
+    Input('main-tabs', 'value'),
+)
 
 
 # ── Boot: cache condivisa Macro (background, non blocca il boot) ─────────────

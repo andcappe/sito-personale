@@ -1596,8 +1596,6 @@ def _pannello_nucleo():
     resto: quali campi compaiono, quali scenari esistono, come è scritta la
     relazione."""
     return html.Div([
-        html.Div('Chi compone il nucleo', style={'fontSize': '11px', 'fontWeight': '700',
-                                                 'color': BLU, 'marginBottom': '5px'}),
         dcc.Checklist(
             id='pl-composizione', value=['lei', 'figlio'],
             options=[{'label': ' Coniuge o convivente', 'value': 'lei'},
@@ -1614,8 +1612,7 @@ def _pannello_nucleo():
             _campo_nome('nome_lei', 'Coniuge', NOMI_DEFAULT['lei']),
             _campo_nome('nome_figlio', 'Figlio', NOMI_DEFAULT['figlio']),
         ], style={'display': 'flex', 'gap': '8px', 'flexWrap': 'wrap'}),
-    ], style={'padding': '12px 14px', 'background': '#f0f4fa', 'borderRadius': '9px',
-              'marginBottom': '10px'})
+    ])
 
 
 def _etichetta_profilo(nome, mix):
@@ -1667,11 +1664,7 @@ def _pannello_profilo():
     ], style={'display': 'flex', 'gap': '4px', 'alignItems': 'center',
               'marginBottom': '4px'}) for i in range(N_AUTONOMO)]
 
-    return html.Details([
-        html.Summary('Profilo di rischio',
-                     style={'fontSize': '12px', 'fontWeight': '700', 'color': BLU,
-                            'cursor': 'pointer', 'padding': '6px 0'}),
-        html.Div([
+    return html.Div([
             dcc.RadioItems(
                 id='pl-profilo', value='dinamico',
                 options=[{'label': _etichetta_profilo(n, mix), 'value': k}
@@ -1741,29 +1734,41 @@ def _pannello_profilo():
                                      + [{'label': 'Tasso a mano', 'value': 'tasso'}],
                              style={'width': '200px', 'fontSize': '11px'}),
                 html.Div(id='pl-nota-dec', style=nota_st),
-            ], style={'margin': '10px 0 2px', 'borderTop': '1px solid #eef2f7',
+            ], style={'margin': '10px 0 2px', 'borderTop': '1px solid #e2e8f0',
                       'paddingTop': '9px'}),
-        ], style={'paddingLeft': '4px', 'paddingBottom': '8px'}),
-    ], open=True, style={'borderBottom': '1px solid #eef2f7'})
+    ])
+
+
+def _sezione(titolo, corpo, aperto=True):
+    """Riquadro della pagina (come le sezioni del Calendario); sul cellulare è una
+    scheda espandibile, chiusa all'avvio se aperto=False. Sul computer sempre aperta."""
+    return html.Div(className='nb-espandi pl-box' + (' nb-aperto' if aperto else ''), children=[
+        html.Div([titolo, html.I(className='fa-solid fa-chevron-down nb-espandi-ico')],
+                 className='nb-espandi-btn'),
+        html.Div(corpo, className='nb-espandi-corpo'),
+    ])
+
+
+# Titoli delle sezioni dei parametri (i gruppi di CAMPI tengono il nome interno).
+_TITOLO_GRUPPO = {'Famiglia': 'Famiglia', 'Patrimonio': 'Patrimonio', 'Mercato': 'Mercato',
+                  'Fisco': 'Fisco', 'Redditi e spese': 'Redditi e spese',
+                  'Uscita dal lavoro': 'Uscita dal lavoro', 'Previdenza': 'Previdenza',
+                  'Obiettivi': 'Obiettivi', 'Scenari avversi': 'Scenari avversi'}
 
 
 def _pannello_parametri():
-    gruppi = [_pannello_nucleo()]
+    """Colonna dei parametri: Nucleo Familiare, Famiglia, Patrimonio, Profilo di
+    Rischio, poi un riquadro per ogni altro gruppo di CAMPI."""
+    sezioni = [_sezione('Nucleo Familiare', _pannello_nucleo(), aperto=False)]
     for g in _ORDINE_GRUPPI:
         if g == 'Mercato':
-            gruppi.append(_pannello_profilo())
+            sezioni.append(_sezione('Profilo di Rischio', _pannello_profilo(), aperto=False))
         campi = [c for c in CAMPI if c[5] == g]
-        gruppi.append(html.Details([
-            html.Summary(g, style={'fontSize': '12px', 'fontWeight': '700', 'color': BLU,
-                                   'cursor': 'pointer', 'padding': '6px 0'}),
-            html.Div([_campo(c[0], testo(c[1], NOMI_DEFAULT), c[2], c[3], c[4],
-                             testo(c[6], NOMI_DEFAULT)) for c in campi],
-                     style={'paddingLeft': '4px'}),
-        ], open=(g in ('Famiglia', 'Patrimonio', 'Redditi e spese', 'Uscita dal lavoro')),
-            style={'borderBottom': '1px solid #eef2f7'}))
-    return html.Div(gruppi, style={
-        'flex': '0 0 272px', 'maxHeight': '80vh', 'overflowY': 'auto',
-        'paddingRight': '12px', 'borderRight': '1px solid #e8edf5'})
+        sezioni.append(_sezione(_TITOLO_GRUPPO.get(g, g), html.Div(
+            [_campo(c[0], testo(c[1], NOMI_DEFAULT), c[2], c[3], c[4],
+                    testo(c[6], NOMI_DEFAULT)) for c in campi],
+            className='pl-campi'), aperto=False))
+    return html.Div(sezioni, className='pl-colonna-par')
 
 
 def _metodo():
@@ -1814,47 +1819,57 @@ def _metodo():
                                  '(da inserire quando il cliente le comunicherà), TFR e fondi '
                                  'pensione integrativi, variazioni normative.'),
     ]
-    return html.Details([
-        html.Summary([
-            html.Span('🧮 Metodologia e ipotesi', style={'fontWeight': '700', 'color': BLU,
-                                                         'fontSize': '13px'}),
-            html.Span('  — come sono fatti i conti', style={'fontSize': '11px', 'color': '#777'}),
-        ], style={'cursor': 'pointer', 'padding': '2px 0'}),
-        html.Div([html.Div([
+    return _sezione('Metodologia e ipotesi', html.Div([html.Div([
             html.Span(t + ' — ', style={'fontWeight': '700', 'color': '#333'}),
             html.Span(d, style={'color': '#555'}),
         ], style={'fontSize': '11.5px', 'lineHeight': '1.6', 'marginBottom': '5px'})
-            for t, d in voci], style={'marginTop': '10px', 'maxWidth': '760px'}),
-    ], style={'marginTop': '22px', 'padding': '16px 18px', 'background': '#f8fafd',
-              'border': '1px solid #e8edf5', 'borderRadius': '10px'})
+            for t, d in voci], style={'maxWidth': '760px'}), aperto=False)
 
 
 def layout():
-    return html.Div([
-        dcc.Store(id='pl-mercato'),
-        html.H2('Indipendenza finanziaria — studio di pianificazione',
-                style={'color': BLU, 'fontSize': '20px', 'margin': '0 0 4px'}),
+    risultati = _sezione('Indipendenza Finanziaria', [
         html.Div('Quando e a quali condizioni il nucleo può smettere di lavorare, '
                  'tenuto conto di fisco, previdenza, eredità da lasciare e degli scenari '
-                 'avversi. Ogni parametro a sinistra ricalcola tutto.',
-                 style={'color': '#666', 'fontSize': '12px', 'marginBottom': '14px'}),
+                 'avversi. Ogni parametro ricalcola tutto.',
+                 style={'color': '#666', 'fontSize': '12px', 'marginBottom': '10px'}),
+        html.Div([
+            html.Label('Scenario:', style={'fontSize': '11px', 'fontWeight': '700',
+                                           'color': BLU, 'marginRight': '8px'}),
+            dcc.Dropdown(id='pl-scenario', value='base', clearable=False,
+                         options=[{'label': l, 'value': v} for v, l
+                                  in scenari_applicabili(['lei', 'figlio'], NOMI_DEFAULT)],
+                         style={'flex': '0 1 330px', 'minWidth': '0', 'fontSize': '12px'}),
+        ], className='pl-scenario-riga'),
+        dcc.Loading(type='dot', color=BLU, children=html.Div(id='pl-risultati')),
+    ])
+    return html.Div([
+        dcc.Store(id='pl-mercato'),
         html.Div([
             _pannello_parametri(),
-            html.Div([
-                html.Div([
-                    html.Label('Scenario:', style={'fontSize': '11px', 'fontWeight': '700',
-                                                   'color': BLU, 'marginRight': '8px'}),
-                    dcc.Dropdown(id='pl-scenario', value='base', clearable=False,
-                                 options=[{'label': l, 'value': v} for v, l
-                                          in scenari_applicabili(['lei', 'figlio'],
-                                                                 NOMI_DEFAULT)],
-                                 style={'width': '330px', 'fontSize': '12px'}),
-                ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '12px'}),
-                dcc.Loading(type='dot', color=BLU, children=html.Div(id='pl-risultati')),
-            ], style={'flex': '1 1 auto', 'paddingLeft': '18px', 'minWidth': '0'}),
-        ], style={'display': 'flex', 'alignItems': 'flex-start', 'gap': '4px'}),
+            html.Div(risultati, className='pl-colonna-ris'),
+        ], className='pl-corpo'),
         _metodo(),
     ])
+
+
+# CSS della pagina, messo nell'index_string di Clienti (fondipensione/app.py).
+CSS = """
+  .pl-box { border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc;
+            padding: 8px 10px; margin: 0 0 10px; box-sizing: border-box; }
+  .pl-box > .nb-espandi-btn { font-size: 13px; font-weight: 700; color: #1a3a6b; margin-bottom: 6px; }
+  .pl-corpo { display: flex; align-items: flex-start; gap: 12px; }
+  .pl-colonna-par { flex: 0 0 290px; max-height: 85vh; overflow-y: auto; padding-right: 4px; }
+  .pl-colonna-ris { flex: 1 1 auto; min-width: 0; }
+  .pl-colonna-ris > .pl-box { background: #fff; }
+  .pl-scenario-riga { display: flex; align-items: center; margin-bottom: 12px; }
+  @media (max-width: 900px) {
+    .pl-corpo { flex-direction: column; gap: 0; }
+    .pl-colonna-par, .pl-colonna-ris { flex: 1 1 auto; width: 100%; max-height: none;
+                                       overflow: visible; padding-right: 0; }
+    .pl-colonna-ris { order: -1; }
+    .pl-box { padding: 8px; }
+  }
+"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────

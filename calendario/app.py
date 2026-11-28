@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta
 
 import plotly.graph_objects as go
 import requests
-from dash import Dash, html, dcc, Input, Output, State, ctx, ALL
+from dash import Dash, html, dcc, Input, Output, State, ctx, ALL, no_update
 from dash.exceptions import PreventUpdate
 
 # La cartella superiore ospita navbar.py e settings/ (import condivisi del sito)
@@ -569,7 +569,7 @@ app.index_string = '''<!DOCTYPE html><html>
   .cal-ente-cad { display: block; font-size: 10.5px; color: #777; }
   /* Trimestrali: riga in alto (ricerca + ⚙) e menu ⚙ come in Analisi Tattica */
   .tr-riga { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; flex-wrap: nowrap; }
-  .tr-cerca-campo { font-size: 12px; padding: 6px 9px; width: 240px; min-width: 0; flex: 0 1 240px;
+  .tr-cerca-campo { font-size: 12px; width: 380px; min-width: 0; flex: 0 1 380px;
                     box-sizing: border-box; border: 1px solid #c0d0e8; border-radius: 6px; }
   .tr-btn { background: #1a3a6b; color: #fff; border: none; border-radius: 6px; padding: 6px 12px;
             font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
@@ -781,40 +781,21 @@ def _sezione_trimestrali():
                'borderRadius': '6px', 'padding': '3px 10px', 'fontSize': '12px',
                'cursor': 'pointer', 'marginRight': '4px'}
     return html.Div([
-        # Riga in alto: ricerca di un ticker (anche fuori dalla finestra e dall'elenco)
-        # e ⚙ con le spiegazioni della sezione.
-        html.Div([
-            html.Details(className='pf-strumenti pf-info tr-info', children=[
-                html.Summary([html.I(className='fa-solid fa-gear nb-nascondi-cell'),
-                              html.Span('⚙', className='nb-solo-cell')],
-                             className='tr-btn', title='Descrizione'),
-                html.Div(className='pf-strumenti-menu tr-info-menu', children=[
-                    html.P('Le date di pubblicazione dei conti trimestrali, per finestra di '
-                           'una settimana, due settimane o un mese. Le società principali di '
-                           'USA, Italia ed Europa hanno sempre la prossima data (annunciata o '
-                           'stimata); con «Tutte le società USA» si aggiungono le date già '
-                           'annunciate da tutto il mercato americano.', className='tr-info-testo'),
-                    html.P(['🔎 ', html.B('Ricerca Ticker'), ': scrivi un ticker (AAPL, ENI.MI) o '
-                            'un nome e premi il pulsante o Invio. I '
-                            'risultati compaiono nella sezione gialla «Ricerca singolo titolo», '
-                            'da 45 giorni fa a 200 giorni avanti, fra tutte le società note; se '
-                            'non è nell\'elenco la data si chiede a Yahoo. Grafico ed Elenco '
-                            '(sotto Tipo di società e Parametri) restano le trimestrali programmate nella finestra: se la società '
-                            'cercata è anche lì, la sua riga è gialla con 🔎. Svuota il campo e '
-                            'premi il pulsante per togliere la ricerca.'],
-                           className='tr-info-testo'),
-                    html.Div(id='tr-nota', className='tr-info-testo'),
-                ]),
-            ]),
-        ], className='tr-riga'),
+        # ⚙ con le spiegazioni tolto per ora (richiesta dell'utente): tr-nota resta
+        # nascosto perché è un Output di _aggiorna_trimestrali.
+        html.Div(id='tr-nota', style={'display': 'none'}),
         # Due controlli separati: la ricerca di un singolo titolo (risultati qui, senza
-        # limiti di finestra) e, sotto, le trimestrali programmate (Tipo di società,
+        # limiti di finestra) e, sotto, le trimestrali programmate (Ricerca tutti i titoli,
         # Parametri, Grafico, Elenco).
         _sezione('🔎 Ricerca singolo titolo', [
             html.Div([
-                dcc.Input(id='tr-cerca', type='text', debounce=True, value='',
-                          placeholder='Ticker o nome della società…',
-                          className='tr-cerca-campo'),
+                # Tendina che suggerisce mentre si scrive (nome o ticker, come un
+                # motore di ricerca): società del calendario + azioni trovate da Yahoo.
+                html.Div(dcc.Dropdown(id='tr-cerca', options=[], value=None,
+                                      searchable=True, clearable=True,
+                                      placeholder='Scrivi il nome della società o il ticker…',
+                                      style={'fontSize': '12px'}),
+                         className='tr-cerca-campo'),
                 html.Button('🔎 Ricerca Ticker', id='tr-cerca-btn', n_clicks=0,
                             className='tr-btn'),
             ], className='tr-riga', style={'margin': '0'}),
@@ -824,7 +805,7 @@ def _sezione_trimestrali():
                 html.Div(id='tr-ricerca-tab', className='tr-tab-box'),
             ]),
         ], classe=' tr-ricerca'),
-        _sezione('Tipo di società', html.Div([
+        _sezione('Ricerca tutti i titoli', html.Div([
             dcc.RadioItems(id='tr-universo', value='principali', options=[
                 {'label': f' Principali USA, Italia, Europa ({len(tr._UNIVERSO)})',
                  'value': 'principali'},
@@ -837,7 +818,7 @@ def _sezione_trimestrali():
             aperto=False),
         _sezione('Parametri', html.Div([
             html.Label('Finestra:', style=lbl),
-            dcc.RadioItems(id='tr-finestra', value='sett',
+            dcc.RadioItems(id='tr-finestra', value='mese',
                            options=[{'label': f' {t}', 'value': v} for v, t in _FINESTRE],
                            **radio),
             html.Div([
@@ -974,6 +955,41 @@ def _tabella_trim(ev, evidenzia=()):
         'width': '100%', 'borderCollapse': 'collapse', 'fontFamily': 'Inter, sans-serif'})
 
 
+_TR_NOMI = {}      # valore scelto → etichetta, per tenerla fra le opzioni dopo la scelta
+
+
+@app.callback(
+    Output('tr-cerca', 'options'),
+    Input('tr-cerca', 'search_value'),
+    State('tr-cerca', 'value'),
+    State('tr-cerca', 'options'),
+)
+def _tr_suggerisci(testo, valore, opzioni):
+    # L'opzione scelta resta sempre fra le opzioni, altrimenti Dash la toglie.
+    attuale = []
+    if valore:
+        et = _TR_NOMI.get(valore) or next(
+            (o.get('label') for o in (opzioni or []) if o.get('value') == valore), valore)
+        attuale = [{'label': et, 'value': valore, 'search': f'{valore} {et}'}]
+    testo = (testo or '').strip()
+    if len(testo) < 2:
+        return attuale if attuale != (opzioni or []) else no_update
+    trovati = []
+    for tk, nome, borsa in tr.suggerimenti(testo):
+        et = f'{tk} — {nome}' + (f' · {borsa}' if borsa else '')
+        _TR_NOMI[tk] = et
+        # `search` contiene il testo scritto: Dash filtra le opzioni sul testo, e
+        # «apple» non starebbe in «AAPL — Apple Inc.» se fosse scritto «aple».
+        trovati.append({'label': et, 'value': tk, 'search': f'{testo} {et}'})
+    # Testo libero come ultima voce: cerca nome o ticker così come è scritto.
+    if testo not in {o['value'] for o in trovati}:
+        et = f'🔎 Cerca «{testo}»'
+        _TR_NOMI[testo] = et
+        trovati.append({'label': et, 'value': testo, 'search': testo})
+    vista = {o['value'] for o in trovati}
+    return trovati + [o for o in attuale if o['value'] not in vista]
+
+
 @app.callback(
     Output('tr-grafico', 'figure'),
     Output('tr-tabella', 'children'),
@@ -994,7 +1010,7 @@ def _tabella_trim(ev, evidenzia=()):
 )
 def _aggiorna_trimestrali(finestra, scarto, universo, stimate, cerca, _b, _n):
     # Grafico ed Elenco: sempre le trimestrali programmate nella finestra scelta.
-    w0, w1, etichetta = _finestra_trim(finestra or 'sett', scarto or 0)
+    w0, w1, etichetta = _finestra_trim(finestra or 'mese', scarto or 0)
     ev = tr.eventi(w0, w1, universo or 'principali')
     # Ricerca: a parte, senza limiti di finestra (da 45 giorni fa a 200 avanti) e su
     # tutte le società note; se nessuna corrisponde, la si chiede a Yahoo.
@@ -1014,8 +1030,8 @@ def _aggiorna_trimestrali(finestra, scarto, universo, stimate, cerca, _b, _n):
     # Avvisi visibili sotto la ricerca; le spiegazioni stanno nel ⚙
     avviso = []
     if testo and not ev_c:
-        avviso.append(f'Nessuna trimestrale trovata per «{testo}», nemmeno su Yahoo: prova '
-                      'col ticker esatto (es. AAPL, ENI.MI).')
+        avviso.append(f'Nessuna trimestrale trovata per «{testo}»: Yahoo non ha una data per questo '
+                      'titolo. Prova un altro dei suggerimenti (spesso la borsa principale).')
     if attesa:
         avviso.append('⏳ Aggiornamento del calendario in corso (circa un minuto): '
                       'la pagina si completa da sola.')
@@ -1035,8 +1051,13 @@ def _aggiorna_trimestrali(finestra, scarto, universo, stimate, cerca, _b, _n):
                        '«Prevista» = prossima data secondo Yahoo; «Stimata» = ultima data nota '
                        '+ 13 settimane, in corsivo. Le date possono cambiare fino all’annuncio.'))
     ricerca_vis = {'display': 'block' if ev_c else 'none'}
-    titolo = (f'«{testo}» · {", ".join(sorted(cercati))} · {_fmt(r0)} → {_fmt(r1)}'
-              if ev_c else '')
+    # Titolo: il nome scelto fra i suggerimenti («RACE.MI — Ferrari · Italia»), se c'è
+    nome_c = _TR_NOMI.get(testo, '')
+    if nome_c and not nome_c.startswith('🔎'):
+        titolo = f'{nome_c} · {_fmt(r0)} → {_fmt(r1)}' if ev_c else ''
+    else:
+        titolo = (f'«{testo}» · {", ".join(sorted(cercati))} · {_fmt(r0)} → {_fmt(r1)}'
+                  if ev_c else '')
     return (_grafico_trim(ev, w0, w1), _tabella_trim(ev, cercati), etichetta, nota,
             [html.Div(a) for a in avviso], ricerca_vis, _tabella_trim(ev_c, cercati) if ev_c else None,
             titolo, not attesa)

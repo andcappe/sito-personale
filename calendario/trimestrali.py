@@ -273,9 +273,12 @@ def _yahoo_al_volo(testo):
     out = []
     try:
         import yfinance as yf
-        quotes = yf.Search(testo, max_results=8, news_count=0).quotes or []
-        simboli = [(q['symbol'], q.get('shortname') or q.get('longname') or q['symbol'])
-                   for q in quotes if q.get('symbol') and q.get('quoteType') == 'EQUITY'][:3]
+        quotes = yf.Search(testo, max_results=12, news_count=0).quotes or []
+        tutte = [(q['symbol'], q.get('shortname') or q.get('longname') or q['symbol'])
+                 for q in quotes if q.get('symbol') and q.get('quoteType') == 'EQUITY']
+        # Ticker scelto dai suggerimenti (anche se Yahoo lo mette oltre il terzo posto)
+        esatto = [x for x in tutte if x[0].upper() == testo.strip().upper()]
+        simboli = esatto or tutte[:3]
         for tk, nome in simboli:
             try:
                 cal = yf.Ticker(tk).calendar or {}
@@ -291,6 +294,58 @@ def _yahoo_al_volo(testo):
     if len(_VOLO_CACHE) > 300:
         _VOLO_CACHE.clear()
     _VOLO_CACHE[chiave] = (time.time(), out)
+    return out
+
+
+_SUGG_CACHE = {}                     # testo → (istante, suggerimenti di Yahoo)
+
+
+def suggerimenti(testo, max_locali=6, max_yahoo=8):
+    """Suggerimenti per la casella di ricerca, come un motore di ricerca: prima le
+    società già nel calendario (universo + Alpha Vantage) il cui ticker o nome
+    comincia col testo, poi le azioni che Yahoo trova per nome o ticker.
+    Lista di (ticker Yahoo, nome, borsa). Nessuna chiamata a `Ticker.calendar`:
+    la data si cerca solo quando si sceglie un titolo."""
+    t = (testo or '').strip().lower()
+    if len(t) < 2:
+        return []
+    out, visti = [], set()
+
+    def _ok(tk, nome):
+        base = tk.lower().split('.')[0]
+        return (tk.lower().startswith(t) or base.startswith(t)
+                or any(p.startswith(t) for p in nome.lower().split()))
+
+    for tk, nome in _UNIVERSO.items():
+        if len(out) < max_locali and _ok(tk, nome):
+            out.append((tk, nome, _mercato(tk))); visti.add(tk)
+    for r in (dati() or {}).get('av') or []:
+        if len(out) >= max_locali:
+            break
+        tk = r[0].replace('.', '-')
+        if tk not in visti and _ok(tk, r[1]):
+            out.append((tk, r[1].title(), 'USA')); visti.add(tk)
+
+    c = _SUGG_CACHE.get(t)
+    if c and time.time() - c[0] < _VOLO_TTL:
+        yh = c[1]
+    else:
+        yh = []
+        try:
+            import yfinance as yf
+            for q in yf.Search(testo, max_results=12, news_count=0).quotes or []:
+                if q.get('symbol') and q.get('quoteType') == 'EQUITY':
+                    yh.append((q['symbol'], (q.get('shortname') or q.get('longname') or q['symbol']).strip(),
+                               q.get('exchDisp') or q.get('exchange') or ''))
+        except Exception as e:                       # noqa: BLE001
+            print(f'[trimestrali] suggerimenti Yahoo «{testo}» non riusciti: {e}')
+        if yh:
+            if len(_SUGG_CACHE) > 500:
+                _SUGG_CACHE.clear()
+            _SUGG_CACHE[t] = (time.time(), yh)
+    for tk, nome, borsa in yh[:max_yahoo]:
+        if tk not in visti:
+            out.append((tk, nome, borsa)); visti.add(tk)
     return out
 
 
@@ -364,7 +419,10 @@ def eventi(w0, w1, universo='principali', cerca='', yahoo_al_volo=False):
         # Nessuna società nota con quel nome: la si chiede a Yahoo al volo
         # (ricerca per nome o ticker, poi `Ticker.calendar`).
         if not out and yahoo_al_volo:
-            for tk, nome, y in _yahoo_al_volo(testo):
+            trovati = _yahoo_al_volo(testo)
+            # Ticker scelto dai suggerimenti: solo lui, non gli omonimi di altre borse
+            esatto = [x for x in trovati if x[0].upper() == testo.upper()]
+            for tk, nome, y in esatto or trovati:
                 _societa(tk, nome, y)
     out.sort(key=lambda e: (e['d'], e['mercato'] != 'Italia', e['ticker']))
     return out

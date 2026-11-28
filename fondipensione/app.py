@@ -15,13 +15,16 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests
-from dash import Dash, html, dcc, Input, Output, State, ALL
+import json
+
+from dash import Dash, html, dcc, Input, Output, State, ALL, ctx
+from dash.exceptions import PreventUpdate
 
 # La cartella superiore ospita navbar.py e settings/ (import condivisi del sito)
 _PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
-from navbar import make_navbar                       # noqa: E402
+from navbar import make_navbar, tendina_cell         # noqa: E402
 from settings.browser_css import SITE_CSS            # noqa: E402
 import pianificazione                                  # noqa: E402
 
@@ -322,7 +325,12 @@ server = app.server
 
 app.index_string = '''<!DOCTYPE html><html>
 <head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
-<style>''' + SITE_CSS + '''</style>
+<style>''' + SITE_CSS + pianificazione.CSS + '''
+  /* Cellulare: margini laterali di 8 px come Calendario e Portafoglio */
+  @media (max-width: 900px) {
+    .cli-pagina { padding-left: 8px !important; padding-right: 8px !important; }
+  }
+</style>
 </head>
 <body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>'''
 
@@ -330,81 +338,53 @@ app.index_string = '''<!DOCTYPE html><html>
 # ─────────────────────────────────────────────────────────────────────────────
 # Sezione Clienti: una sotto-tab per ogni strumento
 # ─────────────────────────────────────────────────────────────────────────────
-_TAB_STYLE = {'fontSize': '12px', 'padding': '8px 18px', 'whiteSpace': 'nowrap'}
-_TAB_SEL   = {'fontSize': '12px', 'padding': '8px 18px', 'whiteSpace': 'nowrap',
-              'fontWeight': 'bold', 'borderTop': '3px solid #1a3a6b'}
 
 
 def _tab_fondi_pensione():
-    """Contenuto della sotto-tab Fondi Pensione: grafico COVIP e domande all’AI."""
+    """Contenuto della sotto-tab Fondi Pensione, a sezioni (come Indipendenza
+    Finanziaria): Orizzonte temporale, Tipologia, Linea di Gestione, Grafici e
+    ricerca comparto, Fai le tue domande. Sul cellulare le prime tre sono chiuse."""
     n_tot = len(_DF)
+    sez = pianificazione._sezione
+    voce = {'marginRight': '12px', 'fontSize': '11.5px', 'cursor': 'pointer'}
     return html.Div([
-        html.H2('Fondi Pensione — confronto rischio / rendimento',
-                style={'color': '#1a3a6b', 'fontSize': '20px', 'margin': '0 0 4px'}),
-        html.Div(f'{n_tot} comparti da fonte COVIP (Negoziali, PIP/FIP, Aperti) — '
-                 f'rendimenti medi annui netti, dati a fine 2025.',
-                 style={'color': '#666', 'fontSize': '12px', 'marginBottom': '14px'}),
-        html.Div([
-            html.Label('Orizzonte temporale:',
-                       style={'fontSize': '11px', 'fontWeight': '700',
-                              'color': '#1a3a6b', 'marginRight': '8px'}),
-            dcc.RadioItems(
-                id='fp-orizzonte',
-                options=[{'label': f' {lbl}', 'value': col} for col, lbl in ORIZZONTI],
-                value='rend_5a', inline=True,
-                inputStyle={'marginRight': '3px'},
-                labelStyle={'marginRight': '12px', 'fontSize': '11px', 'cursor': 'pointer'},
-            ),
-        ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '8px'}),
-        html.Div([
+        sez('Orizzonte temporale', dcc.RadioItems(
+            id='fp-orizzonte',
+            options=[{'label': f' {lbl}', 'value': col} for col, lbl in ORIZZONTI],
+            value='rend_5a', inline=True,
+            inputStyle={'marginRight': '3px'}, labelStyle=voce), aperto=False),
+        sez('Tipologia', dcc.Checklist(
+            id='fp-tipologia',
+            options=[{'label': f' {t}', 'value': t} for t in _TIPI],
+            value=list(_TIPI), inline=True,
+            inputStyle={'marginRight': '3px'}, labelStyle=voce), aperto=False),
+        sez('Linea di Gestione', dcc.Checklist(
+            id='fp-categoria',
+            options=[{'label': f' {c}', 'value': c} for c in _CATS],
+            value=list(_CATS), inline=True,
+            inputStyle={'marginRight': '3px'}, labelStyle=voce), aperto=False),
+        sez('Grafici e ricerca comparto', [
+            html.Div(f'{n_tot} comparti da fonte COVIP (Negoziali, PIP/FIP, Aperti) — '
+                     f'rendimenti medi annui netti, dati a fine 2025.',
+                     style={'color': '#666', 'fontSize': '12px', 'marginBottom': '8px'}),
             html.Div([
-                html.Label('Tipologia:', style={'fontSize': '11px', 'fontWeight': '700',
-                                                'color': '#1a3a6b', 'marginRight': '8px'}),
-                dcc.Checklist(
-                    id='fp-tipologia',
-                    options=[{'label': f' {t}', 'value': t} for t in _TIPI],
-                    value=list(_TIPI), inline=True,
-                    inputStyle={'marginRight': '3px'},
-                    labelStyle={'marginRight': '12px', 'fontSize': '11px', 'cursor': 'pointer'},
-                ),
-            ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '24px'}),
-            html.Div([
-                html.Label('Categoria:', style={'fontSize': '11px', 'fontWeight': '700',
-                                                'color': '#1a3a6b', 'marginRight': '8px'}),
-                dcc.Checklist(
-                    id='fp-categoria',
-                    options=[{'label': f' {c}', 'value': c} for c in _CATS],
-                    value=list(_CATS), inline=True,
-                    inputStyle={'marginRight': '3px'},
-                    labelStyle={'marginRight': '12px', 'fontSize': '11px', 'cursor': 'pointer'},
-                ),
-            ], style={'display': 'flex', 'alignItems': 'center'}),
-        ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap',
-                  'gap': '6px', 'marginBottom': '10px', 'paddingTop': '6px',
-                  'borderTop': '1px solid #eee'}),
-        html.Div([
-            html.Label('Cerca comparto:', style={'fontSize': '11px', 'fontWeight': '700',
-                                                  'color': '#1a3a6b', 'marginRight': '8px'}),
-            dcc.Input(id='fp-search', type='text', value='', debounce=False,
-                      placeholder='es. Core, Cometa, Fonchim…',
-                      style={'padding': '5px 10px', 'fontSize': '12px', 'width': '220px',
-                             'border': '1px solid #ccd9ee', 'borderRadius': '6px',
-                             'fontFamily': 'Inter, sans-serif'}),
-            html.Span('I comparti corrispondenti vengono cerchiati in rosso sul grafico.',
-                      style={'color': '#666', 'fontSize': '11px', 'marginLeft': '10px'}),
-        ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap',
-                  'gap': '4px', 'marginBottom': '8px'}),
-        dcc.Graph(id='fp-scatter', figure=scatter_fig('rend_5a'),
-                  config={'displayModeBar': False}),
-
-        # ── Zona AI: interroga i dati COVIP in linguaggio naturale ──────────
-        html.Div([
-            html.Div([
-                html.I(className='fa-solid fa-robot',
-                       style={'color': '#1a3a6b', 'marginRight': '8px'}),
-                html.Span('Chiedi all’intelligenza artificiale',
-                          style={'color': '#1a3a6b', 'fontSize': '15px', 'fontWeight': '700'}),
-            ], style={'marginBottom': '4px'}),
+                dcc.Input(id='fp-search', type='text', value='', debounce=False,
+                          placeholder='Cerca comparto: es. Core, Cometa, Fonchim…',
+                          style={'padding': '5px 10px', 'fontSize': '12px', 'width': '300px',
+                                 'maxWidth': '100%', 'boxSizing': 'border-box',
+                                 'border': '1px solid #ccd9ee', 'borderRadius': '6px',
+                                 'fontFamily': 'Inter, sans-serif'}),
+                html.Span('I comparti corrispondenti vengono cerchiati in rosso sul grafico.',
+                          style={'color': '#666', 'fontSize': '11px'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap',
+                      'gap': '6px 10px', 'marginBottom': '8px'}),
+            html.Div(dcc.Graph(id='fp-scatter', figure=scatter_fig('rend_5a'),
+                               config={'displayModeBar': False}),
+                     style={'background': '#fff', 'border': '1px solid #e2e8f0',
+                            'borderRadius': '4px'}),
+        ]),
+        # ── Domande all'AI sui dati COVIP in linguaggio naturale ────────────
+        sez('Fai le tue domande', [
             html.Div('Domande sui rendimenti dei comparti (es. “come mai il comparto '
                      'Core Pension ha reso così poco?” o “confronta i garantiti '
                      'negoziali con i PIP”). Risposte basate sui dati COVIP a fine 2025, '
@@ -427,8 +407,7 @@ def _tab_fondi_pensione():
                 id='fp-ai-answer', children='', style={
                     'marginTop': '12px', 'fontSize': '13px', 'lineHeight': '1.55',
                     'color': '#222', 'fontFamily': 'Inter, sans-serif'})),
-        ], style={'marginTop': '26px', 'padding': '16px 18px', 'background': '#f8fafd',
-                  'border': '1px solid #e8edf5', 'borderRadius': '10px'}),
+        ]),
     ])
 
 
@@ -436,34 +415,34 @@ def _tab_fondi_pensione():
 # contenuto e aggiungi una riga qui sotto. Le tab restano tutte nel DOM e si
 # mostrano/nascondono via callback, così le callback interne di ognuna
 # restano sempre agganciate.
+# Ordine scelto dall'utente (28/11/2026): Indipendenza Finanziaria per prima.
 _TABS_CLIENTI = [
-    ('tab-fondi-pensione', '🏦 Fondi Pensione', _tab_fondi_pensione),
     ('tab-pianificazione', '🎯 Indipendenza Finanziaria', pianificazione.layout),
+    ('tab-fondi-pensione', '🏦 Fondi Pensione', _tab_fondi_pensione),
 ]
+# Le stesse voci per la tendina «Tabs Strumenti» del cellulare: [(etichetta, valore)]
+_CLI_SOTTOTAB = [(lbl, val) for val, lbl, _fn in _TABS_CLIENTI]
 
 
 def serve_layout():
     return html.Div([
         make_navbar('Clienti'),
         html.Div([
-            html.H2('Clienti',
-                    style={'color': '#1a3a6b', 'fontSize': '20px', 'margin': '0 0 4px'}),
-            html.Div('Strumenti di analisi dedicati ai clienti.',
-                     style={'color': '#666', 'fontSize': '12px', 'marginBottom': '14px'}),
-            # `serve_layout` è una funzione: senza persistence a ogni ricarica
-            # della pagina si tornerebbe sempre sulla prima sotto-tab.
+            # Sotto-tab come nel Calendario: sul computer i dcc.Tabs, sul cellulare la
+            # tendina «Tabs Strumenti». `serve_layout` è una funzione: senza persistence
+            # a ogni ricarica si tornerebbe sempre sulla prima sotto-tab.
             dcc.Tabs(id='cli-tabs', value=_TABS_CLIENTI[0][0],
                      persistence=True, persistence_type='session',
-                     colors={'border': '#dee2e6', 'primary': '#1a3a6b',
-                             'background': '#f0f4fa'},
-                     style={'marginBottom': '10px', 'width': 'fit-content'},
-                     children=[dcc.Tab(label=lbl, value=val,
-                                       style=_TAB_STYLE, selected_style=_TAB_SEL)
-                               for val, lbl, _fn in _TABS_CLIENTI]),
+                     parent_className='nb-nascondi-cell',
+                     children=[dcc.Tab(label=lbl, value=val)
+                               for val, lbl, _fn in _TABS_CLIENTI],
+                     style={'marginBottom': '14px'}),
+            tendina_cell('cli-tendina', _CLI_SOTTOTAB),
             *[html.Div(fn(), id={'type': 'cli-tab', 'index': val},
                        style={'display': 'block' if i == 0 else 'none'})
               for i, (val, _lbl, fn) in enumerate(_TABS_CLIENTI)],
-        ], style={'padding': '112px 5% 32px', 'fontFamily': 'Inter, sans-serif'}),
+        ], className='cli-pagina',
+           style={'padding': '112px 5% 32px', 'fontFamily': 'Inter, sans-serif'}),
     ])
 
 
@@ -477,6 +456,32 @@ app.layout = serve_layout
 def _cli_switch_tab(tab):
     return [{'display': 'block'} if val == tab else {'display': 'none'}
             for val, _lbl, _fn in _TABS_CLIENTI]
+
+
+# Sul cellulare i sotto-tab sono la tendina «Tabs Strumenti» (come Calendario e Portafoglio)
+@app.callback(
+    Output('cli-tabs', 'value'),
+    Input({'type': 'cli-tendina-voce', 'index': ALL}, 'n_clicks'),
+    prevent_initial_call=True,
+)
+def _cli_tendina_scegli(clicks):
+    tid = ctx.triggered_id
+    if not tid or not any(clicks):
+        raise PreventUpdate
+    return tid['index']
+
+
+app.clientside_callback(
+    """function (val) {
+        var voci = %s, lab = voci[0][0];
+        voci.forEach(function (v) { if (v[1] === val) lab = v[0]; });
+        return [lab, voci.map(function (v) {
+            return v[1] === val ? 'nb-tendina-voce nb-attiva' : 'nb-tendina-voce'; })];
+    }""" % json.dumps(_CLI_SOTTOTAB),
+    Output('cli-tendina-att', 'children'),
+    Output({'type': 'cli-tendina-voce', 'index': ALL}, 'className'),
+    Input('cli-tabs', 'value'),
+)
 
 
 @app.callback(
